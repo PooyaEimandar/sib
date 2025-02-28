@@ -8,13 +8,7 @@ edition = "2024"
 keywords = ["sib", "networking", "real-time", "streaming", "web"]
 license = "Apache-2.0"
 repository = "https://github.com/PooyaEimandar/sib"
-categories = [
-    "development-tools",
-    "network-programming",
-    "web-programming",
-    "asynchronous",
-    "real-time",
-]
+categories = ["development-tools"]
 readme = "README.md"
 
 
