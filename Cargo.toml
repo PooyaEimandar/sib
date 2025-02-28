@@ -1,6 +1,21 @@
 [package]
 name = "sib"
-version = "0.1.0"
+version = "0.0.1"
+authors = ["mail@pooya.ai"]
+description = "A high-performance, secure, and cross-platform modules optimized for efficiency, scalability, and reliability."
+documentation = "https://docs.rs/sib"
 edition = "2024"
+keywords = ["sib", "networking", "real-time", "streaming", "web"]
+license = "Apache-2.0"
+repository = "https://github.com/PooyaEimandar/sib"
+categories = [
+    "development-tools",
+    "network-programming",
+    "web-programming",
+    "asynchronous",
+    "real-time",
+]
+readme = "README.md"
+
 
 [dependencies]
