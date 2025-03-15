@@ -335,18 +335,3 @@ impl Server {
         }
     }
 }
-
-#[test]
-fn test() -> anyhow::Result<()> {
-    let mut server = Server::new("0.0.0.0".to_owned(), 8443);
-    server.set_cert_path(
-        "/Users/pooyaeimandar/Codes/PooyaEimandar/sib-old/cert/arium.gg/chain.pem".to_owned(),
-    );
-    server.set_key_path(
-        "/Users/pooyaeimandar/Codes/PooyaEimandar/sib-old/cert/arium.gg/key.pem".to_owned(),
-    );
-    server.add_route(format!("GET /").to_owned(), "/Users/pooyaeimandar/Codes/arium-gg/arium/target/wasm32-unknown-unknown/debug/landing.wasm".to_owned());
-    let _ = server.run_forever();
-
-    Ok(())
-}
