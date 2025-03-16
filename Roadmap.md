@@ -3,4 +3,3 @@
 [x] Http3 server based on Quiche
 [x] FDB connection pool
 [x] Memcached connection pool
-[] Integrate Wasmer for isolated controllers and services
