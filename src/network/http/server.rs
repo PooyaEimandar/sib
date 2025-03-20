@@ -1,6 +1,5 @@
 use super::handler::HandlerFn;
 use crate::network::http::handler;
-use anyhow::Ok;
 use core::time::Duration;
 use futures::StreamExt;
 use pingora::{listeners::TcpSocketOptions, protocols::TcpKeepalive, services::Service};
@@ -110,6 +109,8 @@ impl Server {
                 self.key_path.clone(),
                 self.handler.clone(),
             );
+
+            // Run h3 on a separate thread via tokio
             std::thread::spawn(move || -> anyhow::Result<()> {
                 tokio::runtime::Runtime::new()?.block_on(h3_server)?;
                 Ok(())

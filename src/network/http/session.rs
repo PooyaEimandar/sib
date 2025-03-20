@@ -2,7 +2,7 @@ use bytes::Bytes;
 use futures::SinkExt;
 use http::{HeaderMap, HeaderName, HeaderValue};
 use pingora::{http::ResponseHeader, protocols::http::ServerSession};
-use std::{str::FromStr, sync::Arc, time::Duration};
+use std::{collections::HashMap, str::FromStr, sync::Arc, time::Duration};
 use tokio_quiche::{
     buf_factory::BufFactory,
     http3::{
@@ -25,6 +25,7 @@ pub struct Session {
     method: String,
     path: String,
     host: String,
+    queries: HashMap<String, Vec<String>>,
     res_headers: Option<http::HeaderMap>,
     h2: Option<ServerSession>,
     h3: Option<H3Session>,
@@ -36,6 +37,7 @@ impl Default for Session {
             method: "".to_owned(),
             path: "".to_owned(),
             host: "".to_owned(),
+            queries: HashMap::new(),
             res_headers: None,
             h2: None,
             h3: None,
@@ -50,7 +52,7 @@ impl Session {
         // Extract Method and Path (first part)
         let mut first_part = parts.next().unwrap_or("").split_whitespace();
         let method = first_part.next().unwrap_or("");
-        let path = first_part.next().unwrap_or("");
+        let mut path = first_part.next().unwrap_or("").to_string();
 
         // Extract Host header (second part)
         let host = parts
@@ -58,10 +60,14 @@ impl Session {
             .map(|s| s.trim_start_matches("Host: ").trim())
             .unwrap_or("");
 
+        path = Self::normalize_slashes(&path);
+        let queries = Self::parse_query_params(&mut path);
+
         Self {
             method: method.to_string(),
             path: path.to_string(),
             host: host.to_string(),
+            queries,
             h2: Some(session),
             ..Default::default()
         }
@@ -113,10 +119,15 @@ impl Session {
             }
         }
 
+        // Normalize path by removing consecutive slashes
+        path = Self::normalize_slashes(&path);
+        let queries = Self::parse_query_params(&mut path);
+
         Self {
             method,
             path,
             host,
+            queries,
             h3: Some(H3Session {
                 _stream_id: stream_id,
                 headers: http_headers,
@@ -129,6 +140,75 @@ impl Session {
         }
     }
 
+    /// Normalizes a path by removing consecutive `/`
+    fn normalize_slashes(path: &str) -> String {
+        let mut result = String::new();
+        let mut prev_was_slash = false;
+
+        for c in path.chars() {
+            if c == '/' {
+                if prev_was_slash {
+                    continue; // Skip duplicate slashes
+                }
+                prev_was_slash = true;
+            } else {
+                prev_was_slash = false;
+            }
+            result.push(c);
+        }
+
+        result
+    }
+
+    /// Decodes percent-encoded characters in a string (e.g., `%20` -> ` `)
+    fn percent_decode(input: &str) -> String {
+        let mut decoded = String::new();
+        let mut chars = input.chars();
+
+        while let Some(c) = chars.next() {
+            if c == '%' {
+                if let (Some(h1), Some(h2)) = (chars.next(), chars.next()) {
+                    if let Ok(byte) = u8::from_str_radix(&format!("{}{}", h1, h2), 16) {
+                        decoded.push(byte as char);
+                        continue;
+                    }
+                }
+            }
+            decoded.push(c);
+        }
+        decoded
+    }
+
+    /// Parses query parameters from a mutable path and removes the query part
+    fn parse_query_params(path: &mut String) -> HashMap<String, Vec<String>> {
+        if let Some(pos) = path.find('?') {
+            let query = path[pos + 1..].to_string();
+            path.truncate(pos); // Remove query string from path
+
+            let mut params = HashMap::new();
+            for pair in query.split('&') {
+                let mut parts = pair.splitn(2, '=');
+                let key = parts.next().map(Self::percent_decode).unwrap_or_default();
+                let value = parts.next().map(Self::percent_decode).unwrap_or_default();
+
+                if !key.is_empty() {
+                    params.entry(key).or_insert_with(Vec::new).push(value);
+                }
+            }
+            params
+        } else {
+            HashMap::new() // No query parameters
+        }
+    }
+
+    pub fn get_query_param(&self, key: &str) -> Option<Vec<String>> {
+        self.queries.get(key).cloned()
+    }
+
+    pub fn get_query_params(&self) -> &HashMap<String, Vec<String>> {
+        &self.queries
+    }
+
     pub fn get_method(&self) -> &str {
         self.method.as_str()
     }
@@ -139,6 +219,20 @@ impl Session {
 
     pub fn get_host(&self) -> &str {
         self.host.as_str()
+    }
+
+    pub fn get_is_h1(&self) -> bool {
+        self.h2
+            .as_ref()
+            .map(|session| !session.is_http2())
+            .unwrap_or(false)
+    }
+
+    pub fn get_is_h2(&self) -> bool {
+        self.h2
+            .as_ref()
+            .map(|session| session.is_http2())
+            .unwrap_or(false)
     }
 
     pub fn get_is_h3(&self) -> bool {
@@ -155,12 +249,10 @@ impl Session {
     }
 
     pub fn get_req_headers(&self) -> Option<&http::HeaderMap> {
-        if let Some(h2) = &self.h2 {
-            return Some(&h2.req_header().headers);
-        } else if let Some(h3) = &self.h3 {
-            return Some(&h3.headers);
-        }
-        None
+        self.h2
+            .as_ref()
+            .map(|h2| &h2.req_header().headers)
+            .or_else(|| self.h3.as_ref().map(|h3| &h3.headers))
     }
 
     pub async fn get_req_body(&mut self, timeout: Duration) -> anyhow::Result<Option<Bytes>> {
@@ -237,39 +329,22 @@ impl Session {
 
     pub async fn send_status(&mut self, status_code: http::StatusCode) -> anyhow::Result<()> {
         if let Some(h2) = &mut self.h2 {
-            // Build HTTP/2 response headers
-            let mut response = match ResponseHeader::build_no_case(status_code, None) {
-                Ok(res) => res,
-                Err(_) => anyhow::bail!("Failed to build response header"),
-            };
-
+            let mut response = ResponseHeader::build_no_case(status_code, None)?;
             if let Some(h2_headers) = &self.res_headers {
                 for (key, value) in h2_headers {
-                    if response.append_header(key, value).is_err() {
-                        anyhow::bail!("Failed to append header");
-                    }
+                    response.append_header(key, value)?;
                 }
             }
-
-            // Send response headers
-            if h2.write_response_header(Box::new(response)).await.is_err() {
-                anyhow::bail!("Failed to send response headers");
-            }
+            h2.write_response_header(Box::new(response)).await?;
         } else if let Some(h3) = &mut self.h3 {
-            let mut res_headers = Vec::<tokio_quiche::quiche::h3::Header>::new();
-            res_headers.push(tokio_quiche::quiche::h3::Header::new(
-                ":status".as_bytes(),
-                status_code.as_str().as_bytes(),
-            ));
+            let mut res_headers = Vec::with_capacity(10); // Preallocate
+            res_headers.push(h3::Header::new(b":status", status_code.as_str().as_bytes()));
 
             if let Some(h3_headers) = &self.res_headers {
                 res_headers.extend(h3_headers.iter().filter_map(|(k, v)| {
-                    v.to_str().ok().map(|v_str| {
-                        tokio_quiche::quiche::h3::Header::new(
-                            k.as_str().as_bytes(),
-                            v_str.as_bytes(),
-                        )
-                    })
+                    v.to_str()
+                        .ok()
+                        .map(|v_str| h3::Header::new(k.as_str().as_bytes(), v_str.as_bytes()))
                 }));
             }
 
