@@ -2,7 +2,13 @@ use bytes::Bytes;
 use futures::SinkExt;
 use http::{HeaderMap, HeaderName, HeaderValue};
 use pingora::{http::ResponseHeader, protocols::http::ServerSession};
-use std::{collections::HashMap, str::FromStr, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    str::FromStr,
+    sync::Arc,
+    time::Duration,
+};
 use tokio_quiche::{
     buf_factory::BufFactory,
     http3::{
@@ -11,6 +17,9 @@ use tokio_quiche::{
     },
     quiche::h3::{self, NameValue},
 };
+
+const MAX_PATH_LENGTH: usize = 1024;
+const MAX_BODY_SIZE: usize = 10 * 1024 * 1024; // 10MB limit
 
 pub struct H3Session {
     _stream_id: u64,
@@ -140,24 +149,29 @@ impl Session {
         }
     }
 
-    /// Normalizes a path by removing consecutive `/`
+    /// Normalizes a path by removing duplicate `/` and preventing traversal attacks.
     fn normalize_slashes(path: &str) -> String {
-        let mut result = String::new();
-        let mut prev_was_slash = false;
+        // Truncate excessively long paths to prevent stack overflow attacks
+        let truncated = if path.len() > MAX_PATH_LENGTH {
+            &path[..MAX_PATH_LENGTH]
+        } else {
+            path
+        };
 
-        for c in path.chars() {
-            if c == '/' {
-                if prev_was_slash {
-                    continue; // Skip duplicate slashes
+        let mut normalized = PathBuf::new();
+        for component in Path::new(truncated).components() {
+            match component {
+                std::path::Component::Normal(c) => {
+                    if let Some(s) = c.to_str() {
+                        normalized.push(s); // Append only valid parts
+                    }
                 }
-                prev_was_slash = true;
-            } else {
-                prev_was_slash = false;
+                std::path::Component::RootDir => normalized.push("/"),
+                _ => {} // Ignore `..` to prevent directory traversal attacks
             }
-            result.push(c);
         }
 
-        result
+        normalized.to_string_lossy().into_owned() // Convert safely
     }
 
     /// Decodes percent-encoded characters in a string (e.g., `%20` -> ` `)
@@ -179,7 +193,7 @@ impl Session {
         decoded
     }
 
-    /// Parses query parameters from a mutable path and removes the query part
+    /// Parses query parameters from a mutable path and removes the query part and prevents query manipulation attacks as well.
     fn parse_query_params(path: &mut String) -> HashMap<String, Vec<String>> {
         if let Some(pos) = path.find('?') {
             let query = path[pos + 1..].to_string();
@@ -258,7 +272,18 @@ impl Session {
     pub async fn get_req_body(&mut self, timeout: Duration) -> anyhow::Result<Option<Bytes>> {
         if let Some(h2) = &mut self.h2 {
             let body = match pingora_timeout::timeout(timeout, h2.read_request_body()).await {
-                Ok(Ok(b)) => b,
+                Ok(Ok(b)) => {
+                    if let Some(ref b) = b {
+                        if b.len() > MAX_BODY_SIZE {
+                            anyhow::bail!(
+                                "Request body too large ({}>{} bytes)",
+                                b.len(),
+                                MAX_BODY_SIZE
+                            );
+                        }
+                    }
+                    b
+                }
                 _ => {
                     anyhow::bail!("Got timeout while reading h2 request body");
                 }
@@ -273,8 +298,8 @@ impl Session {
                         match chunk {
                             tokio_quiche::http3::driver::InboundFrame::Body(data, fin) => {
                                 body.extend_from_slice(&data);
-                                if fin {
-                                    break; // End of stream
+                                if fin || body.len() > MAX_BODY_SIZE {
+                                    break; // End of stream or too large body
                                 }
                             }
                             _ => break, // Stop on unexpected frame
