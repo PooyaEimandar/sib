@@ -1,6 +1,6 @@
 [package]
 name = "sib"
-version = "0.0.1"
+version = "0.0.2"
 authors = ["mail@pooya.ai"]
 description = "A high-performance, secure, and cross-platform modules optimized for efficiency, scalability, and reliability."
 documentation = "https://docs.rs/sib"
@@ -38,7 +38,6 @@ tokio = { version = "1.44.1", optional = true, default-features = false, feature
 ] }
 tokio-stream = { version = "0.1.17" }
 tokio-quiche = { version = "0.2.1", optional = true, default-features = false }
-rand = { version = "0.9.0" }
 futures = { version = "0.3.17" }
 foundationdb = { version = "0.9.2", optional = true, default-features = false, features = [
     "uuid",
