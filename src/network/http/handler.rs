@@ -7,6 +7,8 @@ use pingora::services::listening::Service;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use crate::s_error;
+
 use super::session::Session;
 
 pub type HandlerFn =
@@ -33,7 +35,7 @@ impl HttpServerApp for H2Handler {
         if let Some(p_handler) = &self.handler {
             let session = Session::new_h2(p_session);
             if let Err(e) = p_handler(session).await {
-                eprintln!("Handler error: {:?}", e);
+                s_error!("Handler error: {:?}", e);
             }
         }
 

@@ -5,6 +5,6 @@
 [x] Memcached connection pool
 [x] Static file server layer
 [x] Log for console, file and clickhouse
+[x] Websocket server
 [] TCP client & server
 [] UDP client & server
-[] Websocket client & server

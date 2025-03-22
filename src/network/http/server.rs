@@ -1,5 +1,5 @@
 use super::handler::HandlerFn;
-use crate::network::http::handler;
+use crate::{network::http::handler, s_error};
 use core::time::Duration;
 use futures::StreamExt;
 use pingora::{listeners::TcpSocketOptions, protocols::TcpKeepalive, services::Service};
@@ -138,6 +138,14 @@ impl Server {
     }
 
     fn create_h2_server(&self, p_address_port: String) -> anyhow::Result<pingora::server::Server> {
+        // Validate certificate and key paths
+        if !std::path::Path::new(&self.cert_path).exists() {
+            anyhow::bail!("Certificate file does not exist: {}", self.cert_path);
+        }
+        if !std::path::Path::new(&self.key_path).exists() {
+            anyhow::bail!("Private key file does not exist: {}", self.key_path);
+        }
+
         let opt = None;
         let mut h2_server = pingora::server::Server::new(opt)?;
         h2_server.bootstrap();
@@ -153,8 +161,7 @@ impl Server {
         let mut tls_settings = pingora::listeners::tls::TlsSettings::intermediate(
             self.cert_path.as_str(),
             self.key_path.as_str(),
-        )
-        .expect("Failed to load TLS certificate or key");
+        )?;
         tls_settings.enable_h2();
 
         let mut service = handler::service(self.handler.clone());
@@ -228,7 +235,7 @@ impl Server {
                             h3_audit_stats,
                         );
                         if let Err(e) = p_handler(session).await {
-                            eprintln!("Handler error: {:?}", e);
+                            s_error!("Handler error: {:?}", e);
                         }
                     }
                 }

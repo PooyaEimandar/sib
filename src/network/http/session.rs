@@ -1,7 +1,9 @@
-use bytes::Bytes;
+use base64::Engine;
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::SinkExt;
 use http::{HeaderMap, HeaderName, HeaderValue};
 use pingora::{http::ResponseHeader, protocols::http::ServerSession};
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -18,8 +20,40 @@ use tokio_quiche::{
     quiche::h3::{self, NameValue},
 };
 
+use crate::s_error;
+
 const MAX_PATH_LENGTH: usize = 1024;
 const MAX_BODY_SIZE: usize = 10 * 1024 * 1024; // 10MB limit
+const MAX_WS_PAYLOAD_SIZE: usize = 64 * 1024 * 1024; // 64MB limit
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum WsOpCode {
+    Continuation = 0x0,
+    Text = 0x1,
+    Binary = 0x2,
+    Close = 0x8,
+    Ping = 0x9,
+    Pong = 0xA,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum WsCloseCode {
+    Normal = 1000,
+    GoingAway = 1001,
+    ProtocolError = 1002,
+    UnsupportedData = 1003,
+    InvalidPayloadData = 1007,
+    PolicyViolation = 1008,
+    MessageTooBig = 1009,
+    MandatoryExtension = 1010,
+    InternalServerError = 1011,
+}
+
+impl WsCloseCode {
+    pub fn as_u16(self) -> u16 {
+        self as u16
+    }
+}
 
 pub struct H3Session {
     _stream_id: u64,
@@ -109,7 +143,7 @@ impl Session {
                     let name = match HeaderName::from_bytes(header.name()) {
                         Ok(n) => n,
                         Err(_) => {
-                            eprintln!("Invalid header name: {:?}", header.name());
+                            s_error!("Invalid header name: {:?}", header.name());
                             continue; // Skip invalid headers
                         }
                     };
@@ -118,7 +152,7 @@ impl Session {
                     let value = match HeaderValue::from_bytes(header.value()) {
                         Ok(v) => v,
                         Err(_) => {
-                            eprintln!("Invalid header value for {:?}: {:?}", name, header.value());
+                            s_error!("Invalid header value for {:?}: {:?}", name, header.value());
                             continue; // Skip invalid headers
                         }
                     };
@@ -147,6 +181,40 @@ impl Session {
             }),
             ..Default::default()
         }
+    }
+
+    /// Upgrades the session to a WebSocket connection.
+    pub async fn upgrade_to_websocket(&mut self) -> anyhow::Result<()> {
+        if let Some(h2) = &mut self.h2 {
+            // Check if the request is a WebSocket upgrade request
+            if h2
+                .get_header(http::header::UPGRADE)
+                .map(|v| v.as_bytes() == b"websocket")
+                .unwrap_or(false)
+            {
+                let key = h2
+                    .get_header(http::header::SEC_WEBSOCKET_KEY)
+                    .map(|v| v.as_bytes())
+                    .unwrap_or_default();
+
+                let mut hasher = Sha256::new();
+                hasher.update(key);
+                hasher.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+
+                let result = hasher.finalize();
+                let sec_ws_accept_value = base64::engine::general_purpose::STANDARD.encode(result);
+
+                // Perform the WebSocket handshake
+                let mut response = ResponseHeader::build(101, None)?;
+                response.append_header(http::header::UPGRADE, "websocket")?;
+                response.append_header(http::header::CONNECTION, "Upgrade")?;
+                response.append_header(http::header::SEC_WEBSOCKET_ACCEPT, sec_ws_accept_value)?;
+                h2.write_response_header(Box::new(response)).await?;
+
+                return Ok(());
+            }
+        }
+        anyhow::bail!("Not a WebSocket upgrade request");
     }
 
     /// Normalizes a path by removing duplicate `/` and preventing traversal attacks.
@@ -253,7 +321,7 @@ impl Session {
         self.h3.is_some()
     }
 
-    pub fn get_req_header(&self, key: http::HeaderName) -> Option<&http::HeaderValue> {
+    pub fn read_req_header(&self, key: http::HeaderName) -> Option<&http::HeaderValue> {
         if let Some(h2) = &self.h2 {
             return h2.get_header(key);
         } else if let Some(h3) = &self.h3 {
@@ -262,16 +330,148 @@ impl Session {
         None
     }
 
-    pub fn get_req_headers(&self) -> Option<&http::HeaderMap> {
+    pub async fn read_ws_msg(&mut self, timeout: Duration) -> anyhow::Result<(Bytes, WsOpCode)> {
+        if let Some(h2) = &mut self.h2 {
+            let mut full_payload = Vec::new();
+            let mut message_opcode: Option<WsOpCode> = None;
+
+            loop {
+                // Read raw frame
+                let body_opt = pingora::time::timeout(timeout, h2.read_request_body()).await??;
+                let buf =
+                    body_opt.ok_or_else(|| anyhow::anyhow!("Failed to read WebSocket frame"))?;
+                let mut cursor = std::io::Cursor::new(&buf);
+
+                // FIN + OPCODE
+                let b0 = cursor.get_u8();
+                let fin = b0 & 0b1000_0000 != 0;
+                let opcode_raw = b0 & 0x0F;
+                let opcode = match opcode_raw {
+                    0x0 => WsOpCode::Continuation,
+                    0x1 => WsOpCode::Text,
+                    0x2 => WsOpCode::Binary,
+                    0x8 => WsOpCode::Close,
+                    0x9 => WsOpCode::Ping,
+                    0xA => WsOpCode::Pong,
+                    code => anyhow::bail!("Unsupported opcode: {}", code),
+                };
+
+                // LEN + MASK
+                let b1 = cursor.get_u8();
+                let masked = b1 & 0x80 != 0;
+                let mut payload_len = (b1 & 0x7F) as usize;
+
+                if payload_len == 126 {
+                    payload_len = cursor.get_u16() as usize;
+                } else if payload_len == 127 {
+                    payload_len = cursor.get_u64() as usize;
+                }
+
+                // Validate control frame size
+                if matches!(opcode, WsOpCode::Ping | WsOpCode::Pong | WsOpCode::Close)
+                    && payload_len > 125
+                {
+                    anyhow::bail!("Control frame payload too large");
+                }
+
+                // Mask key
+                let mask_key = if masked {
+                    let mut key = [0u8; 4];
+                    cursor.copy_to_slice(&mut key);
+                    Some(key)
+                } else {
+                    None
+                };
+
+                // Payload
+                if cursor.remaining() < payload_len {
+                    anyhow::bail!("Invalid frame length");
+                }
+
+                let mut payload = BytesMut::with_capacity(payload_len);
+                payload.resize(payload_len, 0);
+                cursor.copy_to_slice(&mut payload[..]);
+
+                if let Some(mask) = mask_key {
+                    for i in 0..payload_len {
+                        payload[i] ^= mask[i % 4];
+                    }
+                }
+
+                // Handle control frames immediately
+                match opcode {
+                    WsOpCode::Ping => {
+                        let pong = Self::ws_frame(WsOpCode::Pong, &payload.freeze(), true);
+                        h2.write_response_body(pong, false).await?;
+                        continue; // Continue reading next frame
+                    }
+
+                    WsOpCode::Pong => {
+                        continue; // Ignore pong frames
+                    }
+
+                    WsOpCode::Close => {
+                        let code = if payload.len() >= 2 {
+                            u16::from_be_bytes([payload[0], payload[1]])
+                        } else {
+                            1005 // No status code
+                        };
+                        let reason = if payload.len() > 2 {
+                            String::from_utf8_lossy(&payload[2..]).to_string()
+                        } else {
+                            String::new()
+                        };
+                        anyhow::bail!(
+                            "Connection closed by peer (code {}, reason: '{}')",
+                            code,
+                            reason
+                        );
+                    }
+
+                    WsOpCode::Text | WsOpCode::Binary => {
+                        if message_opcode.is_none() {
+                            message_opcode = Some(opcode);
+                        }
+                        full_payload.extend(payload);
+
+                        if full_payload.len() > MAX_WS_PAYLOAD_SIZE {
+                            anyhow::bail!("Fragmented WebSocket message too large (>64MB)");
+                        }
+                    }
+
+                    WsOpCode::Continuation => {
+                        if message_opcode.is_none() {
+                            anyhow::bail!("Unexpected continuation frame");
+                        }
+                        full_payload.extend(payload);
+
+                        if full_payload.len() > MAX_WS_PAYLOAD_SIZE {
+                            anyhow::bail!("Fragmented WebSocket message too large (>64MB)");
+                        }
+                    }
+                }
+
+                if fin {
+                    let final_opcode =
+                        message_opcode.ok_or_else(|| anyhow::anyhow!("Empty fragmented frame"))?;
+                    return Ok((Bytes::from(full_payload), final_opcode));
+                }
+            }
+        }
+
+        anyhow::bail!("WebSocket session not available");
+    }
+
+    pub fn read_req_headers(&self) -> Option<&http::HeaderMap> {
         self.h2
             .as_ref()
             .map(|h2| &h2.req_header().headers)
             .or_else(|| self.h3.as_ref().map(|h3| &h3.headers))
     }
 
-    pub async fn get_req_body(&mut self, timeout: Duration) -> anyhow::Result<Option<Bytes>> {
+    pub async fn read_req_body(&mut self, timeout: Duration) -> anyhow::Result<Option<Bytes>> {
         if let Some(h2) = &mut self.h2 {
-            let body = match pingora_timeout::timeout(timeout, h2.read_request_body()).await {
+            let body = match pingora::time::timeout(timeout, h2.read_request_body()).await {
                 Ok(Ok(b)) => {
                     if let Some(ref b) = b {
                         if b.len() > MAX_BODY_SIZE {
@@ -292,7 +492,7 @@ impl Session {
         } else if let Some(h3) = &mut self.h3 {
             // Properly read the h3 body in a non-blocking manner
             if !h3.read_fin {
-                let body = match pingora_timeout::timeout(timeout, async move {
+                let body = match pingora::time::timeout(timeout, async move {
                     let mut body = bytes::BytesMut::new();
                     while let Some(chunk) = h3.in_frame.recv().await {
                         match chunk {
@@ -329,6 +529,18 @@ impl Session {
             let header_name = HeaderName::from_str(key)?;
             let header_value = HeaderValue::from_str(value)?;
             headers.append(header_name, header_value);
+        }
+        Ok(())
+    }
+
+    pub fn insert_header(&mut self, key: &str, value: &str) -> anyhow::Result<()> {
+        if self.res_headers.is_none() {
+            self.res_headers = Some(http::HeaderMap::new());
+        }
+        if let Some(headers) = &mut self.res_headers {
+            let header_name = HeaderName::from_str(key)?;
+            let header_value = HeaderValue::from_str(value)?;
+            headers.insert(header_name, header_value);
         }
         Ok(())
     }
@@ -405,5 +617,71 @@ impl Session {
             h3.out_frame.close();
         }
         Ok(())
+    }
+
+    pub async fn send_ws_msg(
+        &mut self,
+        opcode: WsOpCode,
+        payload: &Bytes,
+        fin: bool,
+    ) -> anyhow::Result<()> {
+        if let Some(h2) = &mut self.h2 {
+            // Send the frame
+            h2.write_response_body(Self::ws_frame(opcode, payload, fin), false)
+                .await?;
+            Ok(())
+        } else {
+            anyhow::bail!("WebSocket session not available");
+        }
+    }
+
+    pub async fn send_ws_close(&mut self, code: WsCloseCode, reason: &str) -> anyhow::Result<()> {
+        if let Some(h2) = &mut self.h2 {
+            let mut payload = BytesMut::with_capacity(2 + reason.len());
+            payload.put_u16(code.as_u16()); // Close code
+            payload.put_slice(reason.as_bytes()); // Reason
+
+            let payload = payload.freeze();
+            h2.write_response_body(Self::ws_frame(WsOpCode::Close, &payload, true), false)
+                .await?;
+            Ok(())
+        } else {
+            anyhow::bail!("WebSocket session not available");
+        }
+    }
+
+    fn ws_frame(opcode: WsOpCode, payload: &Bytes, fin: bool) -> Bytes {
+        // Estimate size: 2 + len + extended len + payload
+        let estimated_capacity = 2 + payload.len() + 8;
+        let mut frame = BytesMut::with_capacity(estimated_capacity);
+
+        // First byte: FIN + OpCode
+        let opcode_val = match opcode {
+            WsOpCode::Continuation => 0x0,
+            WsOpCode::Text => 0x1,
+            WsOpCode::Binary => 0x2,
+            WsOpCode::Close => 0x8,
+            WsOpCode::Ping => 0x9,
+            WsOpCode::Pong => 0xA,
+        };
+        let first_byte = if fin { 0x80 | opcode_val } else { opcode_val };
+        frame.put_u8(first_byte);
+
+        // Second byte: No mask (server-to-client)
+        let len = payload.len();
+        if len < 126 {
+            frame.put_u8(len as u8);
+        } else if len <= u16::MAX as usize {
+            frame.put_u8(126);
+            frame.put_u16(len as u16);
+        } else {
+            frame.put_u8(127);
+            frame.put_u64(len as u64);
+        }
+
+        // Payload
+        frame.put_slice(payload);
+
+        frame.freeze() // Converts BytesMut → Bytes
     }
 }
