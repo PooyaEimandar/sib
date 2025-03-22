@@ -4,7 +4,7 @@
 [x] FDB connection pool
 [x] Memcached connection pool
 [x] Static file server layer
-[] Service server layer
+[x] Log for console, file and clickhouse
 [] TCP client & server
 [] UDP client & server
 [] Websocket client & server
