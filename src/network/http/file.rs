@@ -4,7 +4,6 @@ use httpdate::HttpDate;
 use lru::LruCache;
 use memmap2::Mmap;
 use mime_guess::{Mime, mime};
-use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -12,7 +11,7 @@ use std::{
     io::{BufReader, BufWriter},
     num::NonZeroUsize,
     ops::Range,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::Arc,
     time::SystemTime,
 };
@@ -25,7 +24,7 @@ use crate::network::http::session::{HTTPMethod, Session};
 
 const CHUNK_SIZE: usize = 16 * 1024;
 const MIN_BYTES: u64 = 1024;
-const CACHE_PERSIST_PATH: &str = "./sib_static_server_cache.json";
+const CACHE_PERSIST_PATH: &str = "./sib_asset_cache.json";
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum EncodingType {
@@ -45,32 +44,6 @@ pub struct FileInfo {
 }
 
 pub type FileCache = Arc<RwLock<LruCache<String, FileInfo>>>;
-
-pub fn start_file_watcher<P: AsRef<Path>>(
-    watch_path: P,
-    file_cache: FileCache,
-) -> notify::Result<RecommendedWatcher> {
-    let cache = file_cache.clone();
-
-    let mut watcher = RecommendedWatcher::new(
-        move |res: Result<notify::Event, notify::Error>| {
-            if let Ok(event) = res {
-                if matches!(event.kind, EventKind::Modify(_)) {
-                    if let Some(path) = event.paths.first() {
-                        if let Ok(canon_path) = std::fs::canonicalize(path) {
-                            let key = canon_path.to_string_lossy().to_string();
-                            let mut cache = futures::executor::block_on(cache.write());
-                            cache.pop(&key);
-                        }
-                    }
-                }
-            }
-        },
-        notify::Config::default(),
-    )?;
-    watcher.watch(watch_path.as_ref(), RecursiveMode::Recursive)?;
-    Ok(watcher)
-}
 
 pub async fn serve(
     session: &mut Session,
@@ -164,8 +137,8 @@ pub async fn serve(
 
         file_path = match encoding {
             EncodingType::Gzip => parent.join("gz").join(format!("{filename}.{file_ext}.gz")),
-            EncodingType::Br => parent.join("gz").join(format!("{filename}.{file_ext}.br")),
-            EncodingType::Zstd => parent.join("gz").join(format!("{filename}.{file_ext}.zst")),
+            EncodingType::Br => parent.join("br").join(format!("{filename}.{file_ext}.br")),
+            EncodingType::Zstd => parent.join("zs").join(format!("{filename}.{file_ext}.zs")),
             EncodingType::None => file_info.path.clone(),
         };
 

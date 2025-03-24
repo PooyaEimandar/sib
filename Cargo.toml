@@ -39,9 +39,6 @@ lru = { version = "0.13.0", optional = true, default-features = false, features 
 ] }
 memmap2 = { version = "0.9.5", optional = true, default-features = false }
 mime_guess = { version = "2.0.5", optional = true, default-features = false }
-notify = { version = "8.0.0", optional = true, default-features = false, features = [
-    "macos_fsevent",
-] }
 pingora = { version = "0.4.0", optional = true, default-features = false, features = [
     "boringssl",
     "time",
@@ -77,7 +74,6 @@ sib-http = [
     "lru",
     "memmap2",
     "mime_guess",
-    "notify",
     "pingora",
     "serde",
     "serde_json",
