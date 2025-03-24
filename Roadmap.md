@@ -2,8 +2,7 @@
 [x] Http1.1/2 server based on Pingora
 [x] Http3 server based on Quiche
 [x] FDB connection pool
-[x] Memcached connection pool
-[x] Static file server layer
+[x] Static file server
 [x] Log for console, file and clickhouse
 [x] Websocket server
 [] TCP client & server
