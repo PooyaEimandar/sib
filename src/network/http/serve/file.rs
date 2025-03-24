@@ -32,7 +32,7 @@ pub async fn serve(session: &mut Session, path: &str) -> anyhow::Result<()> {
         _ => return session.send_status_eom(StatusCode::NOT_FOUND).await,
     };
 
-    // ETag from last modified
+    // ETag from last modified + file size
     let modified = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
     let etag = format!(
         "\"{}-{}\"",
@@ -50,14 +50,15 @@ pub async fn serve(session: &mut Session, path: &str) -> anyhow::Result<()> {
     // Determine MIME type
     let mime_type = mime_guess::from_path(&canonical).first_or_octet_stream();
 
-    //Determine compression encoding
+    // Determine compression encoding
     let encoding = get_encoding(
         session.read_req_header(http::header::ACCEPT_ENCODING),
         &mime_type,
     );
 
     const MIN_BYTES: u64 = 1024;
-    let file_path = if meta.len() > MIN_BYTES {
+    let mut file_path = canonical.clone();
+    if meta.len() > MIN_BYTES {
         let parent = canonical.parent().unwrap();
         let filename = canonical.file_name().unwrap().to_str().unwrap();
         let file_ext = canonical
@@ -66,33 +67,18 @@ pub async fn serve(session: &mut Session, path: &str) -> anyhow::Result<()> {
             .to_str()
             .unwrap_or_default();
 
-        match encoding {
-            EncodingType::None => canonical,
-            EncodingType::Gzip => {
-                session.append_header(
-                    &http::header::CONTENT_ENCODING,
-                    HeaderValue::from_static("gzip"),
-                );
-                parent.join("gz").join(format!("{filename}.{file_ext}.gz"))
-            }
-            EncodingType::Br => {
-                session.append_header(
-                    &http::header::CONTENT_ENCODING,
-                    HeaderValue::from_static("br"),
-                );
-                parent.join("br").join(format!("{filename}.{file_ext}.br"))
-            }
-            EncodingType::Zstd => {
-                session.append_header(
-                    &http::header::CONTENT_ENCODING,
-                    HeaderValue::from_static("zstd"),
-                );
-                parent.join("zs").join(format!("{filename}.{file_ext}.zs"))
-            }
+        file_path = match encoding {
+            EncodingType::Gzip => parent.join("gz").join(format!("{filename}.{file_ext}.gz")),
+            EncodingType::Br => parent.join("gz").join(format!("{filename}.{file_ext}.br")),
+            EncodingType::Zstd => parent.join("gz").join(format!("{filename}.{file_ext}.zst")),
+            EncodingType::None => canonical.clone(),
+        };
+
+        // If compressed file does not exist, fall back to original
+        if fs::metadata(&file_path).await.is_err() {
+            file_path = canonical.clone();
         }
-    } else {
-        canonical
-    };
+    }
 
     session.append_headers(&[
         (
@@ -101,6 +87,22 @@ pub async fn serve(session: &mut Session, path: &str) -> anyhow::Result<()> {
         ),
         (http::header::ETAG, HeaderValue::from_str(&etag)?),
     ]);
+
+    // Add Content-Encoding if applicable
+    if encoding != EncodingType::None {
+        let encoding_str = match encoding {
+            EncodingType::Gzip => Some("gzip"),
+            EncodingType::Br => Some("br"),
+            EncodingType::Zstd => Some("zstd"),
+            _ => None,
+        };
+        if let Some(enc) = encoding_str {
+            session.append_headers(&[(
+                http::header::CONTENT_ENCODING,
+                HeaderValue::from_static(enc),
+            )]);
+        }
+    }
 
     if session.get_method() == &HTTPMethod::Head {
         session.send_status_eom(StatusCode::OK).await?;
@@ -124,7 +126,6 @@ pub async fn serve(session: &mut Session, path: &str) -> anyhow::Result<()> {
     // Read & send chunks via pre-allocate buffer
     let mut buffer = BytesMut::with_capacity(CHUNK_SIZE);
     loop {
-        // Resize buffer to read into it
         buffer.resize(CHUNK_SIZE, 0);
 
         let num_read_bytes = match reader.read(&mut buffer).await {
@@ -139,21 +140,18 @@ pub async fn serve(session: &mut Session, path: &str) -> anyhow::Result<()> {
 
         let is_last_chunk = num_read_bytes < CHUNK_SIZE;
 
-        // Freeze the buffer into an immutable `Bytes` slice
         let chunk = buffer.split_to(num_read_bytes).freeze();
 
         session.send_body(chunk, is_last_chunk).await?;
 
-        // yield to the Tokio scheduler after sending each chunk makes the file streamer more friendly in high concurrency environments
+        // Cooperative multitasking
         tokio::task::yield_now().await;
     }
 
-    // Finally, send the end of the message
     session.send_eom().await
 }
 
 fn get_encoding(accept_encoding: Option<&HeaderValue>, mime: &Mime) -> EncodingType {
-    // Skip compression for already compressed media types (except SVG)
     if (mime.type_() == mime::IMAGE || mime.type_() == mime::AUDIO || mime.type_() == mime::VIDEO)
         && *mime != mime::IMAGE_SVG
     {
@@ -161,14 +159,10 @@ fn get_encoding(accept_encoding: Option<&HeaderValue>, mime: &Mime) -> EncodingT
     }
 
     let header = match accept_encoding.and_then(|h| h.to_str().ok()) {
-        Some(value) => value,
+        Some(value) => value.to_ascii_lowercase(),
         None => return EncodingType::None,
     };
 
-    // Convert to lowercase once and use efficient substring search
-    let header = header.to_ascii_lowercase();
-
-    // go for the encoding type in order
     if header.contains("zstd") {
         EncodingType::Zstd
     } else if header.contains("br") {
