@@ -55,6 +55,46 @@ impl WsCloseCode {
     }
 }
 
+/// Supported HTTPMethod. See the definitions in RFC2616 5.1.1
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum HTTPMethod {
+    Get,
+    Post,
+    Options,
+    Delete,
+    Head,
+    Connect,
+    ConnectUdp,
+    Put,
+    Trace,
+    Patch,
+    Sub,
+    Pub,
+    UnSub,
+    UnDefined,
+}
+
+impl HTTPMethod {
+    pub fn from_str(name: &str) -> Self {
+        match name {
+            "GET" => HTTPMethod::Get,
+            "POST" => HTTPMethod::Post,
+            "OPTIONS" => HTTPMethod::Options,
+            "DELETE" => HTTPMethod::Delete,
+            "HEAD" => HTTPMethod::Head,
+            "CONNECT" => HTTPMethod::Connect,
+            "CONNECT-UDP" => HTTPMethod::ConnectUdp,
+            "PUT" => HTTPMethod::Put,
+            "TRACE" => HTTPMethod::Trace,
+            "PATCH" => HTTPMethod::Patch,
+            "SUB" => HTTPMethod::Sub,
+            "PUB" => HTTPMethod::Pub,
+            "UNSUB" => HTTPMethod::UnSub,
+            _ => HTTPMethod::UnDefined,
+        }
+    }
+}
+
 pub struct H3Session {
     _stream_id: u64,
     headers: HeaderMap,
@@ -65,11 +105,11 @@ pub struct H3Session {
 }
 
 pub struct Session {
-    method: String,
+    method: HTTPMethod,
     path: String,
     host: String,
     queries: HashMap<String, Vec<String>>,
-    res_headers: Option<http::HeaderMap>,
+    res_headers: http::HeaderMap,
     h2: Option<ServerSession>,
     h3: Option<H3Session>,
 }
@@ -77,11 +117,11 @@ pub struct Session {
 impl Default for Session {
     fn default() -> Self {
         Self {
-            method: "".to_owned(),
+            method: HTTPMethod::UnDefined,
             path: "".to_owned(),
             host: "".to_owned(),
             queries: HashMap::new(),
-            res_headers: None,
+            res_headers: http::HeaderMap::new(),
             h2: None,
             h3: None,
         }
@@ -107,7 +147,7 @@ impl Session {
         let queries = Self::parse_query_params(&mut path);
 
         Self {
-            method: method.to_string(),
+            method: HTTPMethod::from_str(method),
             path: path.to_string(),
             host: host.to_string(),
             queries,
@@ -167,7 +207,7 @@ impl Session {
         let queries = Self::parse_query_params(&mut path);
 
         Self {
-            method,
+            method: HTTPMethod::from_str(&method),
             path,
             host,
             queries,
@@ -291,8 +331,8 @@ impl Session {
         &self.queries
     }
 
-    pub fn get_method(&self) -> &str {
-        self.method.as_str()
+    pub fn get_method(&self) -> &HTTPMethod {
+        &self.method
     }
 
     pub fn get_path(&self) -> &str {
@@ -521,40 +561,39 @@ impl Session {
         Ok(None)
     }
 
-    pub fn append_header(&mut self, key: &str, value: &str) -> anyhow::Result<()> {
-        if self.res_headers.is_none() {
-            self.res_headers = Some(http::HeaderMap::new());
-        }
-        if let Some(headers) = &mut self.res_headers {
-            let header_name = HeaderName::from_str(key)?;
-            let header_value = HeaderValue::from_str(value)?;
-            headers.append(header_name, header_value);
-        }
+    pub fn append_header(&mut self, name: &HeaderName, value: HeaderValue) {
+        self.res_headers.append(name, value);
+    }
+
+    pub fn append_header_str(&mut self, name: &str, value: &str) -> anyhow::Result<()> {
+        let header_name = HeaderName::from_str(name)?;
+        let header_value = HeaderValue::from_str(value)?;
+        self.res_headers.append(header_name, header_value);
         Ok(())
     }
 
-    pub fn insert_header(&mut self, key: &str, value: &str) -> anyhow::Result<()> {
-        if self.res_headers.is_none() {
-            self.res_headers = Some(http::HeaderMap::new());
-        }
-        if let Some(headers) = &mut self.res_headers {
-            let header_name = HeaderName::from_str(key)?;
-            let header_value = HeaderValue::from_str(value)?;
-            headers.insert(header_name, header_value);
-        }
+    pub fn insert_header(&mut self, name: &HeaderName, value: HeaderValue) {
+        self.res_headers.insert(name, value);
+    }
+
+    pub fn insert_header_str(&mut self, name: &str, value: &str) -> anyhow::Result<()> {
+        let header_name = HeaderName::from_str(name)?;
+        let header_value = HeaderValue::from_str(value)?;
+        self.res_headers.insert(header_name, header_value);
         Ok(())
     }
 
-    pub fn append_headers(&mut self, items: &[(&str, &str)]) -> anyhow::Result<()> {
-        if self.res_headers.is_none() {
-            self.res_headers = Some(http::HeaderMap::new());
+    pub fn append_headers(&mut self, items: &[(HeaderName, HeaderValue)]) {
+        for (name, value) in items {
+            self.res_headers.append(name, value.clone());
         }
-        if let Some(headers) = &mut self.res_headers {
-            for (key, value) in items {
-                let header_name = HeaderName::from_str(key)?;
-                let header_value = HeaderValue::from_str(value)?;
-                headers.append(header_name, header_value);
-            }
+    }
+
+    pub fn append_headers_str(&mut self, items: &[(&str, &str)]) -> anyhow::Result<()> {
+        for (name, value) in items {
+            let header_name = HeaderName::from_str(name)?;
+            let header_value = HeaderValue::from_str(value)?;
+            self.res_headers.append(header_name, header_value);
         }
         Ok(())
     }
@@ -567,23 +606,21 @@ impl Session {
     pub async fn send_status(&mut self, status_code: http::StatusCode) -> anyhow::Result<()> {
         if let Some(h2) = &mut self.h2 {
             let mut response = ResponseHeader::build_no_case(status_code, None)?;
-            if let Some(h2_headers) = &self.res_headers {
-                for (key, value) in h2_headers {
-                    response.append_header(key, value)?;
-                }
+
+            for (name, value) in &self.res_headers {
+                response.append_header(name, value)?;
             }
+
             h2.write_response_header(Box::new(response)).await?;
         } else if let Some(h3) = &mut self.h3 {
             let mut res_headers = Vec::with_capacity(10); // Preallocate
             res_headers.push(h3::Header::new(b":status", status_code.as_str().as_bytes()));
 
-            if let Some(h3_headers) = &self.res_headers {
-                res_headers.extend(h3_headers.iter().filter_map(|(k, v)| {
-                    v.to_str()
-                        .ok()
-                        .map(|v_str| h3::Header::new(k.as_str().as_bytes(), v_str.as_bytes()))
-                }));
-            }
+            res_headers.extend(self.res_headers.iter().filter_map(|(name, value)| {
+                value.to_str().ok().map(|value_str| {
+                    h3::Header::new(name.as_str().as_bytes(), value_str.as_bytes())
+                })
+            }));
 
             h3.out_frame
                 .send(OutboundFrame::Headers(res_headers))
@@ -667,7 +704,7 @@ impl Session {
         let first_byte = if fin { 0x80 | opcode_val } else { opcode_val };
         frame.put_u8(first_byte);
 
-        // Second byte: No mask (server-to-client)
+        // Second byte: No mask
         let len = payload.len();
         if len < 126 {
             frame.put_u8(len as u8);
