@@ -74,9 +74,11 @@ pub enum HTTPMethod {
     UnDefined,
 }
 
-impl HTTPMethod {
-    pub fn from_str(name: &str) -> Self {
-        match name {
+impl std::str::FromStr for HTTPMethod {
+    type Err = ();
+
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        Ok(match name {
             "GET" => HTTPMethod::Get,
             "POST" => HTTPMethod::Post,
             "OPTIONS" => HTTPMethod::Options,
@@ -91,7 +93,7 @@ impl HTTPMethod {
             "PUB" => HTTPMethod::Pub,
             "UNSUB" => HTTPMethod::UnSub,
             _ => HTTPMethod::UnDefined,
-        }
+        })
     }
 }
 
@@ -147,7 +149,7 @@ impl Session {
         let queries = Self::parse_query_params(&mut path);
 
         Self {
-            method: HTTPMethod::from_str(method),
+            method: HTTPMethod::from_str(method).unwrap_or(HTTPMethod::UnDefined),
             path: path.to_string(),
             host: host.to_string(),
             queries,
@@ -207,7 +209,7 @@ impl Session {
         let queries = Self::parse_query_params(&mut path);
 
         Self {
-            method: HTTPMethod::from_str(&method),
+            method: HTTPMethod::from_str(&method).unwrap_or(HTTPMethod::UnDefined),
             path,
             host,
             queries,
@@ -361,15 +363,6 @@ impl Session {
         self.h3.is_some()
     }
 
-    pub fn read_req_header(&self, key: http::HeaderName) -> Option<&http::HeaderValue> {
-        if let Some(h2) = &self.h2 {
-            return h2.get_header(key);
-        } else if let Some(h3) = &self.h3 {
-            return h3.headers.get(&key);
-        }
-        None
-    }
-
     pub async fn read_ws_msg(&mut self, timeout: Duration) -> anyhow::Result<(Bytes, WsOpCode)> {
         if let Some(h2) = &mut self.h2 {
             let mut full_payload = Vec::new();
@@ -500,6 +493,15 @@ impl Session {
         }
 
         anyhow::bail!("WebSocket session not available");
+    }
+
+    pub fn read_req_header(&self, key: http::HeaderName) -> Option<&http::HeaderValue> {
+        if let Some(h2) = &self.h2 {
+            return h2.get_header(key);
+        } else if let Some(h3) = &self.h3 {
+            return h3.headers.get(&key);
+        }
+        None
     }
 
     pub fn read_req_headers(&self) -> Option<&http::HeaderMap> {

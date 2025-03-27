@@ -102,7 +102,7 @@ pub async fn serve(
             modified,
         };
         cache.put(key.clone(), info.clone());
-        let _ = persist_cache(&*cache);
+        let _ = persist_cache(&cache);
         info
     } else {
         file_info
