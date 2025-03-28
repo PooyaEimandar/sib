@@ -74,6 +74,28 @@ pub enum HTTPMethod {
     UnDefined,
 }
 
+impl std::fmt::Display for HTTPMethod {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let method_str = match self {
+            HTTPMethod::Get => "GET",
+            HTTPMethod::Post => "POST",
+            HTTPMethod::Options => "OPTIONS",
+            HTTPMethod::Delete => "DELETE",
+            HTTPMethod::Head => "HEAD",
+            HTTPMethod::Connect => "CONNECT",
+            HTTPMethod::ConnectUdp => "CONNECT-UDP",
+            HTTPMethod::Put => "PUT",
+            HTTPMethod::Trace => "TRACE",
+            HTTPMethod::Patch => "PATCH",
+            HTTPMethod::Sub => "SUB",
+            HTTPMethod::Pub => "PUB",
+            HTTPMethod::UnSub => "UNSUB",
+            HTTPMethod::UnDefined => "UNDEFINED",
+        };
+        write!(f, "{}", method_str)
+    }
+}
+
 impl std::str::FromStr for HTTPMethod {
     type Err = ();
 
