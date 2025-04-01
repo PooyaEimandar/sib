@@ -37,6 +37,7 @@ klickhouse = { version = "0.13.2", optional = true }
 lru = { version = "0.13.0", optional = true, default-features = false, features = [
     "hashbrown",
 ] }
+memcache = { version = "0.18.0", optional = true, default-features = false }
 memmap2 = { version = "0.9.5", optional = true, default-features = false }
 mime_guess = { version = "2.0.5", optional = true, default-features = false }
 pingora = { version = "0.4.0", optional = true, default-features = false, features = [
@@ -75,20 +76,21 @@ sib-http = [
     "memmap2",
     "mime_guess",
     "pingora",
-    "serde",
     "serde_json",
+    "serde",
     "sha2",
-    "tokio",
-    "tokio-stream",
     "tokio-quiche",
+    "tokio-stream",
+    "tokio",
 ]
 sib-sys = [
     "async-trait",
-    "klickhouse",
     "deadpool",
     "foundationdb",
+    "klickhouse",
+    "memcache",
     "tikv-jemallocator",
-    "tracing",
-    "tracing-subscriber",
     "tracing-appender",
+    "tracing-subscriber",
+    "tracing",
 ]
