@@ -7,7 +7,7 @@ use mime_guess::{Mime, mime};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    fs::File as StdFile,
+    fs::{File as StdFile, Metadata},
     io::{BufReader, BufWriter},
     num::NonZeroUsize,
     ops::Range,
@@ -20,7 +20,10 @@ use tokio::{
     sync::RwLock,
 };
 
-use crate::network::http::session::{HTTPMethod, Session};
+use crate::{
+    network::http::session::{HTTPMethod, Session},
+    system::memcached::MemcachedPool,
+};
 
 const CHUNK_SIZE: usize = 16 * 1024;
 const MIN_BYTES: u64 = 1024;
@@ -50,6 +53,7 @@ pub async fn serve(
     path: &str,
     root: &str,
     file_cache: FileCache,
+    memcached_pool: Option<MemcachedPool>,
 ) -> anyhow::Result<()> {
     let static_root = fs::canonicalize(root).await?;
     let requested_path = PathBuf::from(root).join(path);
@@ -62,30 +66,40 @@ pub async fn serve(
         return session.send_status_eom(StatusCode::FORBIDDEN).await;
     }
 
-    let mut cache = file_cache.write().await;
+    let meta = fs::metadata(&canonical).await?;
+
     let key = canonical.to_string_lossy().to_string();
-    let mut refresh = false;
-    let file_info = if let Some(info) = cache.get(&key) {
-        if let Ok(meta) = fs::metadata(&canonical).await {
+    let mut file_info_opt: Option<FileInfo> = None;
+
+    {
+        let mut cache = file_cache.write().await;
+        if let Some(info) = cache.get(&key) {
             let modified = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-            if modified > info.modified {
-                refresh = true;
+            if modified <= info.modified {
+                file_info_opt = Some(info.clone());
             }
         }
-        info.clone()
-    } else {
-        refresh = true;
-        FileInfo {
-            etag: String::new(),
-            mime_type: mime::APPLICATION_OCTET_STREAM.to_string(),
-            path: PathBuf::new(),
-            size: 0,
-            modified: SystemTime::UNIX_EPOCH,
-        }
-    };
+    }
 
-    let file_info = if refresh {
-        let meta = fs::metadata(&canonical).await?;
+    if file_info_opt.is_none() {
+        if let Some(pool) = &memcached_pool {
+            if let Ok(mem_client) = pool.get().await {
+                if let Ok(Some(json)) = mem_client.get::<String>(&key) {
+                    if let Ok(info) = serde_json::from_str::<FileInfo>(&json) {
+                        let modified = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+                        if modified <= info.modified {
+                            file_info_opt = Some(info.clone());
+                            file_cache.write().await.put(key.clone(), info);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let file_info = if let Some(info) = file_info_opt {
+        info
+    } else {
         let modified = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
         let etag = format!(
             "\"{}-{}\"",
@@ -93,7 +107,6 @@ pub async fn serve(
             meta.len()
         );
         let mime_type = mime_guess::from_path(&canonical).first_or_octet_stream();
-
         let info = FileInfo {
             etag,
             mime_type: mime_type.to_string(),
@@ -101,13 +114,30 @@ pub async fn serve(
             size: meta.len(),
             modified,
         };
-        cache.put(key.clone(), info.clone());
-        let _ = persist_cache(&cache);
+
+        {
+            let mut cache = file_cache.write().await;
+            cache.put(key.clone(), info.clone());
+            let cache_res = persist_cache(&cache);
+            if let Err(err) = cache_res {
+                crate::s_error!(
+                    "File server failed to write to the LRU persistent cache: {}",
+                    err
+                );
+            }
+        }
+
+        if let Some(pool) = &memcached_pool {
+            if let Ok(mem_client) = pool.get().await {
+                let memcached_res = mem_client.set(&key, &serde_json::to_string(&info)?, 300);
+                if let Err(err) = memcached_res {
+                    crate::s_error!("File server failed to write to the memcached: {}", err);
+                }
+            }
+        }
+
         info
-    } else {
-        file_info
     };
-    drop(cache);
 
     if let Some(p_header_val) = session.read_req_header(http::header::IF_NONE_MATCH) {
         if p_header_val == &file_info.etag {
@@ -124,6 +154,7 @@ pub async fn serve(
         &mime_type,
     );
 
+    let mut meta_opt: Option<Metadata> = None;
     let mut file_path = file_info.path.clone();
     if file_info.size > MIN_BYTES {
         let parent = file_info.path.parent().unwrap();
@@ -135,19 +166,55 @@ pub async fn serve(
             .to_str()
             .unwrap_or_default();
 
-        file_path = match encoding {
-            EncodingType::Gzip => parent.join("gz").join(format!("{filename}.{file_ext}.gz")),
-            EncodingType::Br => parent.join("br").join(format!("{filename}.{file_ext}.br")),
-            EncodingType::Zstd => parent.join("zs").join(format!("{filename}.{file_ext}.zs")),
-            EncodingType::None => file_info.path.clone(),
+        (file_path, meta_opt) = match encoding {
+            EncodingType::Gzip => {
+                let com_file = parent.join("gz").join(format!("{filename}.{file_ext}.gz"));
+                let com_meta = fs::metadata(&com_file).await;
+                if fs::metadata(&com_file).await.is_ok() {
+                    session.append_header(
+                        &http::header::CONTENT_ENCODING,
+                        HeaderValue::from_static("gzip"),
+                    );
+                    (com_file, Some(com_meta.unwrap()))
+                } else {
+                    (file_info.path.clone(), None)
+                }
+            }
+            EncodingType::Br => {
+                let com_file = parent.join("br").join(format!("{filename}.{file_ext}.br"));
+                let com_meta = fs::metadata(&com_file).await;
+                if com_meta.is_ok() {
+                    session.append_header(
+                        &http::header::CONTENT_ENCODING,
+                        HeaderValue::from_static("br"),
+                    );
+                    (com_file, Some(com_meta.unwrap()))
+                } else {
+                    (file_info.path.clone(), None)
+                }
+            }
+            EncodingType::Zstd => {
+                let com_file = parent.join("zs").join(format!("{filename}.{file_ext}.zs"));
+                let com_meta = fs::metadata(&com_file).await;
+                if com_meta.is_ok() {
+                    session.append_header(
+                        &http::header::CONTENT_ENCODING,
+                        HeaderValue::from_static("zstd"),
+                    );
+                    (com_file, Some(com_meta.unwrap()))
+                } else {
+                    (file_info.path.clone(), None)
+                }
+            }
+            EncodingType::None => (file_info.path.clone(), None),
         };
-
-        if fs::metadata(&file_path).await.is_err() {
-            file_path = file_info.path.clone();
-        }
     }
 
-    let meta = fs::metadata(&file_path).await?;
+    let meta = if meta_opt.is_none() {
+        fs::metadata(&file_path).await?
+    } else {
+        meta_opt.unwrap()
+    };
     let total_size = meta.len();
     let mut range: Option<Range<u64>> = None;
 
@@ -174,21 +241,6 @@ pub async fn serve(
             HeaderValue::from_static("inline"),
         ),
     ]);
-
-    if encoding != EncodingType::None {
-        let encoding_str = match encoding {
-            EncodingType::Gzip => Some("gzip"),
-            EncodingType::Br => Some("br"),
-            EncodingType::Zstd => Some("zstd"),
-            _ => None,
-        };
-        if let Some(enc) = encoding_str {
-            session.append_headers(&[(
-                http::header::CONTENT_ENCODING,
-                HeaderValue::from_static(enc),
-            )]);
-        }
-    }
 
     let (status, start, end) = if let Some(r) = range {
         let content_length = r.end - r.start;
