@@ -31,7 +31,7 @@ pub struct LogEvent {
 }
 
 /// Enum for configuring how logs are rotated on disk when using a file logger.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum LogRolling {
     NEVER,
     MINUTELY,
@@ -40,15 +40,16 @@ pub enum LogRolling {
 }
 
 /// Configuration for writing logs to files when using a file logger.
-#[derive(Debug)]
-pub struct LogFileConfig<'a> {
+#[derive(Clone, Debug)]
+pub struct LogFileConfig {
     pub roller: LogRolling,
-    pub dir: &'a str,
-    pub file_name: &'a str,
+    pub dir: String,
+    pub file_name: String,
     pub ansi: bool,
 }
 
 /// Configuration for sending logs to ClickHouse.
+#[derive(Clone, Debug)]
 pub struct ClickhouseConfig {
     /// The address of the ClickHouse server (e.g., "127.0.0.1:9000").
     pub address: String,
@@ -168,22 +169,11 @@ async fn send_logs_to_clickhouse(
 /// The background task that buffers and periodically flushes logs to ClickHouse.
 async fn store_logs_in_clickhouse(
     config: ClickhouseConfig,
+    client: klickhouse::Client,
     mut receiver: mpsc::Receiver<LogEvent>,
     mut shutdown_signal: oneshot::Receiver<()>,
     done_signal: oneshot::Sender<()>,
 ) {
-    let clickhouse_opt = ClientOptions {
-        default_database: config.database,
-        username: config.username,
-        password: config.password,
-        ..ClientOptions::default()
-    };
-    let client = Client::connect(config.address, clickhouse_opt)
-        .await
-        .expect("Failed to connect to ClickHouse");
-
-    client.execute(config.init_query).await.unwrap();
-
     let log_buffer = Arc::new(Mutex::new(Vec::with_capacity(config.max_num_flush)));
     let mut flush_interval = tokio::time::interval(config.flush_interval);
 
@@ -249,7 +239,7 @@ impl Log {
 }
 
 /// Initializes the global logging system with file and/or ClickHouse logging.
-pub fn init_log(
+pub async fn init_log(
     filter_level: LogFilterLevel,
     file_config: Option<LogFileConfig>,
     clickhouse_config: Option<ClickhouseConfig>,
@@ -269,17 +259,37 @@ pub fn init_log(
     let (shutdown_sender, shutdown_receiver) = oneshot::channel();
     let (done_sender, done_receiver) = oneshot::channel();
 
-    let async_log_layer = if let Some(clickhouse) = clickhouse_config {
-        let (sender, receiver) = mpsc::channel::<LogEvent>(clickhouse.channel_buffer_size);
+    let async_log_layer = if let Some(config) = clickhouse_config {
+        let config_cloned = config.clone();
 
-        tokio::spawn(store_logs_in_clickhouse(
-            clickhouse,
-            receiver,
-            shutdown_receiver,
-            done_sender,
-        ));
+        let clickhouse_opt = ClientOptions {
+            default_database: config.database,
+            username: config.username,
+            password: config.password,
+            ..ClientOptions::default()
+        };
+        let client = Client::connect(config.address, clickhouse_opt).await;
+        match client {
+            Ok(client) => {
+                // on connection success
+                client.execute(config.init_query).await.unwrap();
 
-        Some(AsyncLogLayer { sender })
+                let (sender, receiver) = mpsc::channel::<LogEvent>(config.channel_buffer_size);
+
+                tokio::spawn(store_logs_in_clickhouse(
+                    config_cloned,
+                    client,
+                    receiver,
+                    shutdown_receiver,
+                    done_sender,
+                ));
+                Some(AsyncLogLayer { sender })
+            }
+            Err(e) => {
+                eprintln!("Failed to connect to ClickHouse: {:?}", e);
+                None
+            }
+        }
     } else {
         None
     };
@@ -384,8 +394,8 @@ macro_rules! s_trace_time {
 async fn test() {
     let log_file = LogFileConfig {
         roller: LogRolling::DAILY,
-        dir: "logs",
-        file_name: "app.log",
+        dir: "logs".to_owned(),
+        file_name: "app.log".to_owned(),
         ansi: false,
     };
     let clickhouse_config = ClickhouseConfig::default();
@@ -393,7 +403,8 @@ async fn test() {
         LogFilterLevel::TRACE,
         Some(log_file),
         Some(clickhouse_config),
-    );
+    )
+    .await;
 
     s_debug!("This is a debug message from Sib");
     s_info!("This is an info message from Sib");
