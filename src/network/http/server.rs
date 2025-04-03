@@ -112,7 +112,11 @@ impl Server {
 
             // Run h3 on a separate thread via tokio
             std::thread::spawn(move || -> anyhow::Result<()> {
-                tokio::runtime::Runtime::new()?.block_on(h3_server)?;
+                let rt = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(num_cpus::get())
+                    .enable_all()
+                    .build()?;
+                rt.block_on(h3_server)?;
                 Ok(())
             });
 
@@ -131,7 +135,11 @@ impl Server {
                 self.key_path.clone(),
                 self.handler.clone(),
             );
-            tokio::runtime::Runtime::new()?.block_on(h3_server)?;
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(num_cpus::get())
+                .enable_all()
+                .build()?;
+            rt.block_on(h3_server)?;
         }
 
         anyhow::bail!("either H2 or H3 must be enabled");

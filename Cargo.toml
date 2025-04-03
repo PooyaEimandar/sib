@@ -1,6 +1,6 @@
 [package]
 name = "sib"
-version = "0.0.4"
+version = "0.0.5"
 authors = ["mail@pooya.ai"]
 description = "A high-performance, secure, and cross-platform modules optimized for efficiency, scalability, and reliability."
 documentation = "https://docs.rs/sib"
@@ -40,6 +40,7 @@ lru = { version = "0.13.0", optional = true, default-features = false, features 
 memcache = { version = "0.18.0", optional = true, default-features = false }
 memmap2 = { version = "0.9.5", optional = true, default-features = false }
 mime_guess = { version = "2.0.5", optional = true, default-features = false }
+num_cpus = { version = "1.16.0" }
 pingora = { version = "0.4.0", optional = true, default-features = false, features = [
     "boringssl",
     "time",
