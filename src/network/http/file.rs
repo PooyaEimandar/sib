@@ -15,10 +15,7 @@ use std::{
     sync::Arc,
     time::SystemTime,
 };
-use tokio::{
-    fs::{self, File},
-    sync::RwLock,
-};
+use tokio::{fs, sync::RwLock};
 
 use crate::{
     network::http::session::{HTTPMethod, Session},
@@ -268,8 +265,11 @@ pub async fn serve(
         return Ok(());
     }
 
-    let file = File::open(&file_path).await?;
-    let mmap = unsafe { Mmap::map(&file.into_std().await)? };
+    let mmap = tokio::task::spawn_blocking(move || {
+        let std_file = std::fs::File::open(&file_path)?;
+        unsafe { Mmap::map(&std_file) }
+    })
+    .await??;
     session.send_status(status).await?;
 
     let mut chunk_count = 0;
@@ -286,7 +286,7 @@ pub async fn serve(
 
         offset = chunk_end;
         chunk_count += 1;
-        if chunk_count % 8 == 0 {
+        if chunk_count % 32 == 0 {
             tokio::task::yield_now().await;
         }
     }
