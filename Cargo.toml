@@ -1,6 +1,6 @@
 [package]
 name = "sib"
-version = "0.0.5"
+version = "0.0.6"
 authors = ["mail@pooya.ai"]
 description = "A high-performance, secure, and cross-platform modules optimized for efficiency, scalability, and reliability."
 documentation = "https://docs.rs/sib"
@@ -61,7 +61,7 @@ tokio = { version = "1.44.1", optional = true, default-features = false, feature
     "full",
 ] }
 tokio-stream = { version = "0.1.17", optional = true, default-features = false }
-tokio-quiche = { version = "0.2.2", optional = true, default-features = false }
+tokio-quiche = { version = "0.3.0", optional = true, default-features = false }
 
 [features]
 default = ["sib-http", "sib-sys"]
