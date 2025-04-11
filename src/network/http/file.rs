@@ -325,10 +325,10 @@ pub async fn serve(
         return Ok(());
     }
 
-    #[cfg(target_os = "linux")]
-    let file_uring = tokio_uring::fs::File::open(&file_path).await?;
+    // #[cfg(target_os = "linux")]
+    // let file_uring = tokio_uring::fs::File::open(path).await?;
 
-    #[cfg(not(target_os = "linux"))]
+    // #[cfg(not(target_os = "linux"))]
     let mmap = tokio::task::spawn_blocking(move || {
         let std_file = std::fs::File::open(&file_path)?;
         unsafe { Mmap::map(&std_file) }
@@ -346,14 +346,15 @@ pub async fn serve(
         let chunk_end = (offset + CHUNK_SIZE).min(end);
         let is_last_chunk = chunk_end == end;
 
-        #[cfg(target_os = "linux")]
-        let chunk = {
-            let read_size = chunk_end - offset;
-            let (res, _) = file_uring.read_at(offset as u64, read_size).await;
-            Bytes::from(res?)
-        };
+        // #[cfg(target_os = "linux")]
+        // let chunk = {
+        //     let (res, _) = file_uring
+        //         .read_at(range.start as usize, (range.end - range.start) as usize)
+        //         .await;
+        //     Bytes::from(res?)
+        // };
 
-        #[cfg(not(target_os = "linux"))]
+        // #[cfg(not(target_os = "linux"))]
         let chunk = base.slice(offset..chunk_end);
 
         session.send_body(chunk, is_last_chunk).await?;

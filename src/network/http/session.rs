@@ -1,9 +1,7 @@
-use base64::Engine;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::SinkExt;
 use http::{HeaderMap, HeaderName, HeaderValue};
 use pingora::{http::ResponseHeader, protocols::http::ServerSession};
-use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -248,38 +246,38 @@ impl Session {
     }
 
     /// Upgrades the session to a WebSocket connection.
-    pub async fn upgrade_to_websocket(&mut self) -> anyhow::Result<()> {
-        if let Some(h2) = &mut self.h2 {
-            // Check if the request is a WebSocket upgrade request
-            if h2
-                .get_header(http::header::UPGRADE)
-                .map(|v| v.as_bytes() == b"websocket")
-                .unwrap_or(false)
-            {
-                let key = h2
-                    .get_header(http::header::SEC_WEBSOCKET_KEY)
-                    .map(|v| v.as_bytes())
-                    .unwrap_or_default();
+    // pub async fn upgrade_to_websocket(&mut self) -> anyhow::Result<()> {
+    //     if let Some(h2) = &mut self.h2 {
+    //         // Check if the request is a WebSocket upgrade request
+    //         if h2
+    //             .get_header(http::header::UPGRADE)
+    //             .map(|v| v.as_bytes() == b"websocket")
+    //             .unwrap_or(false)
+    //         {
+    //             let key = h2
+    //                 .get_header(http::header::SEC_WEBSOCKET_KEY)
+    //                 .map(|v| v.as_bytes())
+    //                 .unwrap_or_default();
 
-                let mut hasher = Sha256::new();
-                hasher.update(key);
-                hasher.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+    //             let mut hasher = Sha256::new();
+    //             hasher.update(key);
+    //             hasher.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
 
-                let result = hasher.finalize();
-                let sec_ws_accept_value = base64::engine::general_purpose::STANDARD.encode(result);
+    //             let result = hasher.finalize();
+    //             let sec_ws_accept_value = base64::engine::general_purpose::STANDARD.encode(result);
 
-                // Perform the WebSocket handshake
-                let mut response = ResponseHeader::build(101, None)?;
-                response.append_header(http::header::UPGRADE, "websocket")?;
-                response.append_header(http::header::CONNECTION, "Upgrade")?;
-                response.append_header(http::header::SEC_WEBSOCKET_ACCEPT, sec_ws_accept_value)?;
-                h2.write_response_header(Box::new(response)).await?;
+    //             // Perform the WebSocket handshake
+    //             let mut response = ResponseHeader::build(101, None)?;
+    //             response.append_header(http::header::UPGRADE, "websocket")?;
+    //             response.append_header(http::header::CONNECTION, "Upgrade")?;
+    //             response.append_header(http::header::SEC_WEBSOCKET_ACCEPT, sec_ws_accept_value)?;
+    //             h2.write_response_header(Box::new(response)).await?;
 
-                return Ok(());
-            }
-        }
-        anyhow::bail!("Not a WebSocket upgrade request");
-    }
+    //             return Ok(());
+    //         }
+    //     }
+    //     anyhow::bail!("Not a WebSocket upgrade request");
+    // }
 
     /// Normalizes a path by removing duplicate `/` and preventing traversal attacks.
     fn normalize_slashes(path: &str) -> String {
