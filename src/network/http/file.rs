@@ -1,4 +1,4 @@
-use bytes::BytesMut;
+use bytes::Bytes;
 use http::{HeaderValue, StatusCode};
 use httpdate::HttpDate;
 use lru::LruCache;
@@ -24,6 +24,7 @@ use crate::{
 
 const CHUNK_SIZE: usize = 16 * 1024;
 const MIN_BYTES: u64 = 1024;
+const MAX_ON_THE_FLY_SIZE: u64 = 512 * 1024; // 512 KB
 const CACHE_PERSIST_PATH: &str = "./sib_asset_cache.json";
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -166,39 +167,96 @@ pub async fn serve(
         (file_path, meta_opt) = match encoding {
             EncodingType::Gzip => {
                 let com_file = parent.join("gz").join(format!("{filename}.{file_ext}.gz"));
-                let com_meta = fs::metadata(&com_file).await;
-                if fs::metadata(&com_file).await.is_ok() {
+                let com_meta_res = fs::metadata(&com_file).await;
+                if let Ok(com_meta) = com_meta_res {
                     session.append_header(
                         &http::header::CONTENT_ENCODING,
                         HeaderValue::from_static("gzip"),
                     );
-                    (com_file, Some(com_meta.unwrap()))
+                    (com_file, Some(com_meta))
+                } else if file_info.size <= MAX_ON_THE_FLY_SIZE {
+                    let content = fs::read(&file_info.path).await?;
+                    let compressed = compress_gzip(&content).await?;
+
+                    session.append_headers(&[
+                        (
+                            http::header::CONTENT_ENCODING,
+                            HeaderValue::from_static("gzip"),
+                        ),
+                        (
+                            http::header::CONTENT_LENGTH,
+                            HeaderValue::from_str(&compressed.len().to_string())?,
+                        ),
+                    ]);
+
+                    session.send_status(StatusCode::OK).await?;
+                    session.send_body(compressed, true).await?;
+                    session.send_eom().await?;
+                    return Ok(());
                 } else {
                     (file_info.path.clone(), None)
                 }
             }
             EncodingType::Br => {
                 let com_file = parent.join("br").join(format!("{filename}.{file_ext}.br"));
-                let com_meta = fs::metadata(&com_file).await;
-                if com_meta.is_ok() {
+                let com_meta_res = fs::metadata(&com_file).await;
+                if let Ok(com_meta) = com_meta_res {
                     session.append_header(
                         &http::header::CONTENT_ENCODING,
                         HeaderValue::from_static("br"),
                     );
-                    (com_file, Some(com_meta.unwrap()))
+                    (com_file, Some(com_meta))
+                } else if file_info.size <= MAX_ON_THE_FLY_SIZE {
+                    let content = fs::read(&file_info.path).await?;
+                    let compressed = compress_brotli(&content).await?;
+
+                    session.append_headers(&[
+                        (
+                            http::header::CONTENT_ENCODING,
+                            HeaderValue::from_static("br"),
+                        ),
+                        (
+                            http::header::CONTENT_LENGTH,
+                            HeaderValue::from_str(&compressed.len().to_string())?,
+                        ),
+                    ]);
+
+                    session.send_status(StatusCode::OK).await?;
+                    session.send_body(compressed, true).await?;
+                    session.send_eom().await?;
+                    return Ok(());
                 } else {
                     (file_info.path.clone(), None)
                 }
             }
             EncodingType::Zstd => {
                 let com_file = parent.join("zs").join(format!("{filename}.{file_ext}.zs"));
-                let com_meta = fs::metadata(&com_file).await;
-                if com_meta.is_ok() {
+                let com_meta_res = fs::metadata(&com_file).await;
+                if let Ok(com_meta) = com_meta_res {
                     session.append_header(
                         &http::header::CONTENT_ENCODING,
                         HeaderValue::from_static("zstd"),
                     );
-                    (com_file, Some(com_meta.unwrap()))
+                    (com_file, Some(com_meta))
+                } else if file_info.size <= MAX_ON_THE_FLY_SIZE {
+                    let content = fs::read(&file_info.path).await?;
+                    let compressed = compress_zstd(&content).await?;
+
+                    session.append_headers(&[
+                        (
+                            http::header::CONTENT_ENCODING,
+                            HeaderValue::from_static("zstd"),
+                        ),
+                        (
+                            http::header::CONTENT_LENGTH,
+                            HeaderValue::from_str(&compressed.len().to_string())?,
+                        ),
+                    ]);
+
+                    session.send_status(StatusCode::OK).await?;
+                    session.send_body(compressed, true).await?;
+                    session.send_eom().await?;
+                    return Ok(());
                 } else {
                     (file_info.path.clone(), None)
                 }
@@ -207,10 +265,10 @@ pub async fn serve(
         };
     }
 
-    let meta = if meta_opt.is_none() {
-        fs::metadata(&file_path).await?
+    let meta = if let Some(meta) = meta_opt {
+        meta
     } else {
-        meta_opt.unwrap()
+        fs::metadata(&file_path).await?
     };
     let total_size = meta.len();
     let mut range: Option<Range<u64>> = None;
@@ -265,28 +323,45 @@ pub async fn serve(
         return Ok(());
     }
 
+    #[cfg(target_os = "linux")]
+    let file_uring = tokio_uring::fs::File::open(path).await?;
+
+    #[cfg(not(target_os = "linux"))]
     let mmap = tokio::task::spawn_blocking(move || {
         let std_file = std::fs::File::open(&file_path)?;
         unsafe { Mmap::map(&std_file) }
     })
     .await??;
+
     session.send_status(status).await?;
 
+    let base = Bytes::copy_from_slice(&mmap);
     let mut chunk_count = 0;
     let mut offset = start as usize;
     let end = end as usize;
 
     while offset < end {
         let chunk_end = (offset + CHUNK_SIZE).min(end);
-        let chunk = &mmap[offset..chunk_end];
         let is_last_chunk = chunk_end == end;
-        session
-            .send_body(BytesMut::from(chunk).freeze(), is_last_chunk)
-            .await?;
+
+        #[cfg(target_os = "linux")]
+        let chunk = {
+            let (res, _) = file_uring
+                .read_at(range.start as usize, (range.end - range.start) as usize)
+                .await;
+            Bytes::from(res?)
+        };
+
+        #[cfg(not(target_os = "linux"))]
+        let chunk = base.slice(offset..chunk_end);
+
+        session.send_body(chunk, is_last_chunk).await?;
 
         offset = chunk_end;
         chunk_count += 1;
-        if chunk_count % 32 == 0 {
+
+        // Only yield if the file is larger than 1MB
+        if total_size > (1 << 20) && chunk_count % 64 == 0 {
             tokio::task::yield_now().await;
         }
     }
@@ -363,4 +438,43 @@ fn get_encoding(accept_encoding: Option<&HeaderValue>, mime: &Mime) -> EncodingT
     } else {
         EncodingType::None
     }
+}
+
+async fn compress_brotli(input: &[u8]) -> anyhow::Result<Bytes> {
+    let input_owned = input.to_vec();
+    tokio::task::spawn_blocking(move || {
+        let mut out = vec![];
+        let mut encoder =
+            brotli::CompressorReader::new(std::io::Cursor::new(input_owned), 4096, 5, 22);
+        std::io::copy(&mut encoder, &mut out)?;
+        Ok::<_, std::io::Error>(Bytes::from(out))
+    })
+    .await?
+    .map_err(Into::into)
+}
+async fn compress_zstd(input: &[u8]) -> anyhow::Result<Bytes> {
+    let input_owned = input.to_vec();
+    tokio::task::spawn_blocking(move || {
+        let mut out = vec![];
+        zstd::stream::copy_encode(std::io::Cursor::new(input_owned), &mut out, 3)?;
+        Ok::<_, std::io::Error>(Bytes::from(out))
+    })
+    .await?
+    .map_err(Into::into)
+}
+
+async fn compress_gzip(input: &[u8]) -> anyhow::Result<Bytes> {
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+
+    let input_owned = input.to_vec();
+    tokio::task::spawn_blocking(move || {
+        let mut out = vec![];
+        let mut encoder = GzEncoder::new(&mut out, Compression::default());
+        std::io::copy(&mut std::io::Cursor::new(input_owned), &mut encoder)?;
+        encoder.finish()?;
+        Ok::<_, std::io::Error>(Bytes::from(out))
+    })
+    .await?
+    .map_err(Into::into)
 }
