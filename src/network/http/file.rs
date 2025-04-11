@@ -230,7 +230,9 @@ pub async fn serve(
                 }
             }
             EncodingType::Zstd => {
-                let com_file = parent.join("zs").join(format!("{filename}.{file_ext}.zs"));
+                let com_file = parent
+                    .join("zstd")
+                    .join(format!("{filename}.{file_ext}.zstd"));
                 let com_meta_res = fs::metadata(&com_file).await;
                 if let Ok(com_meta) = com_meta_res {
                     session.append_header(
@@ -445,18 +447,19 @@ async fn compress_brotli(input: &[u8]) -> anyhow::Result<Bytes> {
     tokio::task::spawn_blocking(move || {
         let mut out = vec![];
         let mut encoder =
-            brotli::CompressorReader::new(std::io::Cursor::new(input_owned), 4096, 5, 22);
+            brotli::CompressorReader::new(std::io::Cursor::new(input_owned), 4096, 9, 18);
         std::io::copy(&mut encoder, &mut out)?;
         Ok::<_, std::io::Error>(Bytes::from(out))
     })
     .await?
     .map_err(Into::into)
 }
+
 async fn compress_zstd(input: &[u8]) -> anyhow::Result<Bytes> {
     let input_owned = input.to_vec();
     tokio::task::spawn_blocking(move || {
         let mut out = vec![];
-        zstd::stream::copy_encode(std::io::Cursor::new(input_owned), &mut out, 3)?;
+        zstd::stream::copy_encode(std::io::Cursor::new(input_owned), &mut out, 9)?;
         Ok::<_, std::io::Error>(Bytes::from(out))
     })
     .await?
