@@ -326,7 +326,7 @@ pub async fn serve(
     }
 
     #[cfg(target_os = "linux")]
-    let file_uring = tokio_uring::fs::File::open(path).await?;
+    let file_uring = tokio_uring::fs::File::open(&file_path).await?;
 
     #[cfg(not(target_os = "linux"))]
     let mmap = tokio::task::spawn_blocking(move || {
@@ -348,9 +348,8 @@ pub async fn serve(
 
         #[cfg(target_os = "linux")]
         let chunk = {
-            let (res, _) = file_uring
-                .read_at(range.start as usize, (range.end - range.start) as usize)
-                .await;
+            let read_size = chunk_end - offset;
+            let (res, _) = file_uring.read_at(offset as u64, read_size).await;
             Bytes::from(res?)
         };
 
