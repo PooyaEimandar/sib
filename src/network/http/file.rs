@@ -352,34 +352,32 @@ pub async fn serve(
         session.send_status_eom(status).await?;
         return Ok(());
     }
-
-    let mmap = tokio::task::spawn_blocking(move || {
-        let std_file = std::fs::File::open(&file_path)?;
-        unsafe { Mmap::map(&std_file) }
+    let mmap = tokio::task::spawn_blocking({
+        let file_path = file_path.clone(); // if needed
+        move || {
+            let std_file = std::fs::File::open(&file_path)?;
+            let mmap = unsafe { Mmap::map(&std_file)? };
+            anyhow::Ok(mmap)
+        }
     })
     .await??;
 
-    let full = Bytes::copy_from_slice(&mmap[..]);
+    session.send_status(status).await?;
 
-    let mut chunk_count = 0;
+    let total_size = mmap.len();
     let mut offset = start as usize;
     let end = end as usize;
 
-    session.send_status(status).await?;
-
     while offset < end {
         let chunk_end = (offset + CHUNK_SIZE).min(end);
-        let is_last_chunk = chunk_end == end;
 
-        // zero-copy slice into mmap-backed memory
-        let chunk = full.slice(offset..chunk_end);
+        let chunk_bytes = Bytes::copy_from_slice(&mmap[offset..chunk_end]);
 
-        session.send_body(chunk, is_last_chunk).await?;
+        session.send_body(chunk_bytes, chunk_end == end).await?;
 
         offset = chunk_end;
-        chunk_count += 1;
 
-        if total_size > (1 << 20) && chunk_count % 64 == 0 {
+        if total_size > (1 << 20) && (offset / CHUNK_SIZE) % 64 == 0 {
             tokio::task::yield_now().await;
         }
     }
