@@ -13,7 +13,8 @@ use tokio_quiche::{ConnectionParams, ServerH3Controller, ServerH3Driver};
 
 pub struct Server {
     address: String,
-    port: u16,
+    h2_port: u16,
+    h3_port: u16,
     h2: bool,
     h3: bool,
     cert_path: String,
@@ -29,7 +30,8 @@ impl Default for Server {
     fn default() -> Self {
         Self {
             address: "0.0.0.0".to_string(),
-            port: 8443,
+            h2_port: 8443,
+            h3_port: 8443,
             h2: true,
             h3: true,
             cert_path: "".to_string(),
@@ -44,10 +46,11 @@ impl Default for Server {
 }
 
 impl Server {
-    pub fn new(p_address: String, p_port: u16, handler: Option<HandlerFn>) -> Self {
+    pub fn new(address: String, h2_port: u16, h3_port: u16, handler: Option<HandlerFn>) -> Self {
         Self {
-            address: p_address,
-            port: p_port,
+            address,
+            h2_port,
+            h3_port,
             handler,
             ..Default::default()
         }
@@ -100,12 +103,13 @@ impl Server {
     }
 
     pub fn run_forever(&self) -> anyhow::Result<()> {
-        let address_port = format!("{}:{}", self.address, self.port);
+        let h2_address_port = format!("{}:{}", self.address, self.h2_port);
+        let h3_address_port = format!("{}:{}", self.address, self.h3_port);
 
         if self.h2 && self.h3 {
             // Run h3 on the main thread
             let h3_server = Self::run_h3_forever(
-                address_port.clone(),
+                h3_address_port.clone(),
                 self.cert_path.clone(),
                 self.key_path.clone(),
                 self.handler.clone(),
@@ -125,16 +129,16 @@ impl Server {
             });
 
             // Run h2 on the main thread
-            let h2_server = self.create_h2_server(address_port)?;
+            let h2_server = self.create_h2_server(h2_address_port)?;
             h2_server.run_forever();
         } else if self.h2 {
             // Run only h2 on the main thread
-            let h2_server = self.create_h2_server(address_port)?;
+            let h2_server = self.create_h2_server(h2_address_port)?;
             h2_server.run_forever();
         } else if self.h3 {
             // Run only h3 on the main thread
             let h3_server = Self::run_h3_forever(
-                address_port.clone(),
+                h3_address_port.clone(),
                 self.cert_path.clone(),
                 self.key_path.clone(),
                 self.handler.clone(),
