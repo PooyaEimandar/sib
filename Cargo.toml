@@ -110,6 +110,9 @@ sib-sys = [
     "tracing",
 ]
 
+[build-dependencies]
+chrono = { version = "0.4.40" }
+
 [patch.crates-io]
 # override all uses of `sfv`
 sfv = { git = "https://github.com/undef1nd/sfv.git", tag = "v0.9.4" }

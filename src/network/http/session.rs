@@ -1,3 +1,4 @@
+use anyhow::bail;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::SinkExt;
 use http::{HeaderMap, HeaderName, HeaderValue};
@@ -134,18 +135,26 @@ pub struct Session {
     res_headers: http::HeaderMap,
     h2: Option<ServerSession>,
     h3: Option<H3Session>,
+    status_was_sent: bool,
 }
 
 impl Default for Session {
     fn default() -> Self {
+        static SERVER_VERSION: &str = concat!("Sib/", env!("SIB_BUILD_VERSION"));
+        let mut res_headers = HeaderMap::new();
+        res_headers.insert(
+            http::header::SERVER,
+            HeaderValue::from_static(SERVER_VERSION),
+        );
         Self {
             method: HTTPMethod::UnDefined,
             path: "".to_owned(),
             host: "".to_owned(),
             queries: HashMap::new(),
-            res_headers: http::HeaderMap::new(),
+            res_headers,
             h2: None,
             h3: None,
+            status_was_sent: false,
         }
     }
 }
@@ -626,6 +635,10 @@ impl Session {
     }
 
     pub async fn send_status(&mut self, status_code: http::StatusCode) -> anyhow::Result<()> {
+        if self.status_was_sent {
+            bail!("Response status already sent");
+        }
+
         if let Some(h2) = &mut self.h2 {
             let mut response = ResponseHeader::build_no_case(status_code, None)?;
 
@@ -648,10 +661,15 @@ impl Session {
                 .send(OutboundFrame::Headers(res_headers))
                 .await?;
         }
+        self.status_was_sent = true;
         Ok(())
     }
 
     pub async fn send_body(&mut self, body: bytes::Bytes, finish: bool) -> anyhow::Result<()> {
+        if !self.status_was_sent {
+            bail!("Response status not sent yet");
+        }
+
         if let Some(h2) = &mut self.h2 {
             h2.write_response_body(body, false).await?;
         } else if let Some(h3) = &mut self.h3 {
@@ -670,6 +688,10 @@ impl Session {
     }
 
     pub async fn send_eom(&mut self) -> anyhow::Result<()> {
+        if !self.status_was_sent {
+            bail!("Response status not sent yet");
+        }
+
         if let Some(h2) = self.h2.take() {
             h2.finish().await.ok();
         } else if let Some(h3) = &mut self.h3 {

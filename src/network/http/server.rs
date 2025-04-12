@@ -111,13 +111,16 @@ impl Server {
             );
 
             // Run h3 on a separate thread via tokio
-            std::thread::spawn(move || -> anyhow::Result<()> {
+            std::thread::spawn(move || {
                 let rt = tokio::runtime::Builder::new_multi_thread()
                     .worker_threads(num_cpus::get())
                     .enable_all()
-                    .build()?;
-                rt.block_on(h3_server)?;
-                Ok(())
+                    .build()
+                    .expect("Failed to create tokio runtime for H3");
+                // Run the h3 server
+                if let Err(e) = rt.block_on(h3_server) {
+                    s_error!("Sib's H3 server failed: {:?}", e);
+                }
             });
 
             // Run h2 on the main thread
@@ -170,6 +173,7 @@ impl Server {
             self.cert_path.as_str(),
             self.key_path.as_str(),
         )?;
+        tls_settings.set_alpn(pingora::protocols::ALPN::H2H1);
         tls_settings.enable_h2();
 
         let mut service = handler::service(self.handler.clone());

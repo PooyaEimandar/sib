@@ -38,7 +38,6 @@ impl HttpServerApp for H2Handler {
                 s_error!("Handler error: {:?}", e);
             }
         }
-
         None
     }
 }
