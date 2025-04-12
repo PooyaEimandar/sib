@@ -24,7 +24,7 @@ use crate::{
 
 const CHUNK_SIZE: usize = 16 * 1024;
 const MIN_BYTES: u64 = 1024;
-const MAX_ON_THE_FLY_SIZE: u64 = 1 * 1024 * 1024; // 1 MB
+const MAX_ON_THE_FLY_SIZE: u64 = 512 * 1024; // 512 KB
 const CACHE_PERSIST_PATH: &str = "./sib_asset_cache.json";
 
 #[derive(Debug, Clone, Copy, PartialEq)]

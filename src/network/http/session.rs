@@ -19,8 +19,6 @@ use tokio_quiche::{
     quiche::h3::{self, NameValue},
 };
 
-use crate::s_error;
-
 const MAX_PATH_LENGTH: usize = 1024;
 const MAX_BODY_SIZE: usize = 10 * 1024 * 1024; // 10MB limit
 const MAX_WS_PAYLOAD_SIZE: usize = 64 * 1024 * 1024; // 64MB limit
@@ -252,7 +250,7 @@ impl Session {
         }
     }
 
-    /// Upgrades the session to a WebSocket connection.
+    // /// Upgrades the session to a WebSocket connection.
     // pub async fn upgrade_to_websocket(&mut self) -> anyhow::Result<()> {
     //     if let Some(h2) = &mut self.h2 {
     //         // Check if the request is a WebSocket upgrade request
