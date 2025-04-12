@@ -214,8 +214,7 @@ impl Session {
                     let name = match HeaderName::from_bytes(header.name()) {
                         Ok(n) => n,
                         Err(_) => {
-                            s_error!("Invalid header name: {:?}", header.name());
-                            continue; // Skip invalid headers
+                            continue; // Skip invalid header name
                         }
                     };
 
@@ -223,8 +222,7 @@ impl Session {
                     let value = match HeaderValue::from_bytes(header.value()) {
                         Ok(v) => v,
                         Err(_) => {
-                            s_error!("Invalid header value for {:?}: {:?}", name, header.value());
-                            continue; // Skip invalid headers
+                            continue; // Skip invalid header value
                         }
                     };
 
