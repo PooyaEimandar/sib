@@ -1,4 +1,5 @@
 use super::handler::HandlerFn;
+use crate::s_info;
 use crate::{network::http::handler, s_error};
 use core::time::Duration;
 use futures::StreamExt;
@@ -182,6 +183,8 @@ impl Server {
         let services: Vec<Box<dyn Service>> = vec![Box::new(service)];
         h2_server.add_services(services);
 
+        s_info!("Sib's H2 started on TCP port:{p_address_port}");
+
         Ok(h2_server)
     }
 
@@ -212,6 +215,8 @@ impl Server {
         }
 
         let accept_stream = &mut listeners[0];
+
+        s_info!("Sib's H3 started on UDP port: {address_port}");
 
         while let Some(conn) = accept_stream.next().await {
             let (driver, controller) = ServerH3Driver::new(Http3Settings::default());
