@@ -24,7 +24,7 @@ use crate::{
 
 const CHUNK_SIZE: usize = 16 * 1024;
 const MIN_BYTES: u64 = 1024;
-const MAX_ON_THE_FLY_SIZE: u64 = 512 * 1024; // 512 KB
+const MAX_ON_THE_FLY_SIZE: u64 = 1 * 1024 * 1024; // 1 MB
 const CACHE_PERSIST_PATH: &str = "./sib_asset_cache.json";
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -155,18 +155,36 @@ pub async fn serve(
     let mut meta_opt: Option<Metadata> = None;
     let mut file_path = file_info.path.clone();
     if file_info.size > MIN_BYTES {
-        let parent = file_info.path.parent().unwrap();
-        let filename = file_info.path.file_name().unwrap().to_str().unwrap();
-        let file_ext = file_info
-            .path
-            .extension()
-            .unwrap_or_default()
-            .to_str()
-            .unwrap_or_default();
+        let parent = match file_info.path.parent() {
+            Some(parent) => parent,
+            None => {
+                session.send_status_eom(StatusCode::NOT_FOUND).await?;
+                return Ok(());
+            }
+        };
+        let file_name_osstr = match file_info.path.file_name() {
+            Some(name) => name,
+            None => {
+                session
+                    .send_status_eom(StatusCode::INTERNAL_SERVER_ERROR)
+                    .await?;
+                return Ok(());
+            }
+        };
+
+        let filename = match file_name_osstr.to_str() {
+            Some(name) => name,
+            None => {
+                session
+                    .send_status_eom(StatusCode::INTERNAL_SERVER_ERROR)
+                    .await?;
+                return Ok(());
+            }
+        };
 
         (file_path, meta_opt) = match encoding {
             EncodingType::Gzip => {
-                let com_file = parent.join("gz").join(format!("{filename}.{file_ext}.gz"));
+                let com_file = parent.join("gz").join(format!("{filename}.gz"));
                 let com_meta_res = fs::metadata(&com_file).await;
                 if let Ok(com_meta) = com_meta_res {
                     session.append_header(
@@ -187,6 +205,10 @@ pub async fn serve(
                             http::header::CONTENT_LENGTH,
                             HeaderValue::from_str(&compressed.len().to_string())?,
                         ),
+                        (
+                            http::header::CONTENT_TYPE,
+                            HeaderValue::from_str(file_info.mime_type.as_ref())?,
+                        ),
                     ]);
 
                     session.send_status(StatusCode::OK).await?;
@@ -198,7 +220,7 @@ pub async fn serve(
                 }
             }
             EncodingType::Br => {
-                let com_file = parent.join("br").join(format!("{filename}.{file_ext}.br"));
+                let com_file = parent.join("br").join(format!("{filename}.br"));
                 let com_meta_res = fs::metadata(&com_file).await;
                 if let Ok(com_meta) = com_meta_res {
                     session.append_header(
@@ -219,6 +241,10 @@ pub async fn serve(
                             http::header::CONTENT_LENGTH,
                             HeaderValue::from_str(&compressed.len().to_string())?,
                         ),
+                        (
+                            http::header::CONTENT_TYPE,
+                            HeaderValue::from_str(file_info.mime_type.as_ref())?,
+                        ),
                     ]);
 
                     session.send_status(StatusCode::OK).await?;
@@ -230,9 +256,7 @@ pub async fn serve(
                 }
             }
             EncodingType::Zstd => {
-                let com_file = parent
-                    .join("zstd")
-                    .join(format!("{filename}.{file_ext}.zstd"));
+                let com_file = parent.join("zstd").join(format!("{filename}.zstd"));
                 let com_meta_res = fs::metadata(&com_file).await;
                 if let Ok(com_meta) = com_meta_res {
                     session.append_header(
@@ -252,6 +276,10 @@ pub async fn serve(
                         (
                             http::header::CONTENT_LENGTH,
                             HeaderValue::from_str(&compressed.len().to_string())?,
+                        ),
+                        (
+                            http::header::CONTENT_TYPE,
+                            HeaderValue::from_str(file_info.mime_type.as_ref())?,
                         ),
                     ]);
 
@@ -325,44 +353,32 @@ pub async fn serve(
         return Ok(());
     }
 
-    // #[cfg(target_os = "linux")]
-    // let file_uring = tokio_uring::fs::File::open(path).await?;
-
-    // #[cfg(not(target_os = "linux"))]
     let mmap = tokio::task::spawn_blocking(move || {
         let std_file = std::fs::File::open(&file_path)?;
         unsafe { Mmap::map(&std_file) }
     })
     .await??;
 
-    session.send_status(status).await?;
+    let full = Bytes::copy_from_slice(&mmap[..]);
 
-    let base = Bytes::copy_from_slice(&mmap);
     let mut chunk_count = 0;
     let mut offset = start as usize;
     let end = end as usize;
+
+    session.send_status(status).await?;
 
     while offset < end {
         let chunk_end = (offset + CHUNK_SIZE).min(end);
         let is_last_chunk = chunk_end == end;
 
-        // #[cfg(target_os = "linux")]
-        // let chunk = {
-        //     let (res, _) = file_uring
-        //         .read_at(range.start as usize, (range.end - range.start) as usize)
-        //         .await;
-        //     Bytes::from(res?)
-        // };
-
-        // #[cfg(not(target_os = "linux"))]
-        let chunk = base.slice(offset..chunk_end);
+        // zero-copy slice into mmap-backed memory
+        let chunk = full.slice(offset..chunk_end);
 
         session.send_body(chunk, is_last_chunk).await?;
 
         offset = chunk_end;
         chunk_count += 1;
 
-        // Only yield if the file is larger than 1MB
         if total_size > (1 << 20) && chunk_count % 64 == 0 {
             tokio::task::yield_now().await;
         }
