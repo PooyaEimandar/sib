@@ -222,15 +222,23 @@ impl Server {
 
         s_info!("Sib's H3 started on UDP port: {address_port}");
 
-        while let Some(conn) = accept_stream.next().await {
-            let (driver, controller) = ServerH3Driver::new(Http3Settings::default());
-            conn?.start(driver);
-            tokio::spawn({
-                let handler_cloned = handler.clone();
-                async move {
-                    Self::handle_h3_connection(controller, handler_cloned).await;
+        while let Some(conn_result) = accept_stream.next().await {
+            match conn_result {
+                Ok(conn) => {
+                    let (driver, controller) = ServerH3Driver::new(Http3Settings::default());
+                    conn.start(driver);
+                    tokio::spawn({
+                        let handler_cloned = handler.clone();
+                        async move {
+                            Self::handle_h3_connection(controller, handler_cloned).await;
+                        }
+                    });
                 }
-            });
+                Err(e) => {
+                    s_error!("Sib QUIC accept failed: {e}");
+                    continue;
+                }
+            }
         }
         Ok(())
     }
