@@ -661,7 +661,7 @@ impl Session {
         Ok(())
     }
 
-    pub async fn send_body(&mut self, body: bytes::Bytes, finish: bool) -> anyhow::Result<()> {
+    pub async fn send_body(&mut self, body: Bytes, finish: bool) -> anyhow::Result<()> {
         if !self.status_was_sent {
             bail!("Response status not sent yet");
         }
@@ -669,6 +669,15 @@ impl Session {
         if let Some(h2) = &mut self.h2 {
             h2.write_response_body(body, false).await?;
         } else if let Some(h3) = &mut self.h3 {
+            if h3.out_frame.is_closed() {
+                crate::s_warn!(
+                    "H3 out_frame already closed — skipping body send. size={} finish={}",
+                    body.len(),
+                    finish
+                );
+                return Ok(());
+            }
+
             if let Err(e) = h3
                 .out_frame
                 .send(OutboundFrame::body(
@@ -677,9 +686,16 @@ impl Session {
                 ))
                 .await
             {
+                crate::s_error!(
+                    "Failed to send response body: {:?}, size={}, finish={}",
+                    e,
+                    body.len(),
+                    finish
+                );
                 anyhow::bail!("Failed to send response body: {:?}", e);
             }
         }
+
         Ok(())
     }
 
