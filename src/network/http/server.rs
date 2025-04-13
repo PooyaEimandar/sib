@@ -129,9 +129,8 @@ impl Server {
                 h2_server.run_forever();
             });
 
-            // Optional: join later if needed
             tasks.push(tokio::spawn(async move {
-                h2_thread.join().expect("H2 thread panicked");
+                h2_thread.join().expect("H2 thread panicked on join");
             }));
         }
 
@@ -145,7 +144,7 @@ impl Server {
             },
             res = futures::future::select_all(tasks) => {
                 if let (Err(e), _, _) = res {
-                    s_error!("Server task exited with error: {:?}", e);
+                    s_error!("Sib exited with error: {:?}", e);
                 }
             }
         }
@@ -174,10 +173,9 @@ impl Server {
             count: self.tcp_keep_alive_count,
         });
 
-        let mut tls_settings = pingora::listeners::tls::TlsSettings::intermediate(
-            self.cert_path.as_str(),
-            self.key_path.as_str(),
-        )?;
+        let mut tls_settings =
+            pingora::listeners::tls::TlsSettings::intermediate(&self.cert_path, &self.key_path)?;
+
         tls_settings.set_alpn(pingora::protocols::ALPN::H2H1);
         tls_settings.enable_h2();
 
@@ -226,16 +224,19 @@ impl Server {
             match conn_result {
                 Ok(conn) => {
                     let (driver, controller) = ServerH3Driver::new(Http3Settings::default());
+                    let peer_addr = conn.peer_addr();
                     conn.start(driver);
-                    tokio::spawn({
-                        let handler_cloned = handler.clone();
-                        async move {
-                            Self::handle_h3_connection(controller, handler_cloned).await;
-                        }
+
+                    s_info!("Incoming QUIC con from: {peer_addr:?}");
+
+                    let handler_cloned = handler.clone();
+                    tokio::spawn(async move {
+                        s_info!("Handling QUIC connection from: {peer_addr:?}");
+                        Self::handle_h3_connection(controller, handler_cloned).await;
                     });
                 }
                 Err(e) => {
-                    s_error!("Sib QUIC accept failed: {e}");
+                    s_error!("Sib QUIC failed on accepting: {e}");
                     continue;
                 }
             }

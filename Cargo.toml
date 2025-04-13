@@ -61,7 +61,9 @@ tokio = { version = "1.44.2", optional = true, default-features = false, feature
     "full",
 ] }
 tokio-stream = { version = "0.1.17", optional = true, default-features = false }
-tokio-quiche = { version = "0.3.2", optional = true, default-features = false }
+tokio-quiche = { version = "0.3.2", optional = true, default-features = false, features = [
+    "zero-copy",
+] }
 # tokio-uring = { version = "0.5.0", optional = true, default-features = false, features = [
 #     "bytes",
 # ] }

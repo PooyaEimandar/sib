@@ -19,6 +19,7 @@ use tokio::{fs, sync::RwLock};
 
 use crate::{
     network::http::session::{HTTPMethod, Session},
+    s_error,
     system::memcached::MemcachedPool,
 };
 
@@ -57,7 +58,13 @@ pub async fn serve(
     let requested_path = PathBuf::from(root).join(path);
     let canonical = match fs::canonicalize(&requested_path).await {
         Ok(path) => path,
-        Err(_) => return session.send_status_eom(StatusCode::BAD_REQUEST).await,
+        Err(_) => {
+            s_error!(
+                "File server failed to canonicalize path: {}",
+                requested_path.display()
+            );
+            return session.send_status_eom(StatusCode::NOT_FOUND).await;
+        }
     };
 
     if !canonical.starts_with(&static_root) {
