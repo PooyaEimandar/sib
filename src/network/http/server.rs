@@ -102,55 +102,55 @@ impl Server {
         self
     }
 
-    pub fn run_forever(&self) -> anyhow::Result<()> {
+    pub async fn run_forever(&self) -> anyhow::Result<()> {
         let h2_address_port = format!("{}:{}", self.address, self.h2_port);
         let h3_address_port = format!("{}:{}", self.address, self.h3_port);
 
-        if self.h2 && self.h3 {
-            // Run h3 on the main thread
+        let mut tasks = vec![];
+
+        if self.h3 {
             let h3_server = Self::run_h3_forever(
-                h3_address_port.clone(),
+                h3_address_port,
                 self.cert_path.clone(),
                 self.key_path.clone(),
                 self.handler.clone(),
             );
-
-            // Run h3 on a separate thread via tokio
-            std::thread::spawn(move || {
-                let rt = tokio::runtime::Builder::new_multi_thread()
-                    .worker_threads(num_cpus::get())
-                    .enable_all()
-                    .build()
-                    .expect("Failed to create tokio runtime for H3");
-                // Run the h3 server
-                if let Err(e) = rt.block_on(h3_server) {
-                    s_error!("Sib's H3 server failed: {:?}", e);
+            tasks.push(tokio::spawn(async move {
+                if let Err(e) = h3_server.await {
+                    s_error!("H3 server failed: {:?}", e);
                 }
-            });
-
-            // Run h2 on the main thread
-            let h2_server = self.create_h2_server(h2_address_port)?;
-            h2_server.run_forever();
-        } else if self.h2 {
-            // Run only h2 on the main thread
-            let h2_server = self.create_h2_server(h2_address_port)?;
-            h2_server.run_forever();
-        } else if self.h3 {
-            // Run only h3 on the main thread
-            let h3_server = Self::run_h3_forever(
-                h3_address_port.clone(),
-                self.cert_path.clone(),
-                self.key_path.clone(),
-                self.handler.clone(),
-            );
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(num_cpus::get())
-                .enable_all()
-                .build()?;
-            rt.block_on(h3_server)?;
+            }));
         }
 
-        anyhow::bail!("either H2 or H3 must be enabled");
+        if self.h2 {
+            let h2_server = self.create_h2_server(h2_address_port)?;
+            // Run Pingora H2 on separate blocking thread
+            let h2_thread = std::thread::spawn(move || {
+                h2_server.run_forever();
+            });
+
+            // Optional: join later if needed
+            tasks.push(tokio::spawn(async move {
+                h2_thread.join().expect("H2 thread panicked");
+            }));
+        }
+
+        if tasks.is_empty() {
+            anyhow::bail!("Neither H2 nor H3 enabled.");
+        }
+
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                s_info!("SIGINT received.");
+            },
+            res = futures::future::select_all(tasks) => {
+                if let (Err(e), _, _) = res {
+                    s_error!("Server task exited with error: {:?}", e);
+                }
+            }
+        }
+
+        Ok(())
     }
 
     fn create_h2_server(&self, p_address_port: String) -> anyhow::Result<pingora::server::Server> {
@@ -268,8 +268,8 @@ impl Server {
                         }
                     }
                 }
-                _event => {
-                    //log::info!("event: {event:?}");
+                event => {
+                    s_info!("event: {event:?}");
                 }
             }
         }
