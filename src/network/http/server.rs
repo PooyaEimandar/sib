@@ -1,6 +1,6 @@
 use super::handler::HandlerFn;
-use crate::s_info;
 use crate::{network::http::handler, s_error};
+use crate::{s_info, s_trace};
 use core::time::Duration;
 use futures::StreamExt;
 use pingora::{listeners::TcpSocketOptions, protocols::TcpKeepalive, services::Service};
@@ -269,7 +269,7 @@ impl Server {
                     }
                 }
                 event => {
-                    s_info!("event: {event:?}");
+                    s_trace!("event: {event:?}");
                 }
             }
         }
