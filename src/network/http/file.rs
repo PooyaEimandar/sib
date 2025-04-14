@@ -20,7 +20,7 @@ use tokio::{fs, sync::RwLock};
 use crate::{
     network::http::session::{HTTPMethod, Session},
     s_error,
-    system::memcached::MemcachedPool,
+    system::{compress, memcached::MemcachedPool},
 };
 
 const CHUNK_SIZE: usize = 16 * 1024;
@@ -29,7 +29,7 @@ const MAX_ON_THE_FLY_SIZE: u64 = 512 * 1024; // 512 KB
 const CACHE_PERSIST_PATH: &str = "./sib_asset_cache.json";
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum EncodingType {
+pub enum EncodingType {
     None,
     Gzip,
     Br,
@@ -201,7 +201,7 @@ pub async fn serve(
                     (com_file, Some(com_meta))
                 } else if file_info.size <= MAX_ON_THE_FLY_SIZE {
                     let content = fs::read(&file_info.path).await?;
-                    let compressed = compress_gzip(&content).await?;
+                    let compressed = compress::encode_gzip(&content).await?;
 
                     session.append_headers(&[
                         (
@@ -237,7 +237,7 @@ pub async fn serve(
                     (com_file, Some(com_meta))
                 } else if file_info.size <= MAX_ON_THE_FLY_SIZE {
                     let content = fs::read(&file_info.path).await?;
-                    let compressed = compress_brotli(&content).await?;
+                    let compressed = compress::encode_brotli(&content, 4096, 9, 18).await?;
 
                     session.append_headers(&[
                         (
@@ -273,7 +273,7 @@ pub async fn serve(
                     (com_file, Some(com_meta))
                 } else if file_info.size <= MAX_ON_THE_FLY_SIZE {
                     let content = fs::read(&file_info.path).await?;
-                    let compressed = compress_zstd(&content).await?;
+                    let compressed = compress::encode_zstd(&content, 9).await?;
 
                     session.append_headers(&[
                         (
@@ -461,44 +461,4 @@ fn get_encoding(accept_encoding: Option<&HeaderValue>, mime: &Mime) -> EncodingT
     } else {
         EncodingType::None
     }
-}
-
-async fn compress_brotli(input: &[u8]) -> anyhow::Result<Bytes> {
-    let input_owned = input.to_vec();
-    tokio::task::spawn_blocking(move || {
-        let mut out = vec![];
-        let mut encoder =
-            brotli::CompressorReader::new(std::io::Cursor::new(input_owned), 4096, 9, 18);
-        std::io::copy(&mut encoder, &mut out)?;
-        Ok::<_, std::io::Error>(Bytes::from(out))
-    })
-    .await?
-    .map_err(Into::into)
-}
-
-async fn compress_zstd(input: &[u8]) -> anyhow::Result<Bytes> {
-    let input_owned = input.to_vec();
-    tokio::task::spawn_blocking(move || {
-        let mut out = vec![];
-        zstd::stream::copy_encode(std::io::Cursor::new(input_owned), &mut out, 9)?;
-        Ok::<_, std::io::Error>(Bytes::from(out))
-    })
-    .await?
-    .map_err(Into::into)
-}
-
-async fn compress_gzip(input: &[u8]) -> anyhow::Result<Bytes> {
-    use flate2::Compression;
-    use flate2::write::GzEncoder;
-
-    let input_owned = input.to_vec();
-    tokio::task::spawn_blocking(move || {
-        let mut out = vec![];
-        let mut encoder = GzEncoder::new(&mut out, Compression::default());
-        std::io::copy(&mut std::io::Cursor::new(input_owned), &mut encoder)?;
-        encoder.finish()?;
-        Ok::<_, std::io::Error>(Bytes::from(out))
-    })
-    .await?
-    .map_err(Into::into)
 }

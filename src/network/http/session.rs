@@ -19,6 +19,8 @@ use tokio_quiche::{
     quiche::h3::{self, NameValue},
 };
 
+use crate::s_error;
+
 const MAX_PATH_LENGTH: usize = 1024;
 const MAX_BODY_SIZE: usize = 10 * 1024 * 1024; // 10MB limit
 const MAX_WS_PAYLOAD_SIZE: usize = 64 * 1024 * 1024; // 64MB limit
@@ -632,6 +634,7 @@ impl Session {
 
     pub async fn send_status(&mut self, status_code: http::StatusCode) -> anyhow::Result<()> {
         if self.status_was_sent {
+            s_error!("Response status already sent");
             bail!("Response status already sent");
         }
 
@@ -663,6 +666,7 @@ impl Session {
 
     pub async fn send_body(&mut self, body: Bytes, finish: bool) -> anyhow::Result<()> {
         if !self.status_was_sent {
+            s_error!("send_body() called before send_status()");
             bail!("Response status not sent yet");
         }
 
@@ -701,13 +705,15 @@ impl Session {
 
     pub async fn send_eom(&mut self) -> anyhow::Result<()> {
         if !self.status_was_sent {
-            bail!("Response status not sent yet");
+            s_error!("send_eom() called before send_status()");
+            bail!("send_eom() called before send_status()");
         }
 
         if let Some(h2) = self.h2.take() {
             h2.finish().await.ok();
         } else if let Some(h3) = &mut self.h3 {
             h3.out_frame.close();
+            h3.out_frame.flush().await?;
         }
         Ok(())
     }
