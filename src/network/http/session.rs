@@ -390,6 +390,10 @@ impl Session {
         self.h3.is_some()
     }
 
+    pub fn get_status_was_sent(&self) -> bool {
+        self.status_was_sent
+    }
+
     pub async fn read_ws_msg(&mut self, timeout: Duration) -> anyhow::Result<(Bytes, WsOpCode)> {
         if let Some(h2) = &mut self.h2 {
             let mut full_payload = Vec::new();
