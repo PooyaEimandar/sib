@@ -405,6 +405,39 @@ impl Session {
         self.status_was_sent
     }
 
+    pub fn get_cookie(&self, name: &str) -> Option<String> {
+        let cookie_header = self.read_req_header(http::header::COOKIE)?;
+        let cookie_str = cookie_header.to_str().ok()?;
+
+        for cookie in cookie_str.split(';') {
+            let mut parts = cookie.trim().splitn(2, '=');
+            let key = parts.next()?.trim();
+            let value = parts.next()?.trim();
+            if key == name {
+                return Some(value.to_string());
+            }
+        }
+        None
+    }
+
+    pub fn get_cookies(&self) -> Vec<String> {
+        let mut result = Vec::new();
+
+        if let Some(cookie_header) = self.read_req_header(http::header::COOKIE) {
+            if let Ok(cookie_str) = cookie_header.to_str() {
+                for cookie in cookie_str.split(';') {
+                    if let Some(kv) = cookie.trim().splitn(2, '=').collect::<Vec<_>>().get(..2) {
+                        if kv.len() == 2 {
+                            result.push(format!("{}={}", kv[0].trim(), kv[1].trim()));
+                        }
+                    }
+                }
+            }
+        }
+
+        result
+    }
+
     pub async fn read_ws_msg(&mut self, timeout: Duration) -> anyhow::Result<(Bytes, WsOpCode)> {
         if let Some(h2) = &mut self.h2 {
             let mut full_payload = Vec::new();
