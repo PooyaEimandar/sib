@@ -33,11 +33,20 @@ impl HttpServerApp for H2Handler {
         _shutdown: &ShutdownWatch,
     ) -> Option<Stream> {
         if let Some(p_handler) = &self.handler {
-            let session = Session::new_h2(p_session);
-            if let Err(e) = p_handler(session).await {
-                s_error!("Handler error: {:?}", e);
+            match Session::new_h2(p_session).await {
+                Ok(session) => {
+                    if let Err(e) = p_handler(session).await {
+                        s_error!("H2/H1 session handler encountered an error: {:?}", e);
+                    }
+                }
+                Err(err) => {
+                    s_error!("Failed to build H2/H1 session: {:?}", err);
+                }
             }
+        } else {
+            s_error!("No handler defined for incoming session.");
         }
+
         None
     }
 }

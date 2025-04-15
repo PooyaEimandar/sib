@@ -21,6 +21,7 @@ use tokio_quiche::{
 
 use crate::s_error;
 
+const READ_H1_HEADERS_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_PATH_LENGTH: usize = 1024;
 const MAX_BODY_SIZE: usize = 10 * 1024 * 1024; // 10MB limit
 const MAX_WS_PAYLOAD_SIZE: usize = 64 * 1024 * 1024; // 64MB limit
@@ -160,15 +161,25 @@ impl Default for Session {
 }
 
 impl Session {
-    pub(crate) fn new_h2(session: ServerSession) -> Self {
+    pub(crate) async fn new_h2(mut session: ServerSession) -> anyhow::Result<Self> {
+        // If HTTP/1.1, manually read the headers
+        if !session.is_http2() {
+            let ready = pingora::time::timeout(READ_H1_HEADERS_TIMEOUT, session.read_request())
+                .await
+                .map_err(|_| anyhow::anyhow!("Session timeout while reading headers"))?
+                .map_err(|e| anyhow::anyhow!("Error reading request: {:?}", e))?;
+
+            if !ready {
+                bail!("Session not ready");
+            }
+        }
+
         let req_summary = session.request_summary();
         let mut parts = req_summary.split(", ");
-        // Extract Method and Path (first part)
         let mut first_part = parts.next().unwrap_or("").split_whitespace();
         let method = first_part.next().unwrap_or("");
         let mut path = first_part.next().unwrap_or("").to_string();
 
-        // Extract Host header (second part)
         let host = parts
             .find(|s| s.starts_with("Host: "))
             .map(|s| s.trim_start_matches("Host: ").trim())
@@ -177,14 +188,14 @@ impl Session {
         path = Self::normalize_slashes(&path);
         let queries = Self::parse_query_params(&mut path);
 
-        Self {
+        Ok(Self {
             method: HTTPMethod::from_str(method).unwrap_or(HTTPMethod::UnDefined),
-            path: path.to_string(),
+            path,
             host: host.to_string(),
             queries,
             h2: Some(session),
             ..Default::default()
-        }
+        })
     }
 
     pub(crate) fn new_h3(
