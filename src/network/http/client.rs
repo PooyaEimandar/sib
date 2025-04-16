@@ -129,7 +129,11 @@ async fn test() -> anyhow::Result<()> {
                 rt.block_on(async {
                     let client_pool = pool.get_for_url((*url).clone()).unwrap();
                     let client = client_pool.get().await.unwrap();
-                    let res = client.get((&*url).clone()).send().await;
+                    let res = client
+                        .get((&*url).clone())
+                        .header("Accept-Encoding", "br")
+                        .send()
+                        .await;
 
                     match res {
                         Ok(resp) => println!("[{}] Status: {}", i, resp.status()),
