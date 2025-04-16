@@ -181,135 +181,13 @@ pub async fn backup(p_backup_path: &str, timeout: std::time::Duration) -> anyhow
     Ok(())
 }
 
-pub async fn migrate_from_json(
-    json_path: &str,
-    domain: &str,
+pub async fn export_to_json(
+    prefix: &str,
     pool: Arc<FDBPool>,
+    batch_limit: usize,
+    output_path: &str,
 ) -> anyhow::Result<()> {
-    let raw_json = tokio::fs::read_to_string(json_path).await?;
-    let new_data: Vec<Value> = serde_json::from_str(&raw_json)?;
-
-    for item in new_data {
-        let urn = item["urn"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("Missing 'urn' field."))?;
-        let key = format!("{}{}", domain, urn);
-
-        let db = pool.get().await?;
-        let trx = db.create_trx()?;
-        let transaction = FDBTransaction { trx };
-
-        let current_val = transaction.get(key.as_bytes()).await?;
-        let new_map = item
-            .as_object()
-            .ok_or_else(|| anyhow::anyhow!("Expected object for item"))?;
-
-        let final_value = if let Some(bytes) = current_val {
-            let mut old_json: Value = serde_json::from_slice(&bytes)?;
-            if let Some(old_map) = old_json.as_object_mut() {
-                log_diff(urn, old_map, new_map);
-                rename_fields(old_map, new_map, urn);
-                merge_and_clean(old_map, new_map);
-            }
-            old_json
-        } else {
-            s_info!("[NEW] inserting '{}'", urn);
-            Value::Object(new_map.clone())
-        };
-
-        let encoded = serde_json::to_vec(&final_value)?;
-        transaction.set(key.as_bytes(), &encoded);
-        transaction.commit().await?;
-    }
-
-    Ok(())
-}
-
-fn merge_and_clean(old: &mut Map<String, Value>, new: &Map<String, Value>) {
-    for (k, new_val) in new {
-        match new_val {
-            Value::String(s) if s.is_empty() => {
-                old.remove(k);
-            }
-            Value::Object(new_obj) => {
-                if let Some(Value::Object(old_obj)) = old.get_mut(k) {
-                    merge_and_clean(old_obj, new_obj);
-                } else {
-                    old.insert(k.clone(), Value::Object(new_obj.clone()));
-                }
-            }
-            _ => {
-                old.insert(k.clone(), new_val.clone());
-            }
-        }
-    }
-
-    let to_remove: Vec<String> = old
-        .keys()
-        .filter(|k| !new.contains_key(*k))
-        .cloned()
-        .collect();
-    for k in to_remove {
-        old.remove(&k);
-    }
-}
-
-fn rename_fields(old: &mut Map<String, Value>, new: &Map<String, Value>, urn: &str) {
-    let old_keys: Vec<String> = old.keys().cloned().collect();
-    let new_keys: Vec<String> = new.keys().cloned().collect();
-
-    for old_key in &old_keys {
-        if !new.contains_key(old_key) {
-            if let Some(old_val) = old.get(old_key) {
-                for new_key in &new_keys {
-                    if !old.contains_key(new_key) && new.get(new_key) == Some(old_val) {
-                        let val = old.remove(old_key).unwrap();
-                        old.insert(new_key.clone(), val);
-                        s_info!("[{}] renamed '{}' → '{}'", urn, old_key, new_key);
-                        break;
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn log_diff(urn: &str, old: &Map<String, Value>, new: &Map<String, Value>) {
-    for (k, new_val) in new {
-        match old.get(k) {
-            Some(old_val) if old_val != new_val => {
-                s_info!("[{}] '{}' changed: {:?} → {:?}", urn, k, old_val, new_val);
-            }
-            None => {
-                s_info!("[{}] '{}' added: {:?}", urn, k, new_val);
-            }
-            _ => {}
-        }
-    }
-
-    for k in old.keys() {
-        if !new.contains_key(k) {
-            s_info!("[{}] '{}' removed", urn, k);
-        }
-    }
-}
-
-/// Utility to get the next byte prefix (e.g. `/ads/` → `/ads0`)
-fn next_prefix(prefix: &[u8]) -> Vec<u8> {
-    let mut next = prefix.to_vec();
-    for i in (0..next.len()).rev() {
-        if next[i] < 255 {
-            next[i] += 1;
-            next.truncate(i + 1);
-            return next;
-        }
-    }
-    // If all 0xFF, append a null byte
-    next.push(0);
-    next
-}
-
-pub async fn dump(prefix: &str, pool: Arc<FDBPool>, batch_limit: usize) -> anyhow::Result<()> {
+    let mut data = Map::new();
     let mut begin = foundationdb::KeySelector::first_greater_or_equal(prefix.as_bytes().to_vec());
     let end = foundationdb::KeySelector::first_greater_or_equal(next_prefix(prefix.as_bytes()));
 
@@ -325,27 +203,126 @@ pub async fn dump(prefix: &str, pool: Arc<FDBPool>, batch_limit: usize) -> anyho
             ..Default::default()
         };
 
-        let kvs = trx.get_range(&range, batch_limit, false).await?;
+        let kvs = trx
+            .get_range(&range, batch_limit, false)
+            .await
+            .map_err(|e| anyhow::anyhow!("get_range failed: {}", e))?;
 
         if kvs.is_empty() {
             break;
         }
 
         for kv in &kvs {
-            let key = String::from_utf8_lossy(kv.key());
-            let value_str = match serde_json::from_slice::<Value>(kv.value()) {
-                Ok(json) => serde_json::to_string_pretty(&json)?,
-                Err(_) => BASE64_STANDARD.encode(kv.value()),
-            };
-            println!("🔑 Key: {}\n📦 Value:\n{}\n---", key, value_str);
+            let key = String::from_utf8_lossy(kv.key()).to_string();
+            if let Ok(json_val) = serde_json::from_slice::<Value>(kv.value()) {
+                data.insert(key, json_val);
+            } else {
+                data.insert(key, Value::String(BASE64_STANDARD.encode(kv.value())));
+            }
         }
 
-        // Advance to the next key (avoid infinite loop)
         let last_key = kvs.last().map(|kv| kv.key().to_vec()).unwrap();
         begin = foundationdb::KeySelector::first_greater_than(last_key);
     }
 
+    let out_json = Value::Object(data);
+    tokio::fs::write(output_path, serde_json::to_vec_pretty(&out_json)?).await?;
+
     Ok(())
+}
+
+pub async fn import_from_json(input_path: &str, pool: Arc<FDBPool>) -> anyhow::Result<()> {
+    let raw_json = tokio::fs::read_to_string(input_path).await?;
+    let imported: Map<String, Value> = serde_json::from_str(&raw_json)?;
+
+    // Extract prefix (assumes common prefix for all keys)
+    let prefix = imported
+        .keys()
+        .next()
+        .and_then(|k| k.split('/').nth(1))
+        .map(|s| format!("/{}/", s))
+        .unwrap_or_else(|| "/".to_string());
+
+    // Load all existing keys from the DB under that prefix
+    let mut existing_keys = Vec::new();
+    let mut begin = foundationdb::KeySelector::first_greater_or_equal(prefix.as_bytes().to_vec());
+    let end = foundationdb::KeySelector::first_greater_or_equal(next_prefix(prefix.as_bytes()));
+
+    loop {
+        let db = pool.get().await?;
+        let trx = db.create_trx()?;
+
+        let range = foundationdb::RangeOption {
+            begin: begin.clone(),
+            end: end.clone(),
+            limit: Some(1000),
+            reverse: false,
+            ..Default::default()
+        };
+
+        let kvs = trx.get_range(&range, 1000, false).await?;
+        if kvs.is_empty() {
+            break;
+        }
+
+        existing_keys.extend(
+            kvs.iter()
+                .map(|kv| String::from_utf8_lossy(kv.key()).to_string()),
+        );
+
+        let last_key = kvs.last().unwrap().key().to_vec();
+        begin = foundationdb::KeySelector::first_greater_than(last_key);
+    }
+
+    // Begin a batch import (set and delete)
+    for key in existing_keys {
+        if !imported.contains_key(&key) {
+            let db = pool.get().await?;
+            let trx = db.create_trx()?;
+            trx.clear(key.as_bytes());
+            trx.commit().await.map_err(anyhow::Error::msg)?;
+            s_info!("Deleted key: {}", key);
+        }
+    }
+
+    for (key, new_val) in imported {
+        let db = pool.get().await?;
+        let trx = db.create_trx()?;
+        let transaction = FDBTransaction { trx };
+
+        let current_val = transaction.get(key.as_bytes()).await?;
+        let new_bytes = serde_json::to_vec(&new_val)?;
+
+        let should_write = match current_val {
+            Some(existing_bytes) => existing_bytes.as_ref() != new_bytes.as_slice(),
+            None => true,
+        };
+
+        if should_write {
+            s_info!("Updating key: {}", key);
+            transaction.set(key.as_bytes(), &new_bytes);
+            transaction.commit().await?;
+        } else {
+            s_info!("Skipping unchanged key: {}", key);
+        }
+    }
+
+    Ok(())
+}
+
+/// Utility to get the next byte prefix (e.g. `/ads/` → `/ads0`)
+fn next_prefix(prefix: &[u8]) -> Vec<u8> {
+    let mut next = prefix.to_vec();
+    for i in (0..next.len()).rev() {
+        if next[i] < 255 {
+            next[i] += 1;
+            next.truncate(i + 1);
+            return next;
+        }
+    }
+    // If all 0xFF, append a null byte
+    next.push(0);
+    next
 }
 
 #[tokio::test]
@@ -393,31 +370,18 @@ async fn test() -> anyhow::Result<()> {
     Ok(())
 }
 
-// #[tokio::test]
-// async fn migration_test() -> anyhow::Result<()> {
-//     use crate::system::log::LogFileConfig;
-//     use crate::system::log::LogFilterLevel;
-//     use crate::system::log::LogRolling;
+#[tokio::test]
+async fn export_import() -> anyhow::Result<()> {
+    let _network = FDBNetwork::new();
+    let pool = Arc::new(create_fdb_pool(10));
 
-//     let log_file = LogFileConfig {
-//         roller: LogRolling::DAILY,
-//         dir: "log".to_owned(),
-//         file_name: "app.log".to_owned(),
-//         ansi: false,
-//     };
-//     let _log_system =
-//         crate::system::log::init_log(LogFilterLevel::TRACE, Some(log_file), None).await;
+    export_to_json("/", Arc::clone(&pool), 100, "./backup.json")
+        .await
+        .unwrap();
 
-//     let _ = FDBNetwork::new();
-//     let pool = Arc::new(create_fdb_pool(10));
-//     migrate_from_json(
-//         "/Users/pooyaeimandar/Codes/arium-gg/dragon-rs/dragon/asset/module/data/ad.json",
-//         "/ads/",
-//         Arc::clone(&pool),
-//     )
-//     .await?;
+    import_from_json("./backup.json", Arc::clone(&pool))
+        .await
+        .unwrap();
 
-//     dump("/ads/", pool, 10).await?;
-
-//     Ok(())
-// }
+    Ok(())
+}

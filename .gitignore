@@ -21,6 +21,6 @@ Cargo.lock
 #.idea/
 
 *.DS_Store
-
+backup.json
 log/*
 coverage/*
