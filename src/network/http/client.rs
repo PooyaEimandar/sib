@@ -55,7 +55,7 @@ impl Manager for ReqManager {
 pub struct HttpReqPool {
     timeout: Duration,
     max_size: usize,
-    inner: Arc<DashMap<Url, Arc<Pool<ReqManager>>>>,
+    inner: Arc<DashMap<String, Arc<Pool<ReqManager>>>>,
 }
 
 impl HttpReqPool {
@@ -68,7 +68,18 @@ impl HttpReqPool {
     }
 
     pub fn get_for_url(&self, url: Url) -> anyhow::Result<Arc<Pool<ReqManager>>> {
-        if let Some(existing) = self.inner.get(&url) {
+        let key = match url.host_str() {
+            Some(h) => {
+                if let Some(port) = url.port() {
+                    format!("{}:{}", h, port)
+                } else {
+                    h.to_string()
+                }
+            }
+            None => anyhow::bail!("URL has no host"),
+        };
+
+        if let Some(existing) = self.inner.get(&key) {
             return Ok(existing.clone());
         }
 
@@ -79,7 +90,7 @@ impl HttpReqPool {
             .map_err(|e| anyhow::anyhow!("Failed to build HttpReqPool: {}", e))?;
 
         let arc_pool = Arc::new(pool);
-        self.inner.insert(url, arc_pool.clone());
+        self.inner.insert(key, arc_pool.clone());
         Ok(arc_pool)
     }
 }
