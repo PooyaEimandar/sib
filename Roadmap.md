@@ -5,6 +5,7 @@
 [x] Static file server
 [x] Log for console, file and clickhouse
 [x] Websocket server
+[x] HTTP client pool
 [] Ffmpeg
 [] TCP client & server
 [] UDP client & server
