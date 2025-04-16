@@ -14,6 +14,7 @@ impl ReqManager {
     }
 }
 
+#[allow(clippy::manual_async_fn)]
 #[async_trait::async_trait]
 impl Manager for ReqManager {
     type Type = Client;
@@ -93,4 +94,54 @@ impl HttpReqPool {
         self.inner.insert(key, arc_pool.clone());
         Ok(arc_pool)
     }
+}
+
+#[tokio::test]
+async fn test() -> anyhow::Result<()> {
+    use rayon::prelude::*;
+    use std::sync::Arc;
+    use std::time::Instant;
+    use url::Url;
+
+    let pool = HttpReqPool::new(Duration::from_secs(5), 10);
+    let url = Url::parse("https://www.rust-lang.org")?;
+    let pool = Arc::new(pool);
+    let url = Arc::new(url);
+
+    let iterations = 50;
+    let start = Instant::now();
+
+    tokio::task::spawn_blocking({
+        let pool = pool.clone();
+        let url = url.clone();
+
+        move || {
+            (0..iterations).into_par_iter().for_each(|i| {
+                let url = url.clone();
+                let pool = pool.clone();
+
+                // Use local runtime per thread (but avoid dropping in async context)
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+
+                rt.block_on(async {
+                    let client_pool = pool.get_for_url((*url).clone()).unwrap();
+                    let client = client_pool.get().await.unwrap();
+                    let res = client.get((&*url).clone()).send().await;
+
+                    match res {
+                        Ok(resp) => println!("[{}] Status: {}", i, resp.status()),
+                        Err(err) => eprintln!("[{}] Error: {}", i, err),
+                    }
+                });
+            });
+        }
+    })
+    .await?;
+
+    let elapsed = start.elapsed();
+    println!("Completed {} requests in {:.2?}", iterations, elapsed);
+    Ok(())
 }
