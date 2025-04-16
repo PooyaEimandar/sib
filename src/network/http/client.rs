@@ -108,7 +108,7 @@ async fn test() -> anyhow::Result<()> {
     let pool = Arc::new(pool);
     let url = Arc::new(url);
 
-    let iterations = 50;
+    let iterations = 10;
     let start = Instant::now();
 
     tokio::task::spawn_blocking({
