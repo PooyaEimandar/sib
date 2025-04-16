@@ -395,9 +395,27 @@ async fn test() -> anyhow::Result<()> {
 
 // #[tokio::test]
 // async fn migration_test() -> anyhow::Result<()> {
-//     let _network = FDBNetwork::new();
+//     use crate::system::log::LogFileConfig;
+//     use crate::system::log::LogFilterLevel;
+//     use crate::system::log::LogRolling;
+
+//     let log_file = LogFileConfig {
+//         roller: LogRolling::DAILY,
+//         dir: "log".to_owned(),
+//         file_name: "app.log".to_owned(),
+//         ansi: false,
+//     };
+//     let _log_system =
+//         crate::system::log::init_log(LogFilterLevel::TRACE, Some(log_file), None).await;
+
+//     let _ = FDBNetwork::new();
 //     let pool = Arc::new(create_fdb_pool(10));
-//     migrate_from_json("/ad.json", "/ads/", Arc::clone(&pool)).await?;
+//     migrate_from_json(
+//         "/Users/pooyaeimandar/Codes/arium-gg/dragon-rs/dragon/asset/module/data/ad.json",
+//         "/ads/",
+//         Arc::clone(&pool),
+//     )
+//     .await?;
 
 //     dump("/ads/", pool, 10).await?;
 

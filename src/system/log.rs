@@ -226,14 +226,18 @@ impl Log {
             done_receiver: Some(done_receiver),
         }
     }
+}
 
-    pub async fn shutdown(&mut self) {
-        tokio::task::yield_now().await;
+impl Drop for Log {
+    fn drop(&mut self) {
         if let Some(shutdown_sender) = self.shutdown_sender.take() {
-            let _ = shutdown_sender.send(());
-        }
-        if let Some(done_receiver) = self.done_receiver.take() {
-            let _ = done_receiver.await;
+            let done_receiver = self.done_receiver.take();
+            tokio::spawn(async move {
+                let _ = shutdown_sender.send(());
+                if let Some(done_receiver) = done_receiver {
+                    let _ = done_receiver.await;
+                }
+            });
         }
     }
 }
@@ -399,7 +403,7 @@ async fn test() {
         ansi: false,
     };
     let clickhouse_config = ClickhouseConfig::default();
-    let mut log_system = init_log(
+    let _log_system = init_log(
         LogFilterLevel::TRACE,
         Some(log_file),
         Some(clickhouse_config),
@@ -418,8 +422,6 @@ async fn test() {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         s_warn!("X:{} from warn", x);
     });
-
-    log_system.shutdown().await;
 
     println!("Logging system shut down, check result via http://localhost:8123/play");
 }
