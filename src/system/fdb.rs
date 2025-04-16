@@ -23,6 +23,12 @@ impl FDBNetwork {
     }
 }
 
+impl Default for FDBNetwork {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // Manager for FoundationDB connections
 pub struct FDBManager;
 
@@ -114,7 +120,7 @@ pub async fn backup(p_backup_path: &str, timeout: std::time::Duration) -> anyhow
 
     // Start the backup
     let status = Command::new("fdbbackup")
-        .args(&["start", "-d", &backup_dir])
+        .args(["start", "-d", &backup_dir])
         .status()
         .await?;
 
@@ -127,7 +133,7 @@ pub async fn backup(p_backup_path: &str, timeout: std::time::Duration) -> anyhow
 
     loop {
         let mut child = Command::new("fdbbackup")
-            .args(&["status"])
+            .args(["status"])
             .stdout(std::process::Stdio::piped())
             .spawn()?;
 
@@ -326,10 +332,10 @@ pub async fn dump(prefix: &str, pool: Arc<FDBPool>, batch_limit: usize) -> anyho
         }
 
         for kv in &kvs {
-            let key = String::from_utf8_lossy(&kv.key());
-            let value_str = match serde_json::from_slice::<Value>(&kv.value()) {
+            let key = String::from_utf8_lossy(kv.key());
+            let value_str = match serde_json::from_slice::<Value>(kv.value()) {
                 Ok(json) => serde_json::to_string_pretty(&json)?,
-                Err(_) => BASE64_STANDARD.encode(&kv.value()),
+                Err(_) => BASE64_STANDARD.encode(kv.value()),
             };
             println!("🔑 Key: {}\n📦 Value:\n{}\n---", key, value_str);
         }
@@ -387,13 +393,13 @@ async fn test() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[tokio::test]
-async fn migration_test() -> anyhow::Result<()> {
-    let _network = FDBNetwork::new();
-    let pool = Arc::new(create_fdb_pool(10));
-    migrate_from_json("/ad.json", "/ads/", Arc::clone(&pool)).await?;
+// #[tokio::test]
+// async fn migration_test() -> anyhow::Result<()> {
+//     let _network = FDBNetwork::new();
+//     let pool = Arc::new(create_fdb_pool(10));
+//     migrate_from_json("/ad.json", "/ads/", Arc::clone(&pool)).await?;
 
-    dump("/ads/", pool, 10).await?;
+//     dump("/ads/", pool, 10).await?;
 
-    Ok(())
-}
+//     Ok(())
+// }

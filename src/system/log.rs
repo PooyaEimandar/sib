@@ -394,7 +394,7 @@ macro_rules! s_trace_time {
 async fn test() {
     let log_file = LogFileConfig {
         roller: LogRolling::DAILY,
-        dir: "logs".to_owned(),
+        dir: "log".to_owned(),
         file_name: "app.log".to_owned(),
         ansi: false,
     };
