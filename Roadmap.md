@@ -7,5 +7,6 @@
 [x] Websocket server
 [x] HTTP client pool
 [] Ffmpeg
+[] Rist
 [] TCP client & server
 [] UDP client & server
