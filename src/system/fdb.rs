@@ -1,7 +1,9 @@
 use async_trait::async_trait;
 use base64::{Engine, prelude::BASE64_STANDARD};
 use deadpool::managed::{Manager, Metrics, Object, Pool, RecycleError, RecycleResult};
-use foundationdb::{Database, Transaction, options::TransactionOption};
+use foundationdb::{
+    Database, RangeOption, Transaction, future::FdbValues, options::TransactionOption,
+};
 use serde_json::{Map, Value};
 use std::{sync::Arc, time::Duration};
 use tokio::{
@@ -78,7 +80,7 @@ pub struct FDBTransaction {
 }
 
 impl FDBTransaction {
-    pub fn new(db: Object<FDBManager>) -> anyhow::Result<Self> {
+    pub fn new(db: &Object<FDBManager>) -> anyhow::Result<Self> {
         let trx = db.create_trx()?;
         Ok(Self { trx })
     }
@@ -99,8 +101,28 @@ impl FDBTransaction {
         self.trx.set_option(option).map_err(anyhow::Error::msg)
     }
 
-    pub async fn commit(self) -> anyhow::Result<foundationdb::TransactionCommitted> {
-        self.trx.commit().await.map_err(anyhow::Error::msg)
+    pub fn clear(&self, key: &[u8]) {
+        self.trx.clear(key);
+    }
+
+    pub async fn get_range<'a>(
+        &self,
+        range: &RangeOption<'a>,
+        iteration: usize,
+        snapshot: bool,
+    ) -> anyhow::Result<FdbValues> {
+        self.trx
+            .get_range(range, iteration, snapshot)
+            .await
+            .map_err(anyhow::Error::msg)
+    }
+
+    pub async fn commit(self) -> anyhow::Result<()> {
+        self.trx
+            .commit()
+            .await
+            .map(|_| ())
+            .map_err(anyhow::Error::msg)
     }
 
     pub async fn watch(&self, key: &[u8]) -> anyhow::Result<()> {
@@ -220,7 +242,7 @@ pub async fn export_to_json(
 
     loop {
         let db = pool.get().await?;
-        let trx = db.create_trx()?;
+        let trx = FDBTransaction::new(&db)?;
 
         let range = foundationdb::RangeOption {
             begin: begin.clone(),
@@ -277,7 +299,7 @@ pub async fn import_from_json(input_path: &str, pool: Arc<FDBPool>) -> anyhow::R
 
     loop {
         let db = pool.get().await?;
-        let trx = db.create_trx()?;
+        let trx = FDBTransaction::new(&db)?;
 
         let range = foundationdb::RangeOption {
             begin: begin.clone(),
@@ -305,18 +327,18 @@ pub async fn import_from_json(input_path: &str, pool: Arc<FDBPool>) -> anyhow::R
     for key in existing_keys {
         if !imported.contains_key(&key) {
             let db = pool.get().await?;
-            let trx = db.create_trx()?;
+            let trx = FDBTransaction::new(&db)?;
             trx.clear(key.as_bytes());
-            trx.commit().await.map_err(anyhow::Error::msg)?;
+            trx.commit().await?;
             s_info!("Deleted key: {}", key);
         }
     }
 
     for (key, new_val) in imported {
         let db = pool.get().await?;
-        let transaction = FDBTransaction::new(db)?;
+        let trx = FDBTransaction::new(&db)?;
 
-        let current_val = transaction.get(key.as_bytes()).await?;
+        let current_val = trx.get(key.as_bytes()).await?;
         let new_bytes = serde_json::to_vec(&new_val)?;
 
         let should_write = match current_val {
@@ -326,8 +348,8 @@ pub async fn import_from_json(input_path: &str, pool: Arc<FDBPool>) -> anyhow::R
 
         if should_write {
             s_info!("Updating key: {}", key);
-            transaction.set(key.as_bytes(), &new_bytes);
-            transaction.commit().await?;
+            trx.set(key.as_bytes(), &new_bytes);
+            trx.commit().await?;
         } else {
             s_info!("Skipping unchanged key: {}", key);
         }
@@ -361,8 +383,7 @@ async fn test_transaction() -> anyhow::Result<()> {
     let pool_clone = Arc::clone(&pool);
     let task1 = tokio::spawn(async move {
         if let Ok(db) = pool_clone.get().await {
-            if let Ok(trx) = db.create_trx() {
-                let transaction = FDBTransaction { trx };
+            if let Ok(transaction) = FDBTransaction::new(&db) {
                 transaction.set(b"key1", b"value1");
                 if let Err(e) = transaction.commit().await {
                     eprintln!("Transaction 1 failed: {:?}", e);
@@ -376,8 +397,7 @@ async fn test_transaction() -> anyhow::Result<()> {
     let pool_clone = Arc::clone(&pool);
     let task2 = tokio::spawn(async move {
         if let Ok(db) = pool_clone.get().await {
-            if let Ok(trx) = db.create_trx() {
-                let transaction = FDBTransaction { trx };
+            if let Ok(transaction) = FDBTransaction::new(&db) {
                 match transaction.get(b"key1").await {
                     Ok(Some(data)) => match String::from_utf8(data.to_vec()) {
                         Ok(s) => println!("Fetched key1: {}", s),
