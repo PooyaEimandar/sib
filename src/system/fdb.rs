@@ -233,7 +233,9 @@ pub async fn backup(p_backup_dir: &str, timeout: std::time::Duration) -> anyhow:
 pub async fn export_to_json(
     prefix: &str,
     pool: Arc<FDBPool>,
-    batch_limit: usize,
+    iteration: usize,
+    reverse: bool,
+    snapshot: bool,
     output_path: &str,
 ) -> anyhow::Result<()> {
     let mut data = Map::new();
@@ -247,13 +249,13 @@ pub async fn export_to_json(
         let range = foundationdb::RangeOption {
             begin: begin.clone(),
             end: end.clone(),
-            limit: Some(batch_limit),
-            reverse: false,
+            limit: Some(iteration),
+            reverse,
             ..Default::default()
         };
 
         let kvs = trx
-            .get_range(&range, batch_limit, false)
+            .get_range(&range, iteration, snapshot)
             .await
             .map_err(|e| anyhow::anyhow!("get_range failed: {}", e))?;
 
@@ -280,7 +282,13 @@ pub async fn export_to_json(
     Ok(())
 }
 
-pub async fn import_from_json(input_path: &str, pool: Arc<FDBPool>) -> anyhow::Result<()> {
+pub async fn import_from_json(
+    input_path: &str,
+    pool: Arc<FDBPool>,
+    iteration: usize,
+    reverse: bool,
+    snapshot: bool,
+) -> anyhow::Result<()> {
     let raw_json = tokio::fs::read_to_string(input_path).await?;
     let imported: Map<String, Value> = serde_json::from_str(&raw_json)?;
 
@@ -304,12 +312,12 @@ pub async fn import_from_json(input_path: &str, pool: Arc<FDBPool>) -> anyhow::R
         let range = foundationdb::RangeOption {
             begin: begin.clone(),
             end: end.clone(),
-            limit: Some(1000),
-            reverse: false,
+            limit: Some(iteration),
+            reverse,
             ..Default::default()
         };
 
-        let kvs = trx.get_range(&range, 1000, false).await?;
+        let kvs = trx.get_range(&range, iteration, snapshot).await?;
         if kvs.is_empty() {
             break;
         }
@@ -353,6 +361,46 @@ pub async fn import_from_json(input_path: &str, pool: Arc<FDBPool>) -> anyhow::R
         } else {
             s_info!("Skipping unchanged key: {}", key);
         }
+    }
+
+    Ok(())
+}
+
+pub async fn clear(
+    prefix: &str,
+    pool: Arc<FDBPool>,
+    iteration: usize,
+    reverse: bool,
+    snapshot: bool,
+) -> anyhow::Result<()> {
+    let mut begin = foundationdb::KeySelector::first_greater_or_equal(prefix.as_bytes().to_vec());
+    let end = foundationdb::KeySelector::first_greater_or_equal(next_prefix(prefix.as_bytes()));
+
+    loop {
+        let db = pool.get().await?;
+        let trx = FDBTransaction::new(&db)?;
+
+        let range = foundationdb::RangeOption {
+            begin: begin.clone(),
+            end: end.clone(),
+            limit: Some(iteration),
+            reverse,
+            ..Default::default()
+        };
+
+        let kvs = trx.get_range(&range, iteration, snapshot).await?;
+        if kvs.is_empty() {
+            break;
+        }
+
+        for kv in &kvs {
+            trx.clear(kv.key());
+            s_info!("Cleared key: {}", String::from_utf8_lossy(kv.key()));
+        }
+
+        trx.commit().await?;
+        let last_key = kvs.last().unwrap().key().to_vec();
+        begin = foundationdb::KeySelector::first_greater_than(last_key);
     }
 
     Ok(())
@@ -421,11 +469,11 @@ async fn test_export_import() -> anyhow::Result<()> {
     let _network = FDBNetwork::new();
     let pool = Arc::new(create_fdb_pool(10));
 
-    export_to_json("/", Arc::clone(&pool), 100, "./backup.json")
+    export_to_json("/", Arc::clone(&pool), 100, false, false, "./backup.json")
         .await
         .unwrap();
 
-    import_from_json("./backup.json", Arc::clone(&pool))
+    import_from_json("./backup.json", Arc::clone(&pool), 100, false, false)
         .await
         .unwrap();
 
