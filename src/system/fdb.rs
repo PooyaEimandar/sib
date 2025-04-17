@@ -467,13 +467,13 @@ async fn test_transaction() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_export_import() -> anyhow::Result<()> {
     let _network = FDBNetwork::new();
-    let pool = Arc::new(create_fdb_pool(10));
+    let pool = create_fdb_pool(10);
 
-    export_to_json("/", Arc::clone(&pool), 100, false, false, "./backup.json")
+    export_to_json("/", pool.clone().into(), 100, false, false, "./backup.json")
         .await
         .unwrap();
 
-    import_from_json("./backup.json", Arc::clone(&pool), 100, false, false)
+    import_from_json("./backup.json", pool.into(), 100, false, false)
         .await
         .unwrap();
 
