@@ -105,9 +105,9 @@ impl FDBTransaction {
         self.trx.clear(key);
     }
 
-    pub async fn get_range<'a>(
+    pub async fn get_range(
         &self,
-        range: &RangeOption<'a>,
+        range: &RangeOption<'_>,
         iteration: usize,
         snapshot: bool,
     ) -> anyhow::Result<FdbValues> {
