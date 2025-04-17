@@ -344,7 +344,7 @@ pub async fn serve(
     session.send_eom().await
 }
 
-pub fn create_cache(capacity: u64, ttl: std::time::Duration) -> FileCache {
+pub fn load_file_cache(capacity: u64, ttl: std::time::Duration) -> FileCache {
     Cache::builder()
         .max_capacity(capacity)
         .time_to_live(ttl)
