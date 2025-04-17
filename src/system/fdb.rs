@@ -65,7 +65,7 @@ impl Manager for FDBManager {
 }
 
 // Type alias for easier usage
-type FDBPool = Pool<FDBManager>;
+pub type FDBPool = Pool<FDBManager>;
 
 pub fn create_fdb_pool(pool_size: usize) -> FDBPool {
     let manager = FDBManager;
