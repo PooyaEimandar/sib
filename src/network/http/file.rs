@@ -1,32 +1,22 @@
 use bytes::Bytes;
 use http::{HeaderValue, StatusCode};
 use httpdate::HttpDate;
-use lru::LruCache;
 use memmap2::Mmap;
 use mime_guess::{Mime, mime};
+use moka::future::Cache;
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::HashMap,
-    fs::{File as StdFile, Metadata},
-    io::{BufReader, BufWriter},
-    num::NonZeroUsize,
-    ops::Range,
-    path::PathBuf,
-    sync::Arc,
-    time::SystemTime,
-};
-use tokio::{fs, sync::RwLock};
+use std::{fs::Metadata, ops::Range, path::PathBuf, time::SystemTime};
+use tokio::fs;
 
 use crate::{
     network::http::session::{HTTPMethod, Session},
     s_error,
-    system::{compress, memcached::MemcachedPool},
+    system::compress,
 };
 
 const CHUNK_SIZE: usize = 16 * 1024;
 const MIN_BYTES: u64 = 1024;
 const MAX_ON_THE_FLY_SIZE: u64 = 512 * 1024; // 512 KB
-const CACHE_PERSIST_PATH: &str = "./sib_asset_cache.json";
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum EncodingType {
@@ -45,14 +35,13 @@ pub struct FileInfo {
     modified: SystemTime,
 }
 
-pub type FileCache = Arc<RwLock<LruCache<String, FileInfo>>>;
+pub type FileCache = Cache<String, FileInfo>;
 
 pub async fn serve(
     session: &mut Session,
     path: &str,
     root: &str,
     file_cache: FileCache,
-    memcached_pool: Option<MemcachedPool>,
 ) -> anyhow::Result<()> {
     let static_root = fs::canonicalize(root).await?;
     let requested_path = PathBuf::from(root).join(path);
@@ -77,27 +66,10 @@ pub async fn serve(
     let mut file_info_opt: Option<FileInfo> = None;
 
     {
-        let mut cache = file_cache.write().await;
-        if let Some(info) = cache.get(&key) {
+        if let Some(info) = file_cache.get(&key).await {
             let modified = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
             if modified <= info.modified {
                 file_info_opt = Some(info.clone());
-            }
-        }
-    }
-
-    if file_info_opt.is_none() {
-        if let Some(pool) = &memcached_pool {
-            if let Ok(mem_client) = pool.get().await {
-                if let Ok(Some(json)) = mem_client.get::<String>(&key) {
-                    if let Ok(info) = serde_json::from_str::<FileInfo>(&json) {
-                        let modified = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-                        if modified <= info.modified {
-                            file_info_opt = Some(info.clone());
-                            file_cache.write().await.put(key.clone(), info);
-                        }
-                    }
-                }
             }
         }
     }
@@ -120,27 +92,7 @@ pub async fn serve(
             modified,
         };
 
-        {
-            let mut cache = file_cache.write().await;
-            cache.put(key.clone(), info.clone());
-            let cache_res = persist_cache(&cache);
-            if let Err(err) = cache_res {
-                crate::s_error!(
-                    "File server failed to write to the LRU persistent cache: {}",
-                    err
-                );
-            }
-        }
-
-        if let Some(pool) = &memcached_pool {
-            if let Ok(mem_client) = pool.get().await {
-                let memcached_res = mem_client.set(&key, &serde_json::to_string(&info)?, 300);
-                if let Err(err) = memcached_res {
-                    crate::s_error!("File server failed to write to the memcached: {}", err);
-                }
-            }
-        }
-
+        file_cache.insert(key.clone(), info.clone()).await;
         info
     };
 
@@ -392,31 +344,11 @@ pub async fn serve(
     session.send_eom().await
 }
 
-pub fn load_cache(capacity: usize) -> FileCache {
-    let file = StdFile::open(CACHE_PERSIST_PATH);
-    let mut cache = LruCache::new(NonZeroUsize::new(capacity).unwrap());
-    if let Ok(f) = file {
-        if let Ok(map) = serde_json::from_reader::<_, HashMap<String, FileInfo>>(BufReader::new(f))
-        {
-            for (k, v) in map {
-                cache.put(k, v);
-            }
-        }
-    }
-    Arc::new(RwLock::new(cache))
-}
-
-fn persist_cache(cache: &LruCache<String, FileInfo>) -> std::io::Result<()> {
-    let file = StdFile::create(CACHE_PERSIST_PATH)?;
-    let writer = BufWriter::new(file);
-    serde_json::to_writer(
-        writer,
-        &cache
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect::<HashMap<_, _>>(),
-    )?;
-    Ok(())
+pub fn load_cache(capacity: u64) -> FileCache {
+    Cache::builder()
+        .max_capacity(capacity)
+        .time_to_live(std::time::Duration::from_secs(0))
+        .build()
 }
 
 fn parse_byte_range(header: &str, total_size: u64) -> Option<Range<u64>> {

@@ -42,9 +42,11 @@ klickhouse = { version = "0.13.2", optional = true }
 lru = { version = "0.14.0", optional = true, default-features = false, features = [
     "hashbrown",
 ] }
-memcache = { version = "0.18.0", optional = true, default-features = false }
 memmap2 = { version = "0.9.5", optional = true, default-features = false }
 mime_guess = { version = "2.0.5", optional = true, default-features = false }
+moka = { version = "0.12.10", optional = true, default-features = false, features = [
+    "future",
+] }
 num_cpus = { version = "1.16.0" }
 pingora = { version = "0.4.0", optional = true, default-features = false, features = [
     "boringssl",
@@ -88,7 +90,7 @@ zstd = { version = "0.13.3", optional = true }
 
 [features]
 default = ["database", "http-client", "http-server", "system"]
-database = ["deadpool", "foundationdb", "klickhouse", "memcache", "system"]
+database = ["deadpool", "foundationdb", "klickhouse", "system"]
 http-client = ["dashmap", "deadpool", "reqwest"]
 http-server = [
     "base64",
@@ -102,6 +104,7 @@ http-server = [
     "lru",
     "memmap2",
     "mime_guess",
+    "moka",
     "pingora",
     "serde_json",
     "serde",
