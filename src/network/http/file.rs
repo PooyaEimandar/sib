@@ -344,11 +344,15 @@ pub async fn serve(
     session.send_eom().await
 }
 
-pub fn load_file_cache(capacity: u64, ttl: std::time::Duration) -> FileCache {
-    Cache::builder()
-        .max_capacity(capacity)
-        .time_to_live(ttl)
-        .build()
+pub fn load_file_cache(capacity: u64, ttl: Option<std::time::Duration>) -> FileCache {
+    if let Some(ttl_time) = ttl {
+        Cache::builder()
+            .max_capacity(capacity)
+            .time_to_live(ttl_time)
+            .build()
+    } else {
+        Cache::builder().max_capacity(capacity).build()
+    }
 }
 
 fn parse_byte_range(header: &str, total_size: u64) -> Option<Range<u64>> {
