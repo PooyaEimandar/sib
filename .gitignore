@@ -22,5 +22,6 @@ Cargo.lock
 
 *.DS_Store
 backup.json
+bak
 log/*
 coverage/*

@@ -1,6 +1,5 @@
 use async_trait::async_trait;
 use base64::{Engine, prelude::BASE64_STANDARD};
-use chrono::{Datelike, Timelike};
 use deadpool::managed::{Manager, Metrics, Pool, RecycleError, RecycleResult};
 use foundationdb::{Database, Transaction, options::TransactionOption};
 use serde_json::{Map, Value};
@@ -104,23 +103,32 @@ impl FDBTransaction {
     }
 }
 
-pub async fn backup(p_backup_path: &str, timeout: std::time::Duration) -> anyhow::Result<()> {
-    let now = chrono::Utc::now();
-    let version = format!(
-        "{:04}.{:02}.{:02}.{:02}{:02}{:02}",
-        now.year(),
-        now.month(),
-        now.day(),
-        now.hour(),
-        now.minute(),
-        now.second()
-    );
-    let backup_dir = format!("{}/fdb-backup-{}", p_backup_path, version);
-    s_info!("Starting FoundationDB backup at {}", backup_dir);
+pub async fn backup(p_backup_dir: &str, timeout: std::time::Duration) -> anyhow::Result<()> {
+    s_info!("Starting FoundationDB backup at {}", p_backup_dir);
 
-    // Start the backup
+    // Ensure no previous backup is still running
+    match Command::new("fdbbackup")
+        .args(["discontinue"])
+        .status()
+        .await
+    {
+        Ok(status) if status.success() => {
+            println!("Previous backup (if any) successfully discontinued.");
+        }
+        Ok(status) => {
+            eprintln!(
+                "fdbbackup discontinue exited with non-zero code: {}",
+                status
+            );
+        }
+        Err(e) => {
+            eprintln!("fdbbackup discontinue failed: {}", e);
+        }
+    }
+
+    // Start the new backup
     let status = Command::new("fdbbackup")
-        .args(["start", "-d", &backup_dir])
+        .args(["start", "-d", p_backup_dir])
         .status()
         .await?;
 
@@ -128,7 +136,6 @@ pub async fn backup(p_backup_path: &str, timeout: std::time::Duration) -> anyhow
         anyhow::bail!("fdbbackup start failed");
     }
 
-    // Poll for backup status with timeout
     let start_time = Instant::now();
 
     loop {
@@ -150,10 +157,13 @@ pub async fn backup(p_backup_path: &str, timeout: std::time::Duration) -> anyhow
             anyhow::bail!("fdbbackup status command failed");
         }
 
-        if output.contains("fdbbackup state: Completed")
-            || output.contains("The backup has been successfully completed")
-        {
-            s_info!("fdbbackup completed successfully.");
+        println!("fdbbackup status:\n{}", output);
+
+        if !output.contains("is in progress") {
+            if output.contains("ERROR") || output.contains("failed") {
+                anyhow::bail!("fdbbackup returned failure:\n{}", output);
+            }
+            println!("fdbbackup completed successfully.");
             break;
         }
 
@@ -167,16 +177,28 @@ pub async fn backup(p_backup_path: &str, timeout: std::time::Duration) -> anyhow
         time::sleep(Duration::from_secs(1)).await;
     }
 
-    // Discontinue backup
-    let status = Command::new("fdbbackup")
+    println!("Discontinuing completed backup...");
+
+    match Command::new("fdbbackup")
         .args(["discontinue"])
         .status()
-        .await?;
-    if !status.success() {
-        anyhow::bail!("fdbbackup discontinue command failed");
+        .await
+    {
+        Ok(status) if status.success() => {
+            println!("fdbbackup successfully discontinued.");
+        }
+        Ok(status) => {
+            eprintln!(
+                "fdbbackup discontinue exited with non-zero status (possibly no active backup): {}",
+                status
+            );
+        }
+        Err(e) => {
+            eprintln!("fdbbackup discontinue command failed: {}", e);
+        }
     }
 
-    s_info!("fdbbackup successfully discontinued.");
+    println!("fdbbackup successfully discontinued.");
 
     Ok(())
 }
@@ -326,7 +348,7 @@ fn next_prefix(prefix: &[u8]) -> Vec<u8> {
 }
 
 #[tokio::test]
-async fn test() -> anyhow::Result<()> {
+async fn test_transaction() -> anyhow::Result<()> {
     let _network = FDBNetwork::new();
 
     // Initialize FoundationDB connection pool
@@ -371,7 +393,7 @@ async fn test() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn export_import() -> anyhow::Result<()> {
+async fn test_export_import() -> anyhow::Result<()> {
     let _network = FDBNetwork::new();
     let pool = Arc::new(create_fdb_pool(10));
 
@@ -382,6 +404,18 @@ async fn export_import() -> anyhow::Result<()> {
     import_from_json("./backup.json", Arc::clone(&pool))
         .await
         .unwrap();
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_backup() -> anyhow::Result<()> {
+    backup(
+        "/Users/pooyaeimandar/Codes/PooyaEimandar/sib/bak",
+        Duration::from_secs(60),
+    )
+    .await
+    .unwrap();
 
     Ok(())
 }
