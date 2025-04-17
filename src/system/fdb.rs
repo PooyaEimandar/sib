@@ -359,7 +359,7 @@ pub async fn import_from_json(input_path: &str, pool: Arc<FDBPool>) -> anyhow::R
 }
 
 /// Utility to get the next byte prefix (e.g. `/ads/` → `/ads0`)
-fn next_prefix(prefix: &[u8]) -> Vec<u8> {
+pub fn next_prefix(prefix: &[u8]) -> Vec<u8> {
     let mut next = prefix.to_vec();
     for i in (0..next.len()).rev() {
         if next[i] < 255 {
