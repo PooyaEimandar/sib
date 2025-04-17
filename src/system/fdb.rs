@@ -236,8 +236,7 @@ pub async fn export_to_json(
     iteration: usize,
     reverse: bool,
     snapshot: bool,
-    output_path: &str,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Value> {
     let mut data = Map::new();
     let mut begin = foundationdb::KeySelector::first_greater_or_equal(prefix.as_bytes().to_vec());
     let end = foundationdb::KeySelector::first_greater_or_equal(next_prefix(prefix.as_bytes()));
@@ -276,21 +275,17 @@ pub async fn export_to_json(
         begin = foundationdb::KeySelector::first_greater_than(last_key);
     }
 
-    let out_json = Value::Object(data);
-    tokio::fs::write(output_path, serde_json::to_vec_pretty(&out_json)?).await?;
-
-    Ok(())
+    Ok(Value::Object(data))
 }
 
 pub async fn import_from_json(
-    input_path: &str,
+    input: serde_json::Value,
     pool: Arc<FDBPool>,
     iteration: usize,
     reverse: bool,
     snapshot: bool,
 ) -> anyhow::Result<()> {
-    let raw_json = tokio::fs::read_to_string(input_path).await?;
-    let imported: Map<String, Value> = serde_json::from_str(&raw_json)?;
+    let imported: Map<String, Value> = serde_json::from_value(input)?;
 
     // Extract prefix (assumes common prefix for all keys)
     let prefix = imported
@@ -469,11 +464,15 @@ async fn test_export_import() -> anyhow::Result<()> {
     let _network = FDBNetwork::new();
     let pool = create_fdb_pool(10);
 
-    export_to_json("/", pool.clone().into(), 100, false, false, "./backup.json")
+    let json = export_to_json("/", pool.clone().into(), 100, false, false)
         .await
         .unwrap();
+    println!(
+        "Exported JSON: {}",
+        String::from_utf8(serde_json::to_vec_pretty(&json)?)?
+    );
 
-    import_from_json("./backup.json", pool.into(), 100, false, false)
+    import_from_json(json, pool.into(), 100, false, false)
         .await
         .unwrap();
 
