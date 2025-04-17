@@ -119,7 +119,8 @@ where
         let mut visitor = LogVisitor(&mut message);
         event.record(&mut visitor);
 
-        if message.starts_with("clickhouse packet") {
+        // Filter out ClickHouse packet logs and TRACE level logs to avoid excessive logging.
+        if message.starts_with("clickhouse packet") || metadata.level() == &tracing::Level::TRACE {
             return;
         }
 
