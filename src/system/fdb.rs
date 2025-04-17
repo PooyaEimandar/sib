@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use base64::{Engine, prelude::BASE64_STANDARD};
-use deadpool::managed::{Manager, Metrics, Pool, RecycleError, RecycleResult};
+use deadpool::managed::{Manager, Metrics, Object, Pool, RecycleError, RecycleResult};
 use foundationdb::{Database, Transaction, options::TransactionOption};
 use serde_json::{Map, Value};
 use std::{sync::Arc, time::Duration};
@@ -78,6 +78,11 @@ pub struct FDBTransaction {
 }
 
 impl FDBTransaction {
+    pub fn new(db: Object<FDBManager>) -> anyhow::Result<Self> {
+        let trx = db.create_trx()?;
+        Ok(Self { trx })
+    }
+
     pub async fn get(&self, key: &[u8]) -> anyhow::Result<Option<Arc<[u8]>>> {
         self.trx
             .get(key, false)
@@ -309,8 +314,7 @@ pub async fn import_from_json(input_path: &str, pool: Arc<FDBPool>) -> anyhow::R
 
     for (key, new_val) in imported {
         let db = pool.get().await?;
-        let trx = db.create_trx()?;
-        let transaction = FDBTransaction { trx };
+        let transaction = FDBTransaction::new(db)?;
 
         let current_val = transaction.get(key.as_bytes()).await?;
         let new_bytes = serde_json::to_vec(&new_val)?;
