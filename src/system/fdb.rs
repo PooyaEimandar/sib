@@ -233,13 +233,18 @@ pub async fn backup(p_backup_dir: &str, timeout: std::time::Duration) -> anyhow:
 pub async fn export_to_json(
     prefix: &str,
     pool: Arc<FDBPool>,
-    iteration: usize,
+    offset: usize,
+    limit: usize,
     reverse: bool,
     snapshot: bool,
 ) -> anyhow::Result<Value> {
     let mut data = Map::new();
     let mut begin = foundationdb::KeySelector::first_greater_or_equal(prefix.as_bytes().to_vec());
     let end = foundationdb::KeySelector::first_greater_or_equal(next_prefix(prefix.as_bytes()));
+
+    let mut skipped = 0;
+    let mut collected = 0;
+    let batch_size = 1000; // internal iteration batch
 
     loop {
         let db = pool.get().await?;
@@ -248,13 +253,13 @@ pub async fn export_to_json(
         let range = foundationdb::RangeOption {
             begin: begin.clone(),
             end: end.clone(),
-            limit: Some(iteration),
+            limit: Some(batch_size),
             reverse,
             ..Default::default()
         };
 
         let kvs = trx
-            .get_range(&range, iteration, snapshot)
+            .get_range(&range, batch_size, snapshot)
             .await
             .map_err(|e| anyhow::anyhow!("get_range failed: {}", e))?;
 
@@ -263,12 +268,27 @@ pub async fn export_to_json(
         }
 
         for kv in &kvs {
+            if skipped < offset {
+                skipped += 1;
+                continue;
+            }
+
+            if collected >= limit {
+                return Ok(Value::Object(data));
+            }
+
             let key = String::from_utf8_lossy(kv.key()).to_string();
             if let Ok(json_val) = serde_json::from_slice::<Value>(kv.value()) {
                 data.insert(key, json_val);
             } else {
                 data.insert(key, Value::String(BASE64_STANDARD.encode(kv.value())));
             }
+
+            collected += 1;
+        }
+
+        if collected >= limit {
+            break;
         }
 
         let last_key = kvs.last().map(|kv| kv.key().to_vec()).unwrap();
@@ -464,7 +484,7 @@ async fn test_export_import() -> anyhow::Result<()> {
     let _network = FDBNetwork::new();
     let pool = create_fdb_pool(10);
 
-    let json = export_to_json("/", pool.clone().into(), 100, false, false)
+    let json = export_to_json("/", pool.clone().into(), 0, 100, false, false)
         .await
         .unwrap();
     println!(
