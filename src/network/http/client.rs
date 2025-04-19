@@ -1,4 +1,4 @@
-use dashmap::DashMap;
+use dashmap::{DashMap, Entry};
 use deadpool::managed::{Manager, Metrics, Pool, RecycleResult};
 use reqwest::{Client, Url};
 use std::time::Duration;
@@ -69,18 +69,18 @@ impl HttpReqPool {
     }
 
     pub fn get_for_url_str(&self, url: &str) -> anyhow::Result<Pool<ReqManager>> {
-        if let Some(existing) = self.inner.get(url) {
-            return Ok(existing.clone());
+        match self.inner.entry(url.to_owned()) {
+            Entry::Occupied(e) => Ok(e.get().clone()),
+            Entry::Vacant(e) => {
+                let mgr = ReqManager::new(self.timeout);
+                let pool = Pool::builder(mgr)
+                    .max_size(self.max_size)
+                    .build()
+                    .map_err(|e| anyhow::anyhow!("Failed to build HttpReqPool: {}", e))?;
+                e.insert(pool.clone());
+                Ok(pool)
+            }
         }
-
-        let mgr = ReqManager::new(self.timeout);
-        let pool = Pool::builder(mgr)
-            .max_size(self.max_size)
-            .build()
-            .map_err(|e| anyhow::anyhow!("Failed to build HttpReqPool: {}", e))?;
-
-        self.inner.insert(url.to_owned(), pool.clone());
-        Ok(pool)
     }
 
     pub fn get_for_url(&self, url: Url) -> anyhow::Result<Pool<ReqManager>> {
