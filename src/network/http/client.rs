@@ -52,11 +52,14 @@ impl Manager for ReqManager {
     fn detach(&self, _obj: &mut Self::Type) {}
 }
 
+// Type alias for easier usage
+pub type HttpPool = Pool<ReqManager>;
+
 #[derive(Clone)]
 pub struct HttpReqPool {
     timeout: Duration,
     max_size: usize,
-    inner: DashMap<String, Pool<ReqManager>>,
+    inner: DashMap<String, HttpPool>,
 }
 
 impl HttpReqPool {
@@ -68,7 +71,7 @@ impl HttpReqPool {
         }
     }
 
-    pub fn get_for_url_str(&self, url: &str) -> anyhow::Result<Pool<ReqManager>> {
+    pub fn get_for_url_str(&self, url: &str) -> anyhow::Result<HttpPool> {
         match self.inner.entry(url.to_owned()) {
             Entry::Occupied(e) => Ok(e.get().clone()),
             Entry::Vacant(e) => {
@@ -83,7 +86,7 @@ impl HttpReqPool {
         }
     }
 
-    pub fn get_for_url(&self, url: Url) -> anyhow::Result<Pool<ReqManager>> {
+    pub fn get_for_url(&self, url: Url) -> anyhow::Result<HttpPool> {
         let key = match url.host_str() {
             Some(h) => {
                 if let Some(port) = url.port() {
