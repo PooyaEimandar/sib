@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use base64::{Engine, prelude::BASE64_STANDARD};
+use bytes::Bytes;
 use deadpool::managed::{Manager, Metrics, Object, Pool, RecycleError, RecycleResult};
 use foundationdb::{
     Database, RangeOption, Transaction, future::FdbValues, options::TransactionOption,
@@ -230,17 +231,17 @@ pub async fn backup(p_backup_dir: &str, timeout: std::time::Duration) -> anyhow:
     Ok(())
 }
 
-pub async fn export_to_json(
-    prefix: &str,
+pub async fn export(
+    prefix: &Bytes,
     pool: Arc<FDBPool>,
     offset: usize,
     limit: usize,
     reverse: bool,
     snapshot: bool,
-) -> anyhow::Result<Value> {
+) -> anyhow::Result<Map<String, Value>> {
     let mut data = Map::new();
-    let mut begin = foundationdb::KeySelector::first_greater_or_equal(prefix.as_bytes().to_vec());
-    let end = foundationdb::KeySelector::first_greater_or_equal(next_prefix(prefix.as_bytes()));
+    let mut begin = foundationdb::KeySelector::first_greater_or_equal(prefix.to_vec());
+    let end = foundationdb::KeySelector::first_greater_or_equal(next_prefix(prefix));
 
     let mut skipped = 0;
     let mut collected = 0;
@@ -274,7 +275,7 @@ pub async fn export_to_json(
             }
 
             if collected >= limit {
-                return Ok(Value::Object(data));
+                return Ok(data);
             }
 
             let key = String::from_utf8_lossy(kv.key()).to_string();
@@ -295,20 +296,18 @@ pub async fn export_to_json(
         begin = foundationdb::KeySelector::first_greater_than(last_key);
     }
 
-    Ok(Value::Object(data))
+    Ok(data)
 }
 
-pub async fn import_from_json(
-    input: serde_json::Value,
+pub async fn import(
+    data: &Map<String, Value>,
     pool: Arc<FDBPool>,
     iteration: usize,
     reverse: bool,
     snapshot: bool,
 ) -> anyhow::Result<()> {
-    let imported: Map<String, Value> = serde_json::from_value(input)?;
-
     // Extract prefix (assumes common prefix for all keys)
-    let prefix = imported
+    let prefix = data
         .keys()
         .next()
         .and_then(|k| k.split('/').nth(1))
@@ -348,7 +347,7 @@ pub async fn import_from_json(
 
     // Begin a batch import (set and delete)
     for key in existing_keys {
-        if !imported.contains_key(&key) {
+        if !data.contains_key(&key) {
             let db = pool.get().await?;
             let trx = FDBTransaction::new(&db)?;
             trx.clear(key.as_bytes());
@@ -357,7 +356,7 @@ pub async fn import_from_json(
         }
     }
 
-    for (key, new_val) in imported {
+    for (key, new_val) in data {
         let db = pool.get().await?;
         let trx = FDBTransaction::new(&db)?;
 
@@ -484,17 +483,22 @@ async fn test_export_import() -> anyhow::Result<()> {
     let _network = FDBNetwork::new();
     let pool = create_fdb_pool(10);
 
-    let json = export_to_json("/", pool.clone().into(), 0, 100, false, false)
-        .await
-        .unwrap();
+    let data = export(
+        &Bytes::from_static(b"/"),
+        pool.clone().into(),
+        0,
+        100,
+        false,
+        false,
+    )
+    .await
+    .unwrap();
     println!(
         "Exported JSON: {}",
-        String::from_utf8(serde_json::to_vec_pretty(&json)?)?
+        String::from_utf8(serde_json::to_vec_pretty(&data)?)?
     );
 
-    import_from_json(json, pool.into(), 100, false, false)
-        .await
-        .unwrap();
+    import(&data, pool.into(), 100, false, false).await.unwrap();
 
     Ok(())
 }
