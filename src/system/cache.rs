@@ -20,7 +20,7 @@ where
     keys: DashSet<K>,
     hits: AtomicU64,
     misses: AtomicU64,
-    cache: ArcSwap<Cache<K, Vec<V>>>,
+    cache: ArcSwap<Cache<K, V>>,
     size: u64,
 }
 
@@ -44,10 +44,10 @@ where
         self.size
     }
 
-    pub async fn get<F, Fut>(&self, key: K, factory: F) -> Vec<V>
+    pub async fn get<F, Fut>(&self, key: K, factory: F) -> V
     where
         F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = Vec<V>>,
+        Fut: std::future::Future<Output = V>,
     {
         let cache = self.cache.load();
 
@@ -63,7 +63,7 @@ where
         data
     }
 
-    pub async fn set(&self, key: K, value: Vec<V>) {
+    pub async fn set(&self, key: K, value: V) {
         self.keys.insert(key.clone());
         self.cache.load().insert(key, value).await;
     }
@@ -137,12 +137,12 @@ async fn test_cache_insert_and_get() {
     let cache = SCache::<String, u32>::new(10);
 
     // Initially missing
-    let value = cache.get("a".to_string(), || async { vec![42] }).await;
-    assert_eq!(value, vec![42]);
+    let value = cache.get("a".to_string(), || async { 42 }).await;
+    assert_eq!(value, 42);
 
     // Should hit the cache now
-    let value = cache.get("a".to_string(), || async { vec![99] }).await;
-    assert_eq!(value, vec![42]);
+    let value = cache.get("a".to_string(), || async { 99 }).await;
+    assert_eq!(value, 42);
 }
 
 #[tokio::test]
@@ -150,10 +150,10 @@ async fn test_cache_hit_and_miss_tracking() {
     let cache = SCache::<String, u32>::new(5);
 
     // Miss
-    cache.get("x".to_string(), || async { vec![1] }).await;
+    cache.get("x".to_string(), || async { 1 }).await;
 
     // Hit
-    cache.get("x".to_string(), || async { vec![2] }).await;
+    cache.get("x".to_string(), || async { 2 }).await;
 
     assert_eq!(cache.hits.load(Ordering::Relaxed), 1);
     assert_eq!(cache.misses.load(Ordering::Relaxed), 1);
@@ -166,7 +166,7 @@ async fn test_cache_resize_logic() {
     // Trigger enough misses to force resize
     for i in 0..110 {
         let key = format!("k{}", i);
-        cache.get(key.clone(), || async { vec![i] }).await;
+        cache.get(key.clone(), || async { i }).await;
     }
 
     cache.check_for_resize().await;
@@ -178,10 +178,7 @@ async fn test_cache_resize_logic() {
 #[tokio::test]
 async fn test_cache_removal() {
     let cache = SCache::<String, u32>::new(10);
-    cache
-        .get("delete-me".to_string(), || async { vec![10] })
-        .await;
-
+    cache.get("delete-me".to_string(), || async { 10 }).await;
     assert!(cache.contains(&"delete-me".to_string()).await);
     cache.remove("delete-me".to_string()).await;
     assert!(!cache.contains(&"delete-me".to_string()).await);
@@ -196,8 +193,8 @@ async fn test_parallel_gets() {
         let cache = Arc::clone(&cache);
         tasks.push(tokio::spawn(async move {
             let key = format!("user:{}", i % 5); // intentionally cause overlap
-            let val = cache.get(key.clone(), || async { vec![i as u32] }).await;
-            val[0]
+            let val = cache.get(key.clone(), || async { i as u32 }).await;
+            val
         }));
     }
 
