@@ -70,9 +70,12 @@ impl Manager for FDBManager {
 // Type alias for easier usage
 pub type FDBPool = Pool<FDBManager>;
 
-pub fn create_fdb_pool(pool_size: usize) -> FDBPool {
+pub fn create_fdb_pool(pool_size: usize) -> anyhow::Result<FDBPool> {
     let manager = FDBManager;
-    Pool::builder(manager).max_size(pool_size).build().unwrap()
+    Pool::builder(manager)
+        .max_size(pool_size)
+        .build()
+        .map_err(|e| anyhow::anyhow!("Failed to create FDB connection pool: {}", e))
 }
 
 // Wrapper for transactions that auto-release pool slots
@@ -233,7 +236,7 @@ pub async fn backup(p_backup_dir: &str, timeout: std::time::Duration) -> anyhow:
 
 pub async fn export(
     prefix: &Bytes,
-    pool: Arc<FDBPool>,
+    pool: &FDBPool,
     offset: usize,
     limit: usize,
     reverse: bool,
@@ -292,7 +295,10 @@ pub async fn export(
             break;
         }
 
-        let last_key = kvs.last().map(|kv| kv.key().to_vec()).unwrap();
+        let last_key = match kvs.last() {
+            Some(kv) => kv.key().to_vec(),
+            None => break,
+        };
         begin = foundationdb::KeySelector::first_greater_than(last_key);
     }
 
@@ -301,7 +307,7 @@ pub async fn export(
 
 pub async fn import(
     data: &Map<String, Value>,
-    pool: Arc<FDBPool>,
+    pool: &FDBPool,
     iteration: usize,
     reverse: bool,
     snapshot: bool,
@@ -341,7 +347,11 @@ pub async fn import(
                 .map(|kv| String::from_utf8_lossy(kv.key()).to_string()),
         );
 
-        let last_key = kvs.last().unwrap().key().to_vec();
+        let last_key = kvs
+            .last()
+            .ok_or_else(|| anyhow::anyhow!("No last key was found"))?
+            .key()
+            .to_vec();
         begin = foundationdb::KeySelector::first_greater_than(last_key);
     }
 
@@ -413,7 +423,10 @@ pub async fn clear(
         }
 
         trx.commit().await?;
-        let last_key = kvs.last().unwrap().key().to_vec();
+        let last_key = match kvs.last() {
+            Some(kv) => kv.key().to_vec(),
+            None => break,
+        };
         begin = foundationdb::KeySelector::first_greater_than(last_key);
     }
 
@@ -440,11 +453,11 @@ async fn test_transaction() -> anyhow::Result<()> {
     let _network = FDBNetwork::new();
 
     // Initialize FoundationDB connection pool
-    let pool = Arc::new(create_fdb_pool(10));
+    let pool = create_fdb_pool(10)?;
 
-    let pool_clone = Arc::clone(&pool);
+    let pool_cloned = pool.clone();
     let task1 = tokio::spawn(async move {
-        if let Ok(db) = pool_clone.get().await {
+        if let Ok(db) = pool_cloned.get().await {
             if let Ok(transaction) = FDBTransaction::new(&db) {
                 transaction.set(b"key1", b"value1");
                 if let Err(e) = transaction.commit().await {
@@ -456,9 +469,8 @@ async fn test_transaction() -> anyhow::Result<()> {
         }
     });
 
-    let pool_clone = Arc::clone(&pool);
     let task2 = tokio::spawn(async move {
-        if let Ok(db) = pool_clone.get().await {
+        if let Ok(db) = pool.clone().get().await {
             if let Ok(transaction) = FDBTransaction::new(&db) {
                 match transaction.get(b"key1").await {
                     Ok(Some(data)) => match String::from_utf8(data.to_vec()) {
@@ -472,8 +484,8 @@ async fn test_transaction() -> anyhow::Result<()> {
         }
     });
 
-    task1.await.unwrap();
-    task2.await.unwrap();
+    task1.await?;
+    task2.await?;
 
     Ok(())
 }
@@ -481,24 +493,15 @@ async fn test_transaction() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_export_import() -> anyhow::Result<()> {
     let _network = FDBNetwork::new();
-    let pool = create_fdb_pool(10);
+    let pool = create_fdb_pool(10)?;
 
-    let data = export(
-        &Bytes::from_static(b"/"),
-        pool.clone().into(),
-        0,
-        100,
-        false,
-        false,
-    )
-    .await
-    .unwrap();
+    let data = export(&Bytes::from_static(b"/"), &pool, 0, 100, false, false).await?;
     println!(
         "Exported JSON: {}",
         String::from_utf8(serde_json::to_vec_pretty(&data)?)?
     );
 
-    import(&data, pool.into(), 100, false, false).await.unwrap();
+    import(&data, &pool, 100, false, false).await?;
 
     Ok(())
 }
@@ -509,8 +512,7 @@ async fn test_backup() -> anyhow::Result<()> {
         "/Users/pooyaeimandar/Codes/PooyaEimandar/sib/bak",
         Duration::from_secs(60),
     )
-    .await
-    .unwrap();
+    .await?;
 
     Ok(())
 }

@@ -129,11 +129,27 @@ async fn test() -> anyhow::Result<()> {
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
-                    .unwrap();
+                    .map_err(|e| {
+                        eprintln!("Failed to build runtime: {}", e);
+                        e
+                    })
+                    .unwrap_or_else(|e| panic!("Runtime creation failed: {}", e));
 
                 rt.block_on(async {
-                    let client_pool = pool.get_for_url((*url).clone()).unwrap();
-                    let client = client_pool.get().await.unwrap();
+                    let client_pool = match pool.get_for_url((*url).clone()) {
+                        Ok(pool) => pool,
+                        Err(err) => {
+                            eprintln!("[{}] Failed to get client pool: {}", i, err);
+                            return;
+                        }
+                    };
+                    let client = match client_pool.get().await {
+                        Ok(client) => client,
+                        Err(err) => {
+                            eprintln!("[{}] Failed to get client: {}", i, err);
+                            return;
+                        }
+                    };
                     let res = client
                         .get((&*url).clone())
                         .header("Accept-Encoding", "br")

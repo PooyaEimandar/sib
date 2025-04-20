@@ -276,19 +276,22 @@ pub async fn init_log(
         let client = Client::connect(config.address, clickhouse_opt).await;
         match client {
             Ok(client) => {
-                // on connection success
-                client.execute(config.init_query).await.unwrap();
+                // on connection success initialize the table
+                if let Err(e) = client.execute(config.init_query).await {
+                    eprintln!("Failed to execute ClickHouse init query: {:?}", e);
+                    None
+                } else {
+                    let (sender, receiver) = mpsc::channel::<LogEvent>(config.channel_buffer_size);
 
-                let (sender, receiver) = mpsc::channel::<LogEvent>(config.channel_buffer_size);
-
-                tokio::spawn(store_logs_in_clickhouse(
-                    config_cloned,
-                    client,
-                    receiver,
-                    shutdown_receiver,
-                    done_sender,
-                ));
-                Some(AsyncLogLayer { sender })
+                    tokio::spawn(store_logs_in_clickhouse(
+                        config_cloned,
+                        client,
+                        receiver,
+                        shutdown_receiver,
+                        done_sender,
+                    ));
+                    Some(AsyncLogLayer { sender })
+                }
             }
             Err(e) => {
                 eprintln!("Failed to connect to ClickHouse: {:?}", e);
