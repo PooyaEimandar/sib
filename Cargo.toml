@@ -17,6 +17,7 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow = { version = "1.0.97", default-features = false }
+arc-swap = { version = "1.7.1", optional = true, default-features = false }
 async-trait = { version = "0.1.88", default-features = false }
 base64 = { version = "0.22.1", optional = true, default-features = false, features = [
     "alloc",
@@ -90,7 +91,14 @@ zstd = { version = "0.13.3", optional = true }
 
 [features]
 default = ["database", "http-client", "http-server", "system"]
-database = ["deadpool", "foundationdb", "klickhouse", "system"]
+database = [
+    "arc-swap",
+    "deadpool",
+    "foundationdb",
+    "klickhouse",
+    "moka",
+    "system",
+]
 http-client = ["dashmap", "deadpool", "reqwest"]
 http-server = [
     "base64",
