@@ -20,7 +20,7 @@ pub struct Server {
     cert_path: String,
     key_path: String,
     tcp_fast_open_backlog_size: usize,
-    tcp_keep_alive_idle: Duration,
+    max_idle_timeout: Duration,
     tcp_keep_alive_interval: Duration,
     tcp_keep_alive_count: usize,
     handler: Option<HandlerFn>,
@@ -36,10 +36,10 @@ impl Default for Server {
             h3: true,
             cert_path: "".to_string(),
             key_path: "".to_string(),
-            tcp_fast_open_backlog_size: 10,
-            tcp_keep_alive_idle: Duration::from_secs(60),
+            tcp_fast_open_backlog_size: 128,
+            max_idle_timeout: Duration::from_secs(15),
             tcp_keep_alive_interval: Duration::from_secs(5),
-            tcp_keep_alive_count: 5,
+            tcp_keep_alive_count: 3,
             handler: None,
         }
     }
@@ -74,8 +74,8 @@ impl Server {
         self
     }
 
-    pub fn set_tcp_keep_alive_idle(&mut self, p_tcp_keep_alive_idle: Duration) -> &mut Self {
-        self.tcp_keep_alive_idle = p_tcp_keep_alive_idle;
+    pub fn set_max_idle_timeout(&mut self, max_idle_timeout: Duration) -> &mut Self {
+        self.max_idle_timeout = max_idle_timeout;
         self
     }
 
@@ -113,6 +113,7 @@ impl Server {
                 h3_address_port,
                 self.cert_path.clone(),
                 self.key_path.clone(),
+                self.max_idle_timeout,
                 self.handler.clone(),
             );
             tasks.push(tokio::spawn(async move {
@@ -168,7 +169,7 @@ impl Server {
         let mut sock_options = TcpSocketOptions::default();
         sock_options.tcp_fastopen = Some(self.tcp_fast_open_backlog_size);
         sock_options.tcp_keepalive = Some(TcpKeepalive {
-            idle: self.tcp_keep_alive_idle,
+            idle: self.max_idle_timeout,
             interval: self.tcp_keep_alive_interval,
             count: self.tcp_keep_alive_count,
         });
@@ -194,13 +195,16 @@ impl Server {
         address_port: String,
         cert: String,
         private_key: String,
+        max_idle_timeout: Duration,
         handler: Option<HandlerFn>,
     ) -> anyhow::Result<()> {
         let socket = tokio::net::UdpSocket::bind(&address_port).await?;
+        let mut settings = tokio_quiche::settings::QuicSettings::default();
+        settings.max_idle_timeout = Some(max_idle_timeout);
         let mut listeners = listen(
             [socket],
             ConnectionParams::new_server(
-                Default::default(),
+                settings,
                 tokio_quiche::settings::TlsCertificatePaths {
                     cert: &cert,
                     private_key: &private_key,
