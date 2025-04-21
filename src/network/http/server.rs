@@ -175,7 +175,7 @@ impl Server {
 
         let mut tls_settings =
             pingora::listeners::tls::TlsSettings::intermediate(&self.cert_path, &self.key_path)?;
-
+        tls_settings.set_min_proto_version(Some(pingora::tls::ssl::SslVersion::TLS1_2))?;
         tls_settings.set_alpn(pingora::protocols::ALPN::H2H1);
         tls_settings.enable_h2();
 
