@@ -63,6 +63,17 @@ where
         data
     }
 
+    pub async fn try_get(&self, key: K) -> Option<V> {
+        let cache = self.cache.load();
+
+        if let Some(data) = cache.get(&key).await {
+            self.hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return Some(data);
+        }
+
+        None
+    }
+
     pub async fn set(&self, key: K, value: V) {
         self.keys.insert(key.clone());
         self.cache.load().insert(key, value).await;
