@@ -152,6 +152,10 @@ async fn test_cache_insert_and_get() {
     assert_eq!(value, 42);
 
     // Should hit the cache now
+    let value = cache.try_get("a".to_string()).await;
+    assert_eq!(value, Some(42));
+
+    // Should hit the cache now
     let value = cache.get("a".to_string(), || async { 99 }).await;
     assert_eq!(value, 42);
 }
