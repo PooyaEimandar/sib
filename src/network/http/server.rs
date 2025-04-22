@@ -1,15 +1,23 @@
 use super::handler::HandlerFn;
 use crate::{network::http::handler, s_error};
-use crate::{s_info, s_trace};
+use crate::{s_info, s_trace, s_warn};
 use core::time::Duration;
 use futures::StreamExt;
+use governor::clock::DefaultClock;
+use governor::state::keyed::DefaultKeyedStateStore;
+use governor::{Quota, RateLimiter};
 use pingora::{listeners::TcpSocketOptions, protocols::TcpKeepalive, services::Service};
+use std::net::IpAddr;
+use std::num::NonZeroU32;
+use std::sync::Arc;
 use tokio_quiche::http3::driver::{H3Event, IncomingH3Headers, ServerH3Event};
 use tokio_quiche::http3::settings::Http3Settings;
 use tokio_quiche::listen;
 use tokio_quiche::metrics::DefaultMetrics;
 use tokio_quiche::quic::SimpleConnectionIdGenerator;
 use tokio_quiche::{ConnectionParams, ServerH3Controller, ServerH3Driver};
+
+type SRateLimiter = RateLimiter<IpAddr, DefaultKeyedStateStore<IpAddr>, DefaultClock>;
 
 pub struct Server {
     address: String,
@@ -23,6 +31,7 @@ pub struct Server {
     max_idle_timeout: Duration,
     tcp_keep_alive_interval: Duration,
     tcp_keep_alive_count: usize,
+    rate_limiter: Option<Arc<SRateLimiter>>,
     handler: Option<HandlerFn>,
 }
 
@@ -40,17 +49,36 @@ impl Default for Server {
             max_idle_timeout: Duration::from_secs(15),
             tcp_keep_alive_interval: Duration::from_secs(5),
             tcp_keep_alive_count: 3,
+            rate_limiter: None,
             handler: None,
         }
     }
 }
 
 impl Server {
-    pub fn new(address: String, h2_port: u16, h3_port: u16, handler: Option<HandlerFn>) -> Self {
+    pub fn new(
+        address: String,
+        h2_port: u16,
+        h3_port: u16,
+        rate_limit_max_burst_period: Option<(NonZeroU32, Duration)>,
+        handler: Option<HandlerFn>,
+    ) -> Self {
+        let rate_limiter = if let Some((max_burst, period)) = rate_limit_max_burst_period {
+            if let Some(quota) = Quota::with_period(period) {
+                quota.allow_burst(max_burst);
+                Some(Arc::new(RateLimiter::keyed(quota)))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         Self {
             address,
             h2_port,
             h3_port,
+            rate_limiter,
             handler,
             ..Default::default()
         }
@@ -114,6 +142,7 @@ impl Server {
                 self.cert_path.clone(),
                 self.key_path.clone(),
                 self.max_idle_timeout,
+                self.rate_limiter.clone(),
                 self.handler.clone(),
             );
             tasks.push(tokio::spawn(async move {
@@ -196,11 +225,14 @@ impl Server {
         cert: String,
         private_key: String,
         max_idle_timeout: Duration,
+        rate_limiter: Option<Arc<SRateLimiter>>,
         handler: Option<HandlerFn>,
     ) -> anyhow::Result<()> {
         let socket = tokio::net::UdpSocket::bind(&address_port).await?;
-        let mut settings = tokio_quiche::settings::QuicSettings::default();
-        settings.max_idle_timeout = Some(max_idle_timeout);
+        let settings = tokio_quiche::settings::QuicSettings {
+            max_idle_timeout: Some(max_idle_timeout),
+            ..Default::default()
+        };
         let mut listeners = listen(
             [socket],
             ConnectionParams::new_server(
@@ -227,11 +259,20 @@ impl Server {
         while let Some(conn_result) = accept_stream.next().await {
             match conn_result {
                 Ok(conn) => {
-                    let (driver, controller) = ServerH3Driver::new(Http3Settings::default());
                     let peer_addr = conn.peer_addr();
-                    conn.start(driver);
-
                     s_info!("Incoming QUIC con from: {peer_addr:?}");
+
+                    // check rate limit
+                    if let Some(limiter) = &rate_limiter {
+                        let ip = peer_addr.ip();
+                        if limiter.check_key(&ip).is_err() {
+                            s_warn!("Rate limit exceeded for {ip}");
+                            continue;
+                        }
+                    }
+
+                    let (driver, controller) = ServerH3Driver::new(Http3Settings::default());
+                    conn.start(driver);
 
                     let handler_cloned = handler.clone();
                     tokio::spawn(async move {
