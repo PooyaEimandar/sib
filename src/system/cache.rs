@@ -44,14 +44,14 @@ where
         self.size
     }
 
-    pub async fn get<F, Fut>(&self, key: K, factory: F) -> V
+    pub async fn get<F, Fut>(&self, key: &K, factory: F) -> V
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = V>,
     {
         let cache = self.cache.load();
 
-        if let Some(data) = cache.get(&key).await {
+        if let Some(data) = cache.get(key).await {
             self.hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return data;
         }
@@ -63,10 +63,10 @@ where
         data
     }
 
-    pub async fn try_get(&self, key: K) -> Option<V> {
+    pub async fn try_get(&self, key: &K) -> Option<V> {
         let cache = self.cache.load();
 
-        if let Some(data) = cache.get(&key).await {
+        if let Some(data) = cache.get(key).await {
             self.hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return Some(data);
         }
@@ -79,9 +79,9 @@ where
         self.cache.load().insert(key, value).await;
     }
 
-    pub async fn remove(&self, key: K) {
-        self.keys.remove(&key);
-        self.cache.load().remove(&key).await;
+    pub async fn remove(&self, key: &K) {
+        self.keys.remove(key);
+        self.cache.load().remove(key).await;
     }
 
     pub async fn contains(&self, key: &K) -> bool {
@@ -148,15 +148,16 @@ async fn test_cache_insert_and_get() {
     let cache = SCache::<String, u32>::new(10);
 
     // Initially missing
-    let value = cache.get("a".to_string(), || async { 42 }).await;
+    let key = "a".to_string();
+    let value = cache.get(&key, || async { 42 }).await;
     assert_eq!(value, 42);
 
     // Should hit the cache now
-    let value = cache.try_get("a".to_string()).await;
+    let value = cache.try_get(&key).await;
     assert_eq!(value, Some(42));
 
     // Should hit the cache now
-    let value = cache.get("a".to_string(), || async { 99 }).await;
+    let value = cache.get(&key, || async { 99 }).await;
     assert_eq!(value, 42);
 }
 
@@ -164,11 +165,13 @@ async fn test_cache_insert_and_get() {
 async fn test_cache_hit_and_miss_tracking() {
     let cache = SCache::<String, u32>::new(5);
 
+    let key = "a".to_string();
+
     // Miss
-    cache.get("x".to_string(), || async { 1 }).await;
+    cache.get(&key, || async { 1 }).await;
 
     // Hit
-    cache.get("x".to_string(), || async { 2 }).await;
+    cache.get(&key, || async { 2 }).await;
 
     assert_eq!(cache.hits.load(Ordering::Relaxed), 1);
     assert_eq!(cache.misses.load(Ordering::Relaxed), 1);
@@ -181,7 +184,7 @@ async fn test_cache_resize_logic() {
     // Trigger enough misses to force resize
     for i in 0..110 {
         let key = format!("k{}", i);
-        cache.get(key.clone(), || async { i }).await;
+        cache.get(&key, || async { i }).await;
     }
 
     cache.check_for_resize().await;
@@ -192,11 +195,12 @@ async fn test_cache_resize_logic() {
 
 #[tokio::test]
 async fn test_cache_removal() {
+    let key = "delete-me".to_string();
     let cache = SCache::<String, u32>::new(10);
-    cache.get("delete-me".to_string(), || async { 10 }).await;
-    assert!(cache.contains(&"delete-me".to_string()).await);
-    cache.remove("delete-me".to_string()).await;
-    assert!(!cache.contains(&"delete-me".to_string()).await);
+    cache.get(&key, || async { 10 }).await;
+    assert!(cache.contains(&key).await);
+    cache.remove(&key).await;
+    assert!(!cache.contains(&key).await);
 }
 
 #[tokio::test]
@@ -208,7 +212,7 @@ async fn test_parallel_gets() {
         let cache = Arc::clone(&cache);
         tasks.push(tokio::spawn(async move {
             let key = format!("user:{}", i % 5); // intentionally cause overlap
-            let val = cache.get(key.clone(), || async { i as u32 }).await;
+            let val = cache.get(&key, || async { i as u32 }).await;
             val
         }));
     }
