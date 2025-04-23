@@ -1,4 +1,4 @@
-name: Build Sib with Zig
+name: Build
 
 on:
   push:
@@ -11,7 +11,7 @@ env:
 
 jobs:
   zig-cross:
-    name: Zig Cross Compile (${{ matrix.target }})
+    name: (${{ matrix.target }})
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -38,7 +38,7 @@ jobs:
         run: cargo zigbuild --release --target=${{ matrix.target }}
 
   macos:
-    name: Native macOS Build (arm64)
+    name: macOS-arm64
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -47,7 +47,7 @@ jobs:
         run: cargo build --release
 
   ios:
-    name: Build for iOS (arm64)
+    name: iOS-arm64
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -62,7 +62,7 @@ jobs:
         run: cargo lipo --release --targets=aarch64-apple-ios
 
   android:
-    name: Android NDK Build (${{ matrix.target }})
+    name: Android NDK:(${{ matrix.target }})
     runs-on: ubuntu-latest
     strategy:
       matrix:

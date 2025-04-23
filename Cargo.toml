@@ -65,7 +65,10 @@ serde = { version = "1.0.219", optional = true, default-features = false, featur
 ] }
 serde_json = { version = "1.0.140", optional = true, default-features = false }
 sha2 = { version = "0.10.8", optional = true, default-features = false }
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tikv-jemallocator = { version = "0.6.0", default-features = false }
+
 tracing = { version = "0.1.41", optional = true, default-features = false }
 tracing-subscriber = { version = "0.3.19", optional = true, features = [
     "env-filter",
