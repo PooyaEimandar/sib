@@ -1,0 +1,88 @@
+name: Build Sib with Zig
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  zig-cross:
+    name: Zig Cross Compile (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          [
+            x86_64-unknown-linux-gnu,
+            aarch64-unknown-linux-gnu,
+            x86_64-pc-windows-gnu,
+            aarch64-pc-windows-gnu,
+          ]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Install Zig and cargo-zigbuild
+        run: |
+          curl -L https://ziglang.org/builds/zig-linux-x86_64-0.12.0-dev.1629+abc123.tar.xz | tar -xJ
+          echo "$(pwd)/zig-linux-x86_64*/" >> $GITHUB_PATH
+          cargo install cargo-zigbuild
+
+      - name: Build with cargo-zigbuild
+        run: cargo zigbuild --release --target=${{ matrix.target }}
+
+  macos:
+    name: Native macOS Build (arm64)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build for macOS arm64
+        run: cargo build --release
+
+  ios:
+    name: Build for iOS (arm64)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add iOS target
+        run: rustup target add aarch64-apple-ios
+
+      - name: Install cargo-lipo
+        run: cargo install cargo-lipo
+
+      - name: Build iOS staticlib
+        run: cargo lipo --release --targets=aarch64-apple-ios
+
+  android:
+    name: Android NDK Build (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          [armv7-linux-androideabi, aarch64-linux-android, x86_64-linux-android]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Install NDK + cargo-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r25b
+          add-to-path: true
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk
+
+      - name: Build Android binary
+        run: cargo ndk -t ${{ matrix.target }} -o ./target build --release

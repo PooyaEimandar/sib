@@ -13,7 +13,7 @@ readme = "README.md"
 
 [lib]
 path = "src/lib.rs"
-#crate-type = ["lib", "staticlib", "cdylib"]
+crate-type = ["rlib", "staticlib", "cdylib"]
 
 [dependencies]
 anyhow = { version = "1.0.97", default-features = false }
