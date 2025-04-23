@@ -6,6 +6,7 @@
 [x] Log for console, file and clickhouse
 [x] Websocket server
 [x] HTTP client pool
+[x] Ratelimit per IP for both Http1.1/2/3
 [] Ffmpeg
 [] Rist
 [] TCP client & server

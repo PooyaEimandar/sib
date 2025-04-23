@@ -17,7 +17,7 @@ use tokio_quiche::metrics::DefaultMetrics;
 use tokio_quiche::quic::SimpleConnectionIdGenerator;
 use tokio_quiche::{ConnectionParams, ServerH3Controller, ServerH3Driver};
 
-type SRateLimiter = RateLimiter<IpAddr, DefaultKeyedStateStore<IpAddr>, DefaultClock>;
+pub type SRateLimiter = RateLimiter<IpAddr, DefaultKeyedStateStore<IpAddr>, DefaultClock>;
 
 pub struct Server {
     address: String,
@@ -209,7 +209,7 @@ impl Server {
         tls_settings.set_alpn(pingora::protocols::ALPN::H2H1);
         tls_settings.enable_h2();
 
-        let mut service = handler::service(self.handler.clone());
+        let mut service = handler::service(self.rate_limiter.clone(), self.handler.clone());
         service.add_tls_with_settings(&p_address_port, Some(sock_options), tls_settings);
 
         let services: Vec<Box<dyn Service>> = vec![Box::new(service)];
@@ -260,13 +260,12 @@ impl Server {
             match conn_result {
                 Ok(conn) => {
                     let peer_addr = conn.peer_addr();
-                    s_info!("Incoming QUIC con from: {peer_addr:?}");
 
                     // check rate limit
                     if let Some(limiter) = &rate_limiter {
                         let ip = peer_addr.ip();
                         if limiter.check_key(&ip).is_err() {
-                            s_warn!("Rate limit exceeded for {ip}");
+                            s_warn!("H3 Rate limit exceeded for {ip}");
                             continue;
                         }
                     }
@@ -276,7 +275,6 @@ impl Server {
 
                     let handler_cloned = handler.clone();
                     tokio::spawn(async move {
-                        s_info!("Handling QUIC connection from: {peer_addr:?}");
                         Self::handle_h3_connection(controller, handler_cloned).await;
                     });
                 }

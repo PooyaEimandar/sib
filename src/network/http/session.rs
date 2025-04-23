@@ -21,7 +21,6 @@ use tokio_quiche::{
 
 use crate::s_error;
 
-const READ_H1_HEADERS_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_PATH_LENGTH: usize = 1024;
 const MAX_BODY_SIZE: usize = 10 * 1024 * 1024; // 10MB limit
 const MAX_WS_PAYLOAD_SIZE: usize = 64 * 1024 * 1024; // 64MB limit
@@ -161,19 +160,7 @@ impl Default for Session {
 }
 
 impl Session {
-    pub(crate) async fn new_h2(mut session: ServerSession) -> anyhow::Result<Self> {
-        // If HTTP/1.1, manually read the headers
-        if !session.is_http2() {
-            let ready = pingora::time::timeout(READ_H1_HEADERS_TIMEOUT, session.read_request())
-                .await
-                .map_err(|_| anyhow::anyhow!("Session timeout while reading headers"))?
-                .map_err(|e| anyhow::anyhow!("Error reading request: {:?}", e))?;
-
-            if !ready {
-                bail!("Session not ready");
-            }
-        }
-
+    pub(crate) async fn new_h2(session: ServerSession) -> anyhow::Result<Self> {
         let req_summary = session.request_summary();
         let mut parts = req_summary.split(", ");
         let mut first_part = parts.next().unwrap_or("").split_whitespace();
@@ -695,7 +682,7 @@ impl Session {
 
             h2.write_response_header(Box::new(response)).await?;
         } else if let Some(h3) = &mut self.h3 {
-            let mut res_headers = Vec::with_capacity(10); // Preallocate
+            let mut res_headers = Vec::with_capacity(10);
             res_headers.push(h3::Header::new(b":status", status_code.as_str().as_bytes()));
 
             res_headers.extend(self.res_headers.iter().filter_map(|(name, value)| {
