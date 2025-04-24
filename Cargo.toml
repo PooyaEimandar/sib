@@ -23,6 +23,7 @@ base64 = { version = "0.22.1", optional = true, default-features = false, featur
     "alloc",
 ] }
 bytes = { version = "1.10.1", optional = true, default-features = false }
+cfg-if = { version = "1.0.0", default-features = false }
 chrono = { version = "0.4.40", optional = true, default-features = false, features = [
     "clock",
 ] }
