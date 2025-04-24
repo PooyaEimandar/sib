@@ -223,6 +223,7 @@ impl Session {
         let mut protocol_upgrade = ProtocolUpgrade::None;
 
         for header in headers {
+            crate::s_info!("Header: {:?}", header);
             // Extract pseudo-headers
             match header.name() {
                 b":method" => method = String::from_utf8_lossy(header.value()).to_string(),
