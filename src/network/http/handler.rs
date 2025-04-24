@@ -11,8 +11,10 @@ use std::time::Duration;
 
 use crate::{s_error, s_warn};
 
-use super::server::SRateLimiter;
-use super::session::Session;
+use super::{
+    server::{RateLimit, is_rate_limited},
+    session::Session,
+};
 
 const READ_H1_HEADERS_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -20,7 +22,7 @@ pub type HandlerFn =
     Arc<dyn Fn(Session) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>> + Send + Sync>;
 
 pub fn service(
-    rate_limiter: Option<Arc<SRateLimiter>>,
+    rate_limiter: Option<Arc<RateLimit>>,
     handler: Option<HandlerFn>,
 ) -> Service<H2Handler> {
     Service::new(
@@ -33,7 +35,7 @@ pub fn service(
 }
 
 pub struct H2Handler {
-    rate_limiter: Option<Arc<SRateLimiter>>,
+    rate_limiter: Option<Arc<RateLimit>>,
     handler: Option<HandlerFn>,
 }
 
@@ -61,15 +63,15 @@ impl HttpServerApp for H2Handler {
         }
 
         // check rate limit
-        if let Some(rate_limiter) = &self.rate_limiter {
+        if let Some(limiter) = &self.rate_limiter {
             if let Some(peer_addr) = session.client_addr() {
                 if let Some(ip) = peer_addr
                     .to_socket_addrs()
                     .ok()
                     .and_then(|mut addrs| addrs.next().map(|addr| addr.ip()))
                 {
-                    if rate_limiter.check_key(&ip).is_err() {
-                        s_warn!("H3 Rate limit exceeded for {ip}");
+                    if is_rate_limited(&limiter, ip) {
+                        s_warn!("H2 Rate limit exceeded for {ip}");
                         return None;
                     }
                 }

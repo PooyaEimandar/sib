@@ -2,14 +2,14 @@ use super::handler::HandlerFn;
 use crate::{network::http::handler, s_error};
 use crate::{s_info, s_trace, s_warn};
 use core::time::Duration;
+use dashmap::DashMap;
 use futures::StreamExt;
-use governor::clock::DefaultClock;
-use governor::state::keyed::DefaultKeyedStateStore;
-use governor::{Quota, RateLimiter};
 use pingora::{listeners::TcpSocketOptions, protocols::TcpKeepalive, services::Service};
 use std::net::IpAddr;
 use std::num::NonZeroU32;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 use tokio_quiche::http3::driver::{H3Event, IncomingH3Headers, ServerH3Event};
 use tokio_quiche::http3::settings::Http3Settings;
 use tokio_quiche::listen;
@@ -17,7 +17,50 @@ use tokio_quiche::metrics::DefaultMetrics;
 use tokio_quiche::quic::SimpleConnectionIdGenerator;
 use tokio_quiche::{ConnectionParams, ServerH3Controller, ServerH3Driver};
 
-pub type SRateLimiter = RateLimiter<IpAddr, DefaultKeyedStateStore<IpAddr>, DefaultClock>;
+pub struct RateLimit {
+    map: DashMap<IpAddr, (Instant, u32)>,
+    max_burst: u32,
+    window: Duration,
+    last_gc_time: AtomicU64,
+    gc_interval: Duration,
+}
+
+#[inline]
+pub fn is_rate_limited(rate_limit: &RateLimit, ip: IpAddr) -> bool {
+    let now_nanos = Instant::now()
+        .duration_since(Instant::now() - Duration::from_secs(86400))
+        .as_nanos() as u64; // nanoseconds since epoch
+    let last_gc = rate_limit.last_gc_time.load(Ordering::Relaxed);
+
+    if now_nanos.saturating_sub(last_gc) > rate_limit.gc_interval.as_nanos() as u64 {
+        if rate_limit
+            .last_gc_time
+            .compare_exchange(last_gc, now_nanos, Ordering::SeqCst, Ordering::Relaxed)
+            .is_ok()
+        {
+            let now = Instant::now();
+            rate_limit
+                .map
+                .retain(|_, (ts, _)| now.duration_since(*ts) < rate_limit.gc_interval);
+        }
+    }
+
+    // Rate limiting logic
+    let now = Instant::now();
+    let mut entry = rate_limit.map.entry(ip).or_insert((now, 0));
+
+    if now.duration_since(entry.0) > rate_limit.window {
+        *entry = (now, 1);
+        return false;
+    }
+
+    if entry.1 >= rate_limit.max_burst {
+        return true;
+    }
+
+    entry.1 += 1;
+    false
+}
 
 pub struct Server {
     address: String,
@@ -31,7 +74,7 @@ pub struct Server {
     max_idle_timeout: Duration,
     tcp_keep_alive_interval: Duration,
     tcp_keep_alive_count: usize,
-    rate_limiter: Option<Arc<SRateLimiter>>,
+    rate_limiter: Option<Arc<RateLimit>>,
     handler: Option<HandlerFn>,
 }
 
@@ -60,19 +103,21 @@ impl Server {
         address: String,
         h2_port: u16,
         h3_port: u16,
-        rate_limit_max_burst_period: Option<(NonZeroU32, Duration)>,
+        rate_limit_max_burst_period: Option<(Duration, NonZeroU32, Duration)>,
         handler: Option<HandlerFn>,
     ) -> Self {
-        let rate_limiter = if let Some((max_burst, period)) = rate_limit_max_burst_period {
-            if let Some(quota) = Quota::with_period(period) {
-                quota.allow_burst(max_burst);
-                Some(Arc::new(RateLimiter::keyed(quota)))
+        let rate_limiter =
+            if let Some((period, max_burst, gc_interval)) = rate_limit_max_burst_period {
+                Some(Arc::new(RateLimit {
+                    map: DashMap::new(),
+                    max_burst: max_burst.get(),
+                    window: period,
+                    last_gc_time: AtomicU64::new(0),
+                    gc_interval,
+                }))
             } else {
                 None
-            }
-        } else {
-            None
-        };
+            };
 
         Self {
             address,
@@ -225,7 +270,7 @@ impl Server {
         cert: String,
         private_key: String,
         max_idle_timeout: Duration,
-        rate_limiter: Option<Arc<SRateLimiter>>,
+        rate_limiter: Option<Arc<RateLimit>>,
         handler: Option<HandlerFn>,
     ) -> anyhow::Result<()> {
         let socket = tokio::net::UdpSocket::bind(&address_port).await?;
@@ -262,9 +307,9 @@ impl Server {
                     let peer_addr = conn.peer_addr();
 
                     // check rate limit
-                    if let Some(limiter) = &rate_limiter {
+                    if let Some(ref limiter) = rate_limiter {
                         let ip = peer_addr.ip();
-                        if limiter.check_key(&ip).is_err() {
+                        if is_rate_limited(&limiter, ip) {
                             s_warn!("H3 Rate limit exceeded for {ip}");
                             continue;
                         }
