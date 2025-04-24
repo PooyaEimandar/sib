@@ -1,8 +1,10 @@
 use anyhow::bail;
+use base64::Engine;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::SinkExt;
 use http::{HeaderMap, HeaderName, HeaderValue};
 use pingora::{http::ResponseHeader, protocols::http::ServerSession};
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -118,6 +120,13 @@ impl std::str::FromStr for HTTPMethod {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ProtocolUpgrade {
+    None,
+    WebSocket,
+    WebTransport,
+}
+
 pub struct H3Session {
     _stream_id: u64,
     headers: HeaderMap,
@@ -135,6 +144,7 @@ pub struct Session {
     res_headers: http::HeaderMap,
     h2: Option<ServerSession>,
     h3: Option<H3Session>,
+    protocol_upgrade: ProtocolUpgrade,
     status_was_sent: bool,
 }
 
@@ -154,6 +164,7 @@ impl Default for Session {
             res_headers,
             h2: None,
             h3: None,
+            protocol_upgrade: ProtocolUpgrade::None,
             status_was_sent: false,
         }
     }
@@ -172,6 +183,17 @@ impl Session {
             .map(|s| s.trim_start_matches("Host: ").trim())
             .unwrap_or("");
 
+        let protocol_upgrade = session
+            .get_header(http::header::UPGRADE)
+            .map(|v| {
+                if v.as_bytes() == b"websocket" {
+                    ProtocolUpgrade::WebSocket
+                } else {
+                    ProtocolUpgrade::None
+                }
+            })
+            .unwrap_or(ProtocolUpgrade::None);
+
         path = Self::normalize_slashes(&path);
         let queries = Self::parse_query_params(&mut path);
 
@@ -180,6 +202,7 @@ impl Session {
             path,
             host: host.to_string(),
             queries,
+            protocol_upgrade,
             h2: Some(session),
             ..Default::default()
         })
@@ -197,6 +220,7 @@ impl Session {
         let mut path: String = "".to_owned();
         let mut host: String = "".to_owned();
         let mut http_headers = HeaderMap::new();
+        let mut protocol_upgrade = ProtocolUpgrade::None;
 
         for header in headers {
             // Extract pseudo-headers
@@ -206,6 +230,9 @@ impl Session {
                 b"host" => host = String::from_utf8_lossy(header.value()).to_string(),
                 b":authority" if host.is_empty() => {
                     host = String::from_utf8_lossy(header.value()).to_string();
+                }
+                b":protocol" if header.value() == b"webtransport" => {
+                    protocol_upgrade = ProtocolUpgrade::WebTransport;
                 }
                 _ => {
                     // Parse header name safely
@@ -238,6 +265,7 @@ impl Session {
             path,
             host,
             queries,
+            protocol_upgrade,
             h3: Some(H3Session {
                 _stream_id: stream_id,
                 headers: http_headers,
@@ -250,39 +278,77 @@ impl Session {
         }
     }
 
-    // /// Upgrades the session to a WebSocket connection.
-    // pub async fn upgrade_to_websocket(&mut self) -> anyhow::Result<()> {
-    //     if let Some(h2) = &mut self.h2 {
-    //         // Check if the request is a WebSocket upgrade request
-    //         if h2
-    //             .get_header(http::header::UPGRADE)
-    //             .map(|v| v.as_bytes() == b"websocket")
-    //             .unwrap_or(false)
-    //         {
-    //             let key = h2
-    //                 .get_header(http::header::SEC_WEBSOCKET_KEY)
-    //                 .map(|v| v.as_bytes())
-    //                 .unwrap_or_default();
+    pub fn get_webtransport_streams(
+        &mut self,
+    ) -> anyhow::Result<(&mut InboundFrameStream, &mut OutboundFrameSender)> {
+        if let Some(h3) = &mut self.h3 {
+            if self.protocol_upgrade == ProtocolUpgrade::WebTransport {
+                return Ok((&mut h3.in_frame, &mut h3.out_frame));
+            }
+        }
+        anyhow::bail!("WebTransport session not available");
+    }
 
-    //             let mut hasher = Sha256::new();
-    //             hasher.update(key);
-    //             hasher.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+    pub async fn send_webtransport_frame(
+        &mut self,
+        frame_type: u8,
+        data: Bytes,
+    ) -> anyhow::Result<()> {
+        let (_, out) = self.get_webtransport_streams()?;
+        let mut framed = BytesMut::with_capacity(1 + data.len());
+        framed.put_u8(frame_type);
+        framed.put_slice(&data);
+        out.send(OutboundFrame::Datagram(
+            BufFactory::buf_from_slice(&framed.freeze()),
+            0,
+        ))
+        .await?;
+        Ok(())
+    }
 
-    //             let result = hasher.finalize();
-    //             let sec_ws_accept_value = base64::engine::general_purpose::STANDARD.encode(result);
+    pub async fn read_webtransport_frame(&mut self) -> anyhow::Result<(u8, Bytes)> {
+        let (in_frame, _) = self.get_webtransport_streams()?;
+        while let Some(frame) = in_frame.recv().await {
+            if let tokio_quiche::http3::driver::InboundFrame::Datagram(data) = frame {
+                if !data.is_empty() {
+                    let (typ, payload) = data.split_at(1);
+                    return Ok((typ[0], Bytes::copy_from_slice(payload)));
+                }
+            }
+        }
+        anyhow::bail!("No WebTransport datagram received");
+    }
 
-    //             // Perform the WebSocket handshake
-    //             let mut response = ResponseHeader::build(101, None)?;
-    //             response.append_header(http::header::UPGRADE, "websocket")?;
-    //             response.append_header(http::header::CONNECTION, "Upgrade")?;
-    //             response.append_header(http::header::SEC_WEBSOCKET_ACCEPT, sec_ws_accept_value)?;
-    //             h2.write_response_header(Box::new(response)).await?;
+    /// Upgrades the session to a WebSocket connection.
+    pub async fn upgrade_to_websocket(&mut self) -> anyhow::Result<()> {
+        if let Some(h2) = &mut self.h2 {
+            if self.protocol_upgrade == ProtocolUpgrade::WebSocket {
+                let key = h2
+                    .get_header(http::header::SEC_WEBSOCKET_KEY)
+                    .map(|v| v.as_bytes())
+                    .unwrap_or_default();
 
-    //             return Ok(());
-    //         }
-    //     }
-    //     anyhow::bail!("Not a WebSocket upgrade request");
-    // }
+                let mut hasher = Sha256::new();
+                hasher.update(key);
+                hasher.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+
+                let result = hasher.finalize();
+                let sec_ws_accept_value = base64::engine::general_purpose::STANDARD.encode(result);
+
+                // Perform the WebSocket handshake
+                let mut response = ResponseHeader::build(101, None)?;
+                response.append_header(http::header::UPGRADE, "websocket")?;
+                response.append_header(http::header::CONNECTION, "Upgrade")?;
+                response.append_header(http::header::SEC_WEBSOCKET_ACCEPT, sec_ws_accept_value)?;
+                h2.write_response_header(Box::new(response)).await?;
+
+                self.protocol_upgrade = ProtocolUpgrade::WebSocket;
+
+                return Ok(());
+            }
+        }
+        anyhow::bail!("Not a WebSocket upgrade request");
+    }
 
     /// Normalizes a path by removing duplicate `/` and preventing traversal attacks.
     fn normalize_slashes(path: &str) -> String {
@@ -386,6 +452,10 @@ impl Session {
 
     pub fn get_is_h3(&self) -> bool {
         self.h3.is_some()
+    }
+
+    pub fn get_protocol_upgrade(&self) -> ProtocolUpgrade {
+        self.protocol_upgrade
     }
 
     pub fn get_status_was_sent(&self) -> bool {
