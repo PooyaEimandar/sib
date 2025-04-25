@@ -32,17 +32,16 @@ pub fn is_rate_limited(rate_limit: &RateLimit, ip: IpAddr) -> bool {
         .as_nanos() as u64; // nanoseconds since epoch
     let last_gc = rate_limit.last_gc_time.load(Ordering::Relaxed);
 
-    if now_nanos.saturating_sub(last_gc) > rate_limit.gc_interval.as_nanos() as u64 {
-        if rate_limit
+    if now_nanos.saturating_sub(last_gc) > rate_limit.gc_interval.as_nanos() as u64
+        && rate_limit
             .last_gc_time
             .compare_exchange(last_gc, now_nanos, Ordering::SeqCst, Ordering::Relaxed)
             .is_ok()
-        {
-            let now = Instant::now();
-            rate_limit
-                .map
-                .retain(|_, (ts, _)| now.duration_since(*ts) < rate_limit.gc_interval);
-        }
+    {
+        let now = Instant::now();
+        rate_limit
+            .map
+            .retain(|_, (ts, _)| now.duration_since(*ts) < rate_limit.gc_interval);
     }
 
     // Rate limiting logic
@@ -309,7 +308,7 @@ impl Server {
                     // check rate limit
                     if let Some(ref limiter) = rate_limiter {
                         let ip = peer_addr.ip();
-                        if is_rate_limited(&limiter, ip) {
+                        if is_rate_limited(limiter, ip) {
                             s_warn!("H3 Rate limit exceeded for {ip}");
                             continue;
                         }

@@ -70,7 +70,7 @@ impl HttpServerApp for H2Handler {
                     .ok()
                     .and_then(|mut addrs| addrs.next().map(|addr| addr.ip()))
                 {
-                    if is_rate_limited(&limiter, ip) {
+                    if is_rate_limited(limiter, ip) {
                         s_warn!("H2 Rate limit exceeded for {ip}");
                         return None;
                     }

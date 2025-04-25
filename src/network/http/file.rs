@@ -11,12 +11,17 @@ use tokio::fs;
 use crate::{
     network::http::session::{HTTPMethod, Session},
     s_error,
-    system::compress,
+    system::{
+        buffer::{Buffer, BufferType},
+        compress,
+    },
 };
 
 const CHUNK_SIZE: usize = 16 * 1024;
 const MIN_BYTES: u64 = 1024;
-const MAX_ON_THE_FLY_SIZE: u64 = 512 * 1024; // 512 KB
+
+const MAX_ON_THE_FLY_SIZE: u64 = 512 * 1024;
+type FileBuffer = Buffer<{ MAX_ON_THE_FLY_SIZE as usize }>; // 512 KB
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum EncodingType {
@@ -24,6 +29,30 @@ pub enum EncodingType {
     Gzip,
     Br,
     Zstd,
+}
+
+impl EncodingType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EncodingType::Gzip => "gzip",
+            EncodingType::Br => "br",
+            EncodingType::Zstd => "zstd",
+            EncodingType::None => "",
+        }
+    }
+}
+
+impl std::str::FromStr for EncodingType {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "gzip" => Ok(EncodingType::Gzip),
+            "br" => Ok(EncodingType::Br),
+            "zstd" => Ok(EncodingType::Zstd),
+            _ => Err(()),
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -41,6 +70,7 @@ pub async fn serve(
     session: &mut Session,
     path: &str,
     root: &str,
+    encoding_order: &Option<&[EncodingType]>,
     file_cache: FileCache,
 ) -> anyhow::Result<()> {
     let static_root = fs::canonicalize(root).await?;
@@ -109,6 +139,7 @@ pub async fn serve(
     let encoding = get_encoding(
         session.read_req_header(http::header::ACCEPT_ENCODING),
         &mime_type,
+        encoding_order,
     );
 
     let mut meta_opt: Option<Metadata> = None;
@@ -152,8 +183,8 @@ pub async fn serve(
                     );
                     (com_file, Some(com_meta))
                 } else if file_info.size <= MAX_ON_THE_FLY_SIZE {
-                    let content = fs::read(&file_info.path).await?;
-                    let compressed = compress::encode_gzip(&content).await?;
+                    let buffer = get_file_buffer(&file_info.path).await?;
+                    let compressed = compress::encode_gzip(buffer.as_slice()).await?;
 
                     session.append_headers(&[
                         (
@@ -188,8 +219,9 @@ pub async fn serve(
                     );
                     (com_file, Some(com_meta))
                 } else if file_info.size <= MAX_ON_THE_FLY_SIZE {
-                    let content = fs::read(&file_info.path).await?;
-                    let compressed = compress::encode_brotli(&content, 4096, 9, 18).await?;
+                    let buffer = get_file_buffer(&file_info.path).await?;
+                    let compressed =
+                        compress::encode_brotli(buffer.as_slice(), 4096, 9, 18).await?;
 
                     session.append_headers(&[
                         (
@@ -224,8 +256,8 @@ pub async fn serve(
                     );
                     (com_file, Some(com_meta))
                 } else if file_info.size <= MAX_ON_THE_FLY_SIZE {
-                    let content = fs::read(&file_info.path).await?;
-                    let compressed = compress::encode_zstd(&content, 9).await?;
+                    let buffer = get_file_buffer(&file_info.path).await?;
+                    let compressed = compress::encode_zstd(buffer.as_slice(), 9).await?;
 
                     session.append_headers(&[
                         (
@@ -378,23 +410,44 @@ fn parse_byte_range(header: &str, total_size: u64) -> Option<Range<u64>> {
     Some(start..end)
 }
 
-fn get_encoding(accept_encoding: Option<&HeaderValue>, mime: &Mime) -> EncodingType {
+async fn get_file_buffer(path: &PathBuf) -> anyhow::Result<FileBuffer> {
+    let mut file_buf = FileBuffer::new(BufferType::BINARY);
+    let mut file = fs::File::open(&path).await?;
+    // calculate the file size
+    let file_size = file.metadata().await?.len();
+    file_buf
+        .buf
+        .resize(file_size as usize, 0)
+        .map_err(|_| anyhow::anyhow!("Failed to resize buffer"))?;
+    let _size = tokio::io::AsyncReadExt::read(&mut file, file_buf.as_mut_slice()).await?;
+    Ok(file_buf)
+}
+
+fn get_encoding(
+    accept_encoding: Option<&HeaderValue>,
+    mime: &Mime,
+    preferred_order: &Option<&[EncodingType]>,
+) -> EncodingType {
+    // skip compression for media types
     if (mime.type_() == mime::IMAGE || mime.type_() == mime::AUDIO || mime.type_() == mime::VIDEO)
         && *mime != mime::IMAGE_SVG
     {
         return EncodingType::None;
     }
+
     let header = match accept_encoding.and_then(|h| h.to_str().ok()) {
         Some(value) => value.to_ascii_lowercase(),
         None => return EncodingType::None,
     };
-    if header.contains("zstd") {
-        EncodingType::Zstd
-    } else if header.contains("br") {
-        EncodingType::Br
-    } else if header.contains("gzip") {
-        EncodingType::Gzip
-    } else {
-        EncodingType::None
+
+    let candidates =
+        preferred_order.unwrap_or(&[EncodingType::Zstd, EncodingType::Br, EncodingType::Gzip]);
+
+    for &enc in candidates {
+        if !enc.as_str().is_empty() && header.contains(enc.as_str()) {
+            return enc;
+        }
     }
+
+    EncodingType::None
 }
