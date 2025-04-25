@@ -124,7 +124,6 @@ impl std::str::FromStr for HTTPMethod {
 pub enum ProtocolUpgrade {
     None,
     WebSocket,
-    WebTransport,
 }
 
 pub struct H3Session {
@@ -220,7 +219,6 @@ impl Session {
         let mut path: String = "".to_owned();
         let mut host: String = "".to_owned();
         let mut http_headers = HeaderMap::new();
-        let mut protocol_upgrade = ProtocolUpgrade::None;
 
         for header in headers {
             crate::s_info!("Header: {:?}", header);
@@ -231,9 +229,6 @@ impl Session {
                 b"host" => host = String::from_utf8_lossy(header.value()).to_string(),
                 b":authority" if host.is_empty() => {
                     host = String::from_utf8_lossy(header.value()).to_string();
-                }
-                b":protocol" if header.value() == b"webtransport" => {
-                    protocol_upgrade = ProtocolUpgrade::WebTransport;
                 }
                 _ => {
                     // Parse header name safely
@@ -266,7 +261,6 @@ impl Session {
             path,
             host,
             queries,
-            protocol_upgrade,
             h3: Some(H3Session {
                 _stream_id: stream_id,
                 headers: http_headers,
@@ -277,47 +271,6 @@ impl Session {
             }),
             ..Default::default()
         }
-    }
-
-    pub fn get_webtransport_streams(
-        &mut self,
-    ) -> anyhow::Result<(&mut InboundFrameStream, &mut OutboundFrameSender)> {
-        if let Some(h3) = &mut self.h3 {
-            if self.protocol_upgrade == ProtocolUpgrade::WebTransport {
-                return Ok((&mut h3.in_frame, &mut h3.out_frame));
-            }
-        }
-        anyhow::bail!("WebTransport session not available");
-    }
-
-    pub async fn send_webtransport_frame(
-        &mut self,
-        frame_type: u8,
-        data: Bytes,
-    ) -> anyhow::Result<()> {
-        let (_, out) = self.get_webtransport_streams()?;
-        let mut framed = BytesMut::with_capacity(1 + data.len());
-        framed.put_u8(frame_type);
-        framed.put_slice(&data);
-        out.send(OutboundFrame::Datagram(
-            BufFactory::buf_from_slice(&framed.freeze()),
-            0,
-        ))
-        .await?;
-        Ok(())
-    }
-
-    pub async fn read_webtransport_frame(&mut self) -> anyhow::Result<(u8, Bytes)> {
-        let (in_frame, _) = self.get_webtransport_streams()?;
-        while let Some(frame) = in_frame.recv().await {
-            if let tokio_quiche::http3::driver::InboundFrame::Datagram(data) = frame {
-                if !data.is_empty() {
-                    let (typ, payload) = data.split_at(1);
-                    return Ok((typ[0], Bytes::copy_from_slice(payload)));
-                }
-            }
-        }
-        anyhow::bail!("No WebTransport datagram received");
     }
 
     /// Upgrades the session to a WebSocket connection.
