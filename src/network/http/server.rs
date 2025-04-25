@@ -274,8 +274,10 @@ impl Server {
         handler: Option<HandlerFn>,
     ) -> anyhow::Result<()> {
         let socket = tokio::net::UdpSocket::bind(&address_port).await?;
-        let mut settings = tokio_quiche::settings::QuicSettings::default();
-        settings.max_idle_timeout = Some(max_idle_timeout);
+        let settings = tokio_quiche::settings::QuicSettings {
+            max_idle_timeout: Some(max_idle_timeout),
+            ..Default::default()
+        };
         let mut listeners = listen(
             [socket],
             ConnectionParams::new_server(
