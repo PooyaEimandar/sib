@@ -9,12 +9,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::{s_error, s_warn};
-
-use super::{
-    server::{RateLimit, is_rate_limited},
-    session::Session,
-};
+use super::session::Session;
+use crate::{network::ratelimit::RateLimit, s_error, s_warn};
 
 const READ_H1_HEADERS_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -70,7 +66,7 @@ impl HttpServerApp for H2Handler {
                     .ok()
                     .and_then(|mut addrs| addrs.next().map(|addr| addr.ip()))
                 {
-                    if is_rate_limited(limiter, ip) {
+                    if !limiter.allow(ip) {
                         s_warn!("H2 Rate limit exceeded for {ip}");
                         return None;
                     }

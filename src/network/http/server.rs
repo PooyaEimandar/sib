@@ -1,65 +1,18 @@
 use super::handler::HandlerFn;
+use crate::network::ratelimit::RateLimit;
 use crate::{network::http::handler, s_error};
 use crate::{s_info, s_trace, s_warn};
 use core::time::Duration;
-use dashmap::DashMap;
 use futures::StreamExt;
 use pingora::{listeners::TcpSocketOptions, protocols::TcpKeepalive, services::Service};
-use std::net::IpAddr;
 use std::num::NonZeroU32;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
 use tokio_quiche::http3::driver::{H3Event, IncomingH3Headers, ServerH3Event};
 use tokio_quiche::http3::settings::Http3Settings;
 use tokio_quiche::listen;
 use tokio_quiche::metrics::DefaultMetrics;
 use tokio_quiche::quic::SimpleConnectionIdGenerator;
 use tokio_quiche::{ConnectionParams, ServerH3Controller, ServerH3Driver};
-
-pub struct RateLimit {
-    map: DashMap<IpAddr, (Instant, u32)>,
-    max_burst: u32,
-    window: Duration,
-    last_gc_time: AtomicU64,
-    gc_interval: Duration,
-}
-
-#[inline]
-pub fn is_rate_limited(rate_limit: &RateLimit, ip: IpAddr) -> bool {
-    let now_nanos = Instant::now()
-        .duration_since(Instant::now() - Duration::from_secs(86400))
-        .as_nanos() as u64; // nanoseconds since epoch
-    let last_gc = rate_limit.last_gc_time.load(Ordering::Relaxed);
-
-    if now_nanos.saturating_sub(last_gc) > rate_limit.gc_interval.as_nanos() as u64
-        && rate_limit
-            .last_gc_time
-            .compare_exchange(last_gc, now_nanos, Ordering::SeqCst, Ordering::Relaxed)
-            .is_ok()
-    {
-        let now = Instant::now();
-        rate_limit
-            .map
-            .retain(|_, (ts, _)| now.duration_since(*ts) < rate_limit.gc_interval);
-    }
-
-    // Rate limiting logic
-    let now = Instant::now();
-    let mut entry = rate_limit.map.entry(ip).or_insert((now, 0));
-
-    if now.duration_since(entry.0) > rate_limit.window {
-        *entry = (now, 1);
-        return false;
-    }
-
-    if entry.1 >= rate_limit.max_burst {
-        return true;
-    }
-
-    entry.1 += 1;
-    false
-}
 
 pub struct Server {
     address: String,
@@ -107,13 +60,11 @@ impl Server {
     ) -> Self {
         let rate_limiter =
             if let Some((period, max_burst, gc_interval)) = rate_limit_max_burst_period {
-                Some(Arc::new(RateLimit {
-                    map: DashMap::new(),
-                    max_burst: max_burst.get(),
-                    window: period,
-                    last_gc_time: AtomicU64::new(0),
+                Some(Arc::new(RateLimit::new(
+                    max_burst.get(),
+                    period,
                     gc_interval,
-                }))
+                )))
             } else {
                 None
             };
@@ -308,7 +259,7 @@ impl Server {
                     // check rate limit
                     if let Some(ref limiter) = rate_limiter {
                         let ip = peer_addr.ip();
-                        if is_rate_limited(limiter, ip) {
+                        if !limiter.allow(ip) {
                             s_warn!("H3 Rate limit exceeded for {ip}");
                             continue;
                         }
