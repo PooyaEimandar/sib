@@ -23,6 +23,7 @@ const MIN_BYTES: u64 = 1024;
 const MAX_ON_THE_FLY_SIZE: u64 = 512 * 1024;
 type FileBuffer = Buffer<{ MAX_ON_THE_FLY_SIZE as usize }>; // 512 KB
 
+#[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum EncodingType {
     None,
@@ -70,7 +71,7 @@ pub async fn serve(
     session: &mut Session,
     path: &str,
     root: &str,
-    encoding_order: &Vec<EncodingType>,
+    // encoding_order: &Vec<EncodingType>,
     file_cache: FileCache,
 ) -> anyhow::Result<()> {
     let static_root = fs::canonicalize(root).await?;
@@ -138,8 +139,7 @@ pub async fn serve(
         .unwrap_or(mime::APPLICATION_OCTET_STREAM);
     let encoding = get_encoding(
         session.read_req_header(http::header::ACCEPT_ENCODING),
-        &mime_type,
-        encoding_order,
+        &mime_type, // encoding_order,
     );
 
     let mut meta_opt: Option<Metadata> = None;
@@ -423,16 +423,9 @@ async fn get_file_buffer(path: &PathBuf) -> anyhow::Result<FileBuffer> {
     Ok(file_buf)
 }
 
-fn get_encoding(
-    accept_encoding: Option<&HeaderValue>,
-    mime: &Mime,
-    candidates: &Vec<EncodingType>,
-) -> EncodingType {
+fn get_encoding(accept_encoding: Option<&HeaderValue>, mime: &Mime) -> EncodingType {
     // skip compression for media types
-    if (candidates.is_empty()
-        || mime.type_() == mime::IMAGE
-        || mime.type_() == mime::AUDIO
-        || mime.type_() == mime::VIDEO)
+    if (mime.type_() == mime::IMAGE || mime.type_() == mime::AUDIO || mime.type_() == mime::VIDEO)
         && *mime != mime::IMAGE_SVG
     {
         return EncodingType::None;
@@ -443,7 +436,8 @@ fn get_encoding(
         None => return EncodingType::None,
     };
 
-    for &enc in candidates {
+    let candidates = vec![EncodingType::Zstd, EncodingType::Br, EncodingType::Gzip];
+    for enc in candidates {
         if !enc.as_str().is_empty() && header.contains(enc.as_str()) {
             return enc;
         }
