@@ -70,7 +70,7 @@ pub async fn serve(
     session: &mut Session,
     path: &str,
     root: &str,
-    encoding_order: &Option<&[EncodingType]>,
+    encoding_order: &Vec<EncodingType>,
     file_cache: FileCache,
 ) -> anyhow::Result<()> {
     let static_root = fs::canonicalize(root).await?;
@@ -426,10 +426,13 @@ async fn get_file_buffer(path: &PathBuf) -> anyhow::Result<FileBuffer> {
 fn get_encoding(
     accept_encoding: Option<&HeaderValue>,
     mime: &Mime,
-    preferred_order: &Option<&[EncodingType]>,
+    candidates: &Vec<EncodingType>,
 ) -> EncodingType {
     // skip compression for media types
-    if (mime.type_() == mime::IMAGE || mime.type_() == mime::AUDIO || mime.type_() == mime::VIDEO)
+    if (candidates.is_empty()
+        || mime.type_() == mime::IMAGE
+        || mime.type_() == mime::AUDIO
+        || mime.type_() == mime::VIDEO)
         && *mime != mime::IMAGE_SVG
     {
         return EncodingType::None;
@@ -439,9 +442,6 @@ fn get_encoding(
         Some(value) => value.to_ascii_lowercase(),
         None => return EncodingType::None,
     };
-
-    let candidates =
-        preferred_order.unwrap_or(&[EncodingType::Zstd, EncodingType::Br, EncodingType::Gzip]);
 
     for &enc in candidates {
         if !enc.as_str().is_empty() && header.contains(enc.as_str()) {
