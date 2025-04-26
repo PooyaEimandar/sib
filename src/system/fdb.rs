@@ -449,11 +449,21 @@ pub fn next_prefix(prefix: &[u8]) -> Vec<u8> {
 }
 
 #[tokio::test]
-async fn test_transaction() -> anyhow::Result<()> {
+async fn test() -> anyhow::Result<()> {
     let _network = FDBNetwork::new();
 
     // Initialize FoundationDB connection pool
     let pool = create_fdb_pool(10)?;
+
+    // export data
+    let data = export(&Bytes::from_static(b"/"), &pool, 0, 100, false, false).await?;
+    println!(
+        "Exported JSON: {}",
+        String::from_utf8(serde_json::to_vec_pretty(&data)?)?
+    );
+    // import data
+    import(&data, &pool, 100, false, false).await?;
+    println!("Data imported successfully.");
 
     let pool_cloned = pool.clone();
     let task1 = tokio::spawn(async move {
@@ -486,33 +496,6 @@ async fn test_transaction() -> anyhow::Result<()> {
 
     task1.await?;
     task2.await?;
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_export_import() -> anyhow::Result<()> {
-    let _network = FDBNetwork::new();
-    let pool = create_fdb_pool(10)?;
-
-    let data = export(&Bytes::from_static(b"/"), &pool, 0, 100, false, false).await?;
-    println!(
-        "Exported JSON: {}",
-        String::from_utf8(serde_json::to_vec_pretty(&data)?)?
-    );
-
-    import(&data, &pool, 100, false, false).await?;
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_backup() -> anyhow::Result<()> {
-    backup(
-        "/Users/pooyaeimandar/Codes/PooyaEimandar/sib/bak",
-        Duration::from_secs(60),
-    )
-    .await?;
 
     Ok(())
 }

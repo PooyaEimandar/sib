@@ -21,6 +21,7 @@ Cargo.lock
 #.idea/
 
 *.DS_Store
+*.pem
 backup.json
 bak
 log/*

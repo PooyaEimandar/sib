@@ -101,72 +101,77 @@ impl HttpReqPool {
     }
 }
 
-#[tokio::test]
-async fn test() -> anyhow::Result<()> {
-    use rayon::prelude::*;
-    use std::sync::Arc;
-    use std::time::Instant;
-    use url::Url;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let pool = HttpReqPool::new(Duration::from_secs(5), 10);
-    let url = Url::parse("https://www.rust-lang.org")?;
-    let pool = Arc::new(pool);
-    let url = Arc::new(url);
+    #[tokio::test]
+    async fn test_pool() -> anyhow::Result<()> {
+        use rayon::prelude::*;
+        use std::sync::Arc;
+        use std::time::Instant;
+        use url::Url;
 
-    let iterations = 10;
-    let start = Instant::now();
+        let pool = HttpReqPool::new(Duration::from_secs(5), 10);
+        let url = Url::parse("https://www.rust-lang.org")?;
+        let pool = Arc::new(pool);
+        let url = Arc::new(url);
 
-    tokio::task::spawn_blocking({
-        let pool = pool.clone();
-        let url = url.clone();
+        let iterations = 10;
+        let start = Instant::now();
 
-        move || {
-            (0..iterations).into_par_iter().for_each(|i| {
-                let url = url.clone();
-                let pool = pool.clone();
+        tokio::task::spawn_blocking({
+            let pool = pool.clone();
+            let url = url.clone();
 
-                // Use local runtime per thread (but avoid dropping in async context)
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .map_err(|e| {
-                        eprintln!("Failed to build runtime: {}", e);
-                        e
-                    })
-                    .unwrap_or_else(|e| panic!("Runtime creation failed: {}", e));
+            move || {
+                (0..iterations).into_par_iter().for_each(|i| {
+                    let url = url.clone();
+                    let pool = pool.clone();
 
-                rt.block_on(async {
-                    let client_pool = match pool.get_for_url((*url).clone()) {
-                        Ok(pool) => pool,
-                        Err(err) => {
-                            eprintln!("[{}] Failed to get client pool: {}", i, err);
-                            return;
+                    // Use local runtime per thread (but avoid dropping in async context)
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .map_err(|e| {
+                            eprintln!("Failed to build runtime: {}", e);
+                            e
+                        })
+                        .unwrap_or_else(|e| panic!("Runtime creation failed: {}", e));
+
+                    rt.block_on(async {
+                        let client_pool = match pool.get_for_url((*url).clone()) {
+                            Ok(pool) => pool,
+                            Err(err) => {
+                                eprintln!("[{}] Failed to get client pool: {}", i, err);
+                                return;
+                            }
+                        };
+                        let client = match client_pool.get().await {
+                            Ok(client) => client,
+                            Err(err) => {
+                                eprintln!("[{}] Failed to get client: {}", i, err);
+                                return;
+                            }
+                        };
+                        let res = client
+                            .get((&*url).clone())
+                            .header("Accept-Encoding", "br")
+                            .send()
+                            .await;
+
+                        match res {
+                            Ok(resp) => println!("[{}] Status: {}", i, resp.status()),
+                            Err(err) => eprintln!("[{}] Error: {}", i, err),
                         }
-                    };
-                    let client = match client_pool.get().await {
-                        Ok(client) => client,
-                        Err(err) => {
-                            eprintln!("[{}] Failed to get client: {}", i, err);
-                            return;
-                        }
-                    };
-                    let res = client
-                        .get((&*url).clone())
-                        .header("Accept-Encoding", "br")
-                        .send()
-                        .await;
-
-                    match res {
-                        Ok(resp) => println!("[{}] Status: {}", i, resp.status()),
-                        Err(err) => eprintln!("[{}] Error: {}", i, err),
-                    }
+                    });
                 });
-            });
-        }
-    })
-    .await?;
+            }
+        })
+        .await?;
 
-    let elapsed = start.elapsed();
-    println!("Completed {} requests in {:.2?}", iterations, elapsed);
-    Ok(())
+        let elapsed = start.elapsed();
+        println!("Completed {} requests in {:.2?}", iterations, elapsed);
+        Ok(())
+    }
 }

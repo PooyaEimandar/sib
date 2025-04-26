@@ -1,4 +1,4 @@
-name: Build
+name: Build and Test
 
 on:
   push:
@@ -11,16 +11,11 @@ env:
 
 jobs:
   zig-cross:
-    name: ${{ matrix.target }}
+    name: Linux Cross Build - ${{ matrix.target }}
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        target:
-          [
-            x86_64-unknown-linux-gnu,
-            aarch64-unknown-linux-gnu,
-            x86_64-pc-windows-gnu,
-          ]
+        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
 
     steps:
       - uses: actions/checkout@v4
@@ -41,18 +36,46 @@ jobs:
       - name: Build with cargo-zigbuild
         run: cargo zigbuild --release --target=${{ matrix.target }}
 
-  macos:
-    name: macOS-arm64
-    runs-on: macos-14
+      - name: Run tests (only on native linux)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: cargo test --release
+
+  windows:
+    name: Windows x86_64-pc-windows-msvc
+    runs-on: windows-latest
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build for macOS arm64
+      - name: Set up Rust
+        run: rustup default stable
+
+      - name: Add Windows target
+        run: rustup target add x86_64-pc-windows-msvc
+
+      - name: Build
         run: cargo build --release
+
+      - name: Test
+        run: cargo test --release
+
+  macos:
+    name: macOS-arm64
+    runs-on: macos-14
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Test
+        run: cargo test --release
 
   ios:
     name: iOS-arm64
     runs-on: macos-14
+
     steps:
       - uses: actions/checkout@v4
 
@@ -62,20 +85,21 @@ jobs:
       - name: Install cargo-lipo
         run: cargo install cargo-lipo
 
-      - name: Build iOS staticlib
+      - name: Build staticlib for iOS
         run: cargo lipo --release --targets=aarch64-apple-ios
 
   android:
-    name: Android NDK:(${{ matrix.target }})
+    name: Android NDK Build - ${{ matrix.target }}
     runs-on: ubuntu-latest
     strategy:
       matrix:
         target:
           [armv7-linux-androideabi, aarch64-linux-android, x86_64-linux-android]
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Add Rust target
+      - name: Add Android target
         run: rustup target add ${{ matrix.target }}
 
       - name: Install NDK + cargo-ndk
@@ -87,5 +111,5 @@ jobs:
       - name: Install cargo-ndk
         run: cargo install cargo-ndk
 
-      - name: Build Android binary
+      - name: Build
         run: cargo ndk -t ${{ matrix.target }} -o ./target build --release

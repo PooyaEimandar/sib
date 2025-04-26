@@ -762,14 +762,39 @@ impl Session {
         Ok(())
     }
 
+    // pub async fn send_eom(&mut self) -> anyhow::Result<()> {
+    //     if !self.status_was_sent {
+    //         s_error!("send_eom() called before send_status()");
+    //         bail!("send_eom() called before send_status()");
+    //     }
+
+    //     if let Some(h2) = self.h2.take() {
+    //         h2.finish().await.ok();
+    //     } else if let Some(h3) = &mut self.h3 {
+    //         h3.out_frame.close();
+    //         h3.out_frame.flush().await?;
+    //     }
+    //     Ok(())
+    // }
+
     pub async fn send_eom(&mut self) -> anyhow::Result<()> {
         if !self.status_was_sent {
-            s_error!("send_eom() called before send_status()");
             bail!("send_eom() called before send_status()");
         }
 
-        if let Some(h2) = self.h2.take() {
-            h2.finish().await.ok();
+        if let Some(h2_session) = self.h2.take() {
+            let finish_result = h2_session.finish().await;
+            match finish_result {
+                Ok(Some(mut stream)) => {
+                    stream.shutdown().await;
+                }
+                Ok(None) => {
+                    // it was h2 and no need to shutdown
+                }
+                Err(e) => {
+                    anyhow::bail!("Failed to finish H2 session: {:?}", e);
+                }
+            };
         } else if let Some(h3) = &mut self.h3 {
             h3.out_frame.close();
             h3.out_frame.flush().await?;
@@ -840,6 +865,6 @@ impl Session {
         // Payload
         frame.put_slice(payload);
 
-        frame.freeze() // Converts BytesMut → Bytes
+        frame.freeze() // Converts mutable bytes to imutable bytes
     }
 }

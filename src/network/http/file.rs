@@ -20,8 +20,8 @@ use crate::{
 const CHUNK_SIZE: usize = 16 * 1024;
 const MIN_BYTES: u64 = 1024;
 
-const MAX_ON_THE_FLY_SIZE: u64 = 512 * 1024;
-type FileBuffer = Buffer<{ MAX_ON_THE_FLY_SIZE as usize }>; // 512 KB
+const MAX_ON_THE_FLY_SIZE: u64 = 32 * 1024;
+type FileBuffer = Buffer<{ MAX_ON_THE_FLY_SIZE as usize }>; // 32 KB
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -71,11 +71,10 @@ pub async fn serve(
     session: &mut Session,
     path: &str,
     root: &str,
-    // encoding_order: &Vec<EncodingType>,
+    encoding_order: &Vec<EncodingType>,
     file_cache: FileCache,
 ) -> anyhow::Result<()> {
-    let static_root = fs::canonicalize(root).await?;
-    let requested_path = PathBuf::from(root).join(path);
+    let requested_path = PathBuf::from(root).join(path.trim_start_matches('/'));
     let canonical = match fs::canonicalize(&requested_path).await {
         Ok(path) => path,
         Err(_) => {
@@ -87,6 +86,7 @@ pub async fn serve(
         }
     };
 
+    let static_root: PathBuf = fs::canonicalize(root).await?;
     if !canonical.starts_with(&static_root) {
         return session.send_status_eom(StatusCode::FORBIDDEN).await;
     }
@@ -139,7 +139,8 @@ pub async fn serve(
         .unwrap_or(mime::APPLICATION_OCTET_STREAM);
     let encoding = get_encoding(
         session.read_req_header(http::header::ACCEPT_ENCODING),
-        &mime_type, // encoding_order,
+        &mime_type,
+        encoding_order,
     );
 
     let mut meta_opt: Option<Metadata> = None;
@@ -412,20 +413,30 @@ fn parse_byte_range(header: &str, total_size: u64) -> Option<Range<u64>> {
 
 async fn get_file_buffer(path: &PathBuf) -> anyhow::Result<FileBuffer> {
     let mut file_buf = FileBuffer::new(BufferType::BINARY);
-    let mut file = fs::File::open(&path).await?;
-    // calculate the file size
+    let mut file = fs::File::open(path).await?;
     let file_size = file.metadata().await?.len();
+
     file_buf
         .buf
         .resize(file_size as usize, 0)
-        .map_err(|_| anyhow::anyhow!("Failed to resize buffer"))?;
-    let _size = tokio::io::AsyncReadExt::read(&mut file, file_buf.as_mut_slice()).await?;
+        .map_err(|_| anyhow::anyhow!("Failed to resize buffer for file: {}", path.display()))?;
+
+    let slice = file_buf.as_mut_slice();
+    tokio::io::AsyncReadExt::read_exact(&mut file, slice).await?;
+
     Ok(file_buf)
 }
 
-fn get_encoding(accept_encoding: Option<&HeaderValue>, mime: &Mime) -> EncodingType {
+fn get_encoding(
+    accept_encoding: Option<&HeaderValue>,
+    mime: &Mime,
+    encoding_order: &Vec<EncodingType>,
+) -> EncodingType {
     // skip compression for media types
-    if (mime.type_() == mime::IMAGE || mime.type_() == mime::AUDIO || mime.type_() == mime::VIDEO)
+    if (encoding_order.is_empty()
+        || mime.type_() == mime::IMAGE
+        || mime.type_() == mime::AUDIO
+        || mime.type_() == mime::VIDEO)
         && *mime != mime::IMAGE_SVG
     {
         return EncodingType::None;
@@ -436,8 +447,7 @@ fn get_encoding(accept_encoding: Option<&HeaderValue>, mime: &Mime) -> EncodingT
         None => return EncodingType::None,
     };
 
-    let candidates = vec![EncodingType::Zstd, EncodingType::Br, EncodingType::Gzip];
-    for enc in candidates {
+    for &enc in encoding_order {
         if !enc.as_str().is_empty() && header.contains(enc.as_str()) {
             return enc;
         }
