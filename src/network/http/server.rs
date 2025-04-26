@@ -1,12 +1,12 @@
 use super::handler::HandlerFn;
-use crate::network::ratelimit::RateLimit;
+// use crate::network::ratelimit::RateLimit;
 use crate::{network::http::handler, s_error};
-use crate::{s_info, s_trace, s_warn};
+use crate::{s_info, s_trace};
 use core::time::Duration;
 use futures::StreamExt;
 use pingora::{listeners::TcpSocketOptions, protocols::TcpKeepalive, services::Service};
-use std::num::NonZeroU32;
-use std::sync::Arc;
+// use std::num::NonZeroU32;
+// use std::sync::Arc;
 use tokio_quiche::http3::driver::{H3Event, IncomingH3Headers, ServerH3Event};
 use tokio_quiche::http3::settings::Http3Settings;
 use tokio_quiche::listen;
@@ -26,7 +26,7 @@ pub struct Server {
     max_idle_timeout: Duration,
     tcp_keep_alive_interval: Duration,
     tcp_keep_alive_count: usize,
-    rate_limiter: Option<Arc<RateLimit>>,
+    // rate_limiter: Option<Arc<RateLimit>>,
     handler: Option<HandlerFn>,
 }
 
@@ -44,7 +44,7 @@ impl Default for Server {
             max_idle_timeout: Duration::from_secs(15),
             tcp_keep_alive_interval: Duration::from_secs(5),
             tcp_keep_alive_count: 3,
-            rate_limiter: None,
+            // rate_limiter: None,
             handler: None,
         }
     }
@@ -55,25 +55,24 @@ impl Server {
         address: String,
         h2_port: u16,
         h3_port: u16,
-        rate_limit_max_burst_period: Option<(Duration, NonZeroU32, Duration)>,
+        // rate_limit_max_burst_period: Option<(Duration, NonZeroU32, Duration)>,
         handler: Option<HandlerFn>,
     ) -> Self {
-        let rate_limiter =
-            if let Some((period, max_burst, gc_interval)) = rate_limit_max_burst_period {
-                Some(Arc::new(RateLimit::new(
-                    max_burst.get(),
-                    period,
-                    gc_interval,
-                )))
-            } else {
-                None
-            };
+        // let rate_limiter =
+        //     if let Some((period, max_burst, gc_interval)) = rate_limit_max_burst_period {
+        //         Some(Arc::new(RateLimit::new(
+        //             max_burst.get(),
+        //             period,
+        //             gc_interval,
+        //         )))
+        //     } else {
+        //         None
+        //     };
 
         Self {
             address,
             h2_port,
             h3_port,
-            rate_limiter,
             handler,
             ..Default::default()
         }
@@ -137,7 +136,7 @@ impl Server {
                 self.cert_path.clone(),
                 self.key_path.clone(),
                 self.max_idle_timeout,
-                self.rate_limiter.clone(),
+                // self.rate_limiter.clone(),
                 self.handler.clone(),
             );
             tasks.push(tokio::spawn(async move {
@@ -204,7 +203,7 @@ impl Server {
         tls_settings.set_alpn(pingora::protocols::ALPN::H2H1);
         tls_settings.enable_h2();
 
-        let mut service = handler::service(self.rate_limiter.clone(), self.handler.clone());
+        let mut service = handler::service(self.handler.clone());
         service.add_tls_with_settings(&p_address_port, Some(sock_options), tls_settings);
 
         let services: Vec<Box<dyn Service>> = vec![Box::new(service)];
@@ -220,7 +219,6 @@ impl Server {
         cert: String,
         private_key: String,
         max_idle_timeout: Duration,
-        rate_limiter: Option<Arc<RateLimit>>,
         handler: Option<HandlerFn>,
     ) -> anyhow::Result<()> {
         let socket = tokio::net::UdpSocket::bind(&address_port).await?;
@@ -254,16 +252,16 @@ impl Server {
         while let Some(conn_result) = accept_stream.next().await {
             match conn_result {
                 Ok(conn) => {
-                    let peer_addr = conn.peer_addr();
+                    // let peer_addr = conn.peer_addr();
 
-                    // check rate limit
-                    if let Some(ref limiter) = rate_limiter {
-                        let ip = peer_addr.ip();
-                        if !limiter.allow(ip) {
-                            s_warn!("H3 Rate limit exceeded for {ip}");
-                            continue;
-                        }
-                    }
+                    // // check rate limit
+                    // if let Some(ref limiter) = rate_limiter {
+                    //     let ip = peer_addr.ip();
+                    //     if !limiter.allow(ip) {
+                    //         s_warn!("H3 Rate limit exceeded for {ip}");
+                    //         continue;
+                    //     }
+                    // }
 
                     let (driver, controller) = ServerH3Driver::new(Http3Settings::default());
                     conn.start(driver);
