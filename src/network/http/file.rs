@@ -417,7 +417,6 @@ async fn get_file_buffer(path: &PathBuf) -> anyhow::Result<FileBuffer> {
     let file_size = file.metadata().await?.len();
 
     file_buf
-        .buf
         .resize(file_size as usize, 0)
         .map_err(|_| anyhow::anyhow!("Failed to resize buffer for file: {}", path.display()))?;
 
