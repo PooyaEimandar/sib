@@ -14,6 +14,12 @@ pub struct RateLimit {
     start_time: Instant, // Reference start time for calculating "monotonic time"
 }
 
+impl Default for RateLimit {
+    fn default() -> Self {
+        Self::new(500, Duration::from_secs(30), Duration::from_secs(5 * 60))
+    }
+}
+
 impl RateLimit {
     pub fn new(max_burst: u32, window: Duration, gc_interval: Duration) -> Self {
         Self {
