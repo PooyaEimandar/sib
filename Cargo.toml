@@ -98,7 +98,7 @@ zstd = { version = "0.13.3", optional = true }
 wtransport = { version = "0.6.1", optional = true }
 
 [features]
-default = []
+default = ["all"]
 all = [
     "database",
     "http-client",

@@ -221,7 +221,6 @@ impl Session {
         let mut http_headers = HeaderMap::new();
 
         for header in headers {
-            // crate::s_info!("Header: {:?}", header);
             // Extract pseudo-headers
             match header.name() {
                 b":method" => method = String::from_utf8_lossy(header.value()).to_string(),
