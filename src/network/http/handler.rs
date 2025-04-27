@@ -67,6 +67,22 @@ impl HttpServerApp for H2Handler {
                 {
                     if !limiter.allow(ip) {
                         s_warn!("H2 Rate limit exceeded for {ip}");
+                        let _ret = crate::network::http::session::Session::h2_send_status_eom(
+                            &mut session,
+                            http::StatusCode::TOO_MANY_REQUESTS,
+                        )
+                        .await;
+                        match session.finish().await {
+                            Ok(Some(mut stream)) => {
+                                stream.shutdown().await;
+                            }
+                            Ok(None) => {
+                                // it was h2 and no need to shutdown
+                            }
+                            Err(e) => {
+                                s_error!("Failed to finish H2 session for rate limit: {:?}", e);
+                            }
+                        };
                         return None;
                     }
                 }

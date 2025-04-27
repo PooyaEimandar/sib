@@ -685,6 +685,15 @@ impl Session {
         Ok(())
     }
 
+    pub(crate) async fn h2_send_status_eom(
+        session: &mut ServerSession,
+        status_code: http::StatusCode,
+    ) -> pingora::Result<()> {
+        session
+            .write_response_header(Box::new(ResponseHeader::build_no_case(status_code, None)?))
+            .await
+    }
+
     pub async fn send_status_eom(&mut self, status_code: http::StatusCode) -> anyhow::Result<()> {
         self.send_status(status_code).await?;
         self.send_eom().await
@@ -760,21 +769,6 @@ impl Session {
 
         Ok(())
     }
-
-    // pub async fn send_eom(&mut self) -> anyhow::Result<()> {
-    //     if !self.status_was_sent {
-    //         s_error!("send_eom() called before send_status()");
-    //         bail!("send_eom() called before send_status()");
-    //     }
-
-    //     if let Some(h2) = self.h2.take() {
-    //         h2.finish().await.ok();
-    //     } else if let Some(h3) = &mut self.h3 {
-    //         h3.out_frame.close();
-    //         h3.out_frame.flush().await?;
-    //     }
-    //     Ok(())
-    // }
 
     pub async fn send_eom(&mut self) -> anyhow::Result<()> {
         if !self.status_was_sent {
