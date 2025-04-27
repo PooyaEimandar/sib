@@ -349,6 +349,7 @@ pub async fn serve(
         move || {
             let std_file = std::fs::File::open(&file_path)?;
             let mmap = unsafe { Mmap::map(&std_file)? };
+            drop(std_file);
             anyhow::Ok(mmap)
         }
     })
