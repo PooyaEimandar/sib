@@ -776,22 +776,22 @@ impl Session {
         }
 
         if let Some(h2_session) = self.h2.take() {
-            let finish_result = h2_session.finish().await;
-            match finish_result {
+            match h2_session.finish().await {
                 Ok(Some(mut stream)) => {
-                    stream.shutdown().await;
+                    let _ = stream.shutdown().await;
                 }
                 Ok(None) => {
-                    // it was h2 and no need to shutdown
+                    // Nothing else to do — H2 stream is finished.
                 }
                 Err(e) => {
-                    anyhow::bail!("Failed to finish H2 session: {:?}", e);
+                    crate::s_error!("Failed to finish H2 session: {:?}", e);
                 }
-            };
+            }
         } else if let Some(h3) = &mut self.h3 {
-            h3.out_frame.close();
+            //h3.out_frame.close();
             h3.out_frame.flush().await?;
         }
+
         Ok(())
     }
 

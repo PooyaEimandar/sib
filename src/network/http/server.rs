@@ -7,6 +7,7 @@ use futures::StreamExt;
 use pingora::{listeners::TcpSocketOptions, protocols::TcpKeepalive, services::Service};
 use std::num::NonZeroU32;
 use std::sync::Arc;
+use tokio_quiche::datagram_socket::ShutdownConnectionExt;
 use tokio_quiche::http3::driver::{H3Event, IncomingH3Headers, ServerH3Event};
 use tokio_quiche::http3::settings::Http3Settings;
 use tokio_quiche::listen;
@@ -253,7 +254,7 @@ impl Server {
 
         while let Some(conn_result) = accept_stream.next().await {
             match conn_result {
-                Ok(conn) => {
+                Ok(mut conn) => {
                     let peer_addr = conn.peer_addr();
 
                     // check rate limit
@@ -261,6 +262,8 @@ impl Server {
                         let ip = peer_addr.ip();
                         if !limiter.allow(ip) {
                             s_warn!("H3 Rate limit exceeded for {ip}");
+                            // close the QUIC connection nicely
+                            let _ = conn.shutdown_connection().await;
                             continue;
                         }
                     }

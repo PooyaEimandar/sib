@@ -72,17 +72,11 @@ impl HttpServerApp for H2Handler {
                             http::StatusCode::TOO_MANY_REQUESTS,
                         )
                         .await;
-                        match session.finish().await {
-                            Ok(Some(mut stream)) => {
-                                stream.shutdown().await;
-                            }
-                            Ok(None) => {
-                                // it was h2 and no need to shutdown
-                            }
-                            Err(e) => {
-                                s_error!("Failed to finish H2 session for rate limit: {:?}", e);
-                            }
-                        };
+
+                        if let Ok(Some(mut stream)) = session.finish().await {
+                            let _ = stream.shutdown().await;
+                        }
+
                         return None;
                     }
                 }
