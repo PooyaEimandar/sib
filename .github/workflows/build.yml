@@ -11,7 +11,7 @@ env:
 
 jobs:
   zig-cross:
-    name: Linux Cross Build - ${{ matrix.target }}
+    name: Linux-${{ matrix.target }}
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -41,7 +41,7 @@ jobs:
         run: cargo test --release
 
   windows:
-    name: Windows x86_64-pc-windows-msvc
+    name: Windows-x86_64-pc-windows-msvc
     runs-on: windows-latest
 
     steps:
@@ -89,7 +89,7 @@ jobs:
         run: cargo lipo --release --targets=aarch64-apple-ios
 
   android:
-    name: Android NDK Build - ${{ matrix.target }}
+    name: Android NDK-${{ matrix.target }}
     runs-on: ubuntu-latest
     strategy:
       matrix:
