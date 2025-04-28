@@ -187,16 +187,7 @@ impl Server {
             anyhow::bail!("Private key file does not exist: {}", self.key_path);
         }
 
-        let opt = if cfg!(target_os = "linux") {
-            Some(pingora::server::configuration::Opt {
-                upgrade: true,
-                ..Default::default()
-            })
-        } else {
-            None
-        };
-
-        let mut h2_server = pingora::server::Server::new(opt)?;
+        let mut h2_server = pingora::server::Server::new(Some(None))?;
         h2_server.bootstrap();
 
         let mut sock_options = TcpSocketOptions::default();
