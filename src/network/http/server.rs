@@ -187,8 +187,11 @@ impl Server {
             anyhow::bail!("Private key file does not exist: {}", self.key_path);
         }
 
-        let opt = None;
-        let mut h2_server = pingora::server::Server::new(opt)?;
+        let opt = pingora::server::configuration::Opt {
+            upgrade: true,
+            ..Default::default()
+        };
+        let mut h2_server = pingora::server::Server::new(Some(opt))?;
         h2_server.bootstrap();
 
         let mut sock_options = TcpSocketOptions::default();
@@ -207,6 +210,7 @@ impl Server {
 
         let mut service = handler::service(self.rate_limiter.clone(), self.handler.clone());
         service.add_tls_with_settings(&p_address_port, Some(sock_options), tls_settings);
+        service.threads = Some(num_cpus::get());
 
         let services: Vec<Box<dyn Service>> = vec![Box::new(service)];
         h2_server.add_services(services);
