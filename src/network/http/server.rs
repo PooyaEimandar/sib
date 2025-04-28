@@ -187,11 +187,16 @@ impl Server {
             anyhow::bail!("Private key file does not exist: {}", self.key_path);
         }
 
-        let opt = pingora::server::configuration::Opt {
-            upgrade: true,
-            ..Default::default()
+        let opt = if cfg!(target_os = "linux") {
+            Some(pingora::server::configuration::Opt {
+                upgrade: true,
+                ..Default::default()
+            })
+        } else {
+            None
         };
-        let mut h2_server = pingora::server::Server::new(Some(opt))?;
+
+        let mut h2_server = pingora::server::Server::new(opt)?;
         h2_server.bootstrap();
 
         let mut sock_options = TcpSocketOptions::default();
@@ -228,15 +233,32 @@ impl Server {
         rate_limiter: Option<Arc<RateLimit>>,
         handler: Option<HandlerFn>,
     ) -> anyhow::Result<()> {
-        let socket = tokio::net::UdpSocket::bind(&address_port).await?;
-        let settings = tokio_quiche::settings::QuicSettings {
-            max_idle_timeout: Some(max_idle_timeout),
-            ..Default::default()
-        };
-        let mut listeners = listen(
-            [socket],
+        use socket2::{Domain, Socket, Type};
+        use tokio::net::UdpSocket;
+
+        let cpu_count = num_cpus::get();
+        let mut listeners = Vec::new();
+
+        // Bind multiple UDP sockets with SO_REUSEPORT
+        for _ in 0..cpu_count {
+            let addr = address_port.parse::<std::net::SocketAddr>()?;
+            let socket = Socket::new(Domain::for_address(addr), Type::DGRAM, None)?;
+            socket.set_nonblocking(true)?;
+            socket.set_reuse_address(true)?;
+            socket.set_reuse_port(true)?;
+            socket.bind(&addr.into())?;
+
+            let socket = UdpSocket::from_std(socket.into())?;
+            listeners.push(socket);
+        }
+
+        let mut servers = listen(
+            listeners,
             ConnectionParams::new_server(
-                settings,
+                tokio_quiche::settings::QuicSettings {
+                    max_idle_timeout: Some(max_idle_timeout),
+                    ..Default::default()
+                },
                 tokio_quiche::settings::TlsCertificatePaths {
                     cert: &cert,
                     private_key: &private_key,
@@ -248,44 +270,57 @@ impl Server {
             DefaultMetrics,
         )?;
 
-        if listeners.is_empty() {
-            anyhow::bail!("Expected one listener at least");
+        if servers.is_empty() {
+            anyhow::bail!("Expected at least one listener for H3.");
         }
-
-        let accept_stream = &mut listeners[0];
 
         s_info!("Sib's H3 started on UDP port: {address_port}");
 
-        while let Some(conn_result) = accept_stream.next().await {
-            match conn_result {
-                Ok(mut conn) => {
-                    let peer_addr = conn.peer_addr();
+        let mut tasks = vec![];
 
-                    // check rate limit
-                    if let Some(ref limiter) = rate_limiter {
-                        let ip = peer_addr.ip();
-                        if !limiter.allow(ip) {
-                            s_warn!("H3 Rate limit exceeded for {ip}");
-                            // close the QUIC connection nicely
-                            let _ = conn.shutdown_connection().await;
+        for mut accept_stream in servers.drain(..) {
+            let rate_limiter = rate_limiter.clone();
+            let handler = handler.clone();
+
+            let task = tokio::spawn(async move {
+                while let Some(conn_result) = accept_stream.next().await {
+                    match conn_result {
+                        Ok(mut conn) => {
+                            let peer_addr = conn.peer_addr();
+
+                            // Check rate limit
+                            if let Some(ref limiter) = rate_limiter {
+                                let ip = peer_addr.ip();
+                                if !limiter.allow(ip) {
+                                    s_warn!("H3 Rate limit exceeded for {ip}");
+                                    let _ = conn.shutdown_connection().await;
+                                    continue;
+                                }
+                            }
+
+                            let (driver, controller) =
+                                ServerH3Driver::new(Http3Settings::default());
+                            conn.start(driver);
+
+                            let handler_cloned = handler.clone();
+                            tokio::spawn(async move {
+                                Self::handle_h3_connection(controller, handler_cloned).await;
+                            });
+                        }
+                        Err(e) => {
+                            s_error!("H3 accept error: {e}");
                             continue;
                         }
                     }
-
-                    let (driver, controller) = ServerH3Driver::new(Http3Settings::default());
-                    conn.start(driver);
-
-                    let handler_cloned = handler.clone();
-                    tokio::spawn(async move {
-                        Self::handle_h3_connection(controller, handler_cloned).await;
-                    });
                 }
-                Err(e) => {
-                    s_error!("Sib QUIC failed on accepting: {e}");
-                    continue;
-                }
-            }
+            });
+
+            tasks.push(task);
         }
+
+        // Wait for all H3 listener tasks
+        futures::future::try_join_all(tasks).await?;
+
         Ok(())
     }
 
@@ -332,7 +367,6 @@ mod tests {
 
     fn generate_self_signed_cert() -> (String, String) {
         use rcgen::{CertifiedKey, generate_simple_self_signed};
-        // Generate a certificate that's valid for "localhost" and "hello.world.example"
         let name = vec!["localhost".to_string()];
 
         let CertifiedKey { cert, key_pair } = generate_simple_self_signed(name).unwrap();
