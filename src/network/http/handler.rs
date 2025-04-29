@@ -74,7 +74,9 @@ impl HttpServerApp for H2Handler {
                         .await;
 
                         if let Ok(Some(mut stream)) = session.finish().await {
-                            let _ = stream.shutdown().await;
+                            // Shutdown the stream to ensure the connection is closed
+                            stream.shutdown().await;
+                            drop(stream);
                         }
 
                         return None;

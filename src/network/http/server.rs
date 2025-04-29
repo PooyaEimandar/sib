@@ -416,8 +416,8 @@ mod tests {
                 .set_key_path(key_path.to_string_lossy().to_string())
                 .set_enable_h2(true)
                 .set_enable_h3(true)
-                .set_tcp_fast_open_backlog_size(128)
-                .set_max_idle_timeout(Duration::from_secs(10))
+                .set_tcp_fast_open_backlog_size(1024)
+                .set_max_idle_timeout(Duration::from_secs(5))
                 .run_forever()
                 .await
                 .expect("Failed to run test server");
