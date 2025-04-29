@@ -58,7 +58,7 @@ moka = { version = "0.12.10", optional = true, default-features = false, feature
 ] }
 num_cpus = { version = "1.16.0" }
 once_cell = { version = "1.21.3", default-features = false }
-pingora = { version = "0.4.0", optional = true, default-features = false, features = [
+pingora = { git = "https://github.com/cloudflare/pingora", version = "*", optional = true, default-features = false, features = [
     "boringssl",
     "time",
 ] }
@@ -99,7 +99,7 @@ zstd = { version = "0.13.3", optional = true }
 wtransport = { version = "0.6.1", optional = true }
 
 [features]
-default = []
+default = ["all"]
 all = [
     "database",
     "http-client",
