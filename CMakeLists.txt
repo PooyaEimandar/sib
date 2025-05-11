@@ -173,6 +173,7 @@ target_link_libraries(${PROJECT_NAME}
     Boost::filesystem
     Boost::system
     Boost::context
+    Boost::program_options
     double-conversion
     gflags
     folly
