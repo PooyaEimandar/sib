@@ -39,3 +39,5 @@ dep/*
 !dep/build.sh
 !dep/const.sh
 !dep/foundationDB.sh
+trace.127.0.0.1.*.xml
+

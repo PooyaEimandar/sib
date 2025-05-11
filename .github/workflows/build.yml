@@ -1,4 +1,4 @@
-name: Wolf - Cross-Platform Build CI
+name: Sib - Cross-Platform Build CI
 
 on:
   push:
@@ -77,7 +77,7 @@ jobs:
           cd build
 
           if [ "${RUNNER_OS}" = "Linux" ]; then
-            EXTRA_OPTS="-DWOLF_NET_PROXYGEN=ON"
+            EXTRA_OPTS="-DSIB_NET_PROXYGEN=ON"
           else
             EXTRA_OPTS=""
           fi
@@ -133,7 +133,7 @@ jobs:
   #           -DCMAKE_C_COMPILER_LAUNCHER=ccache \
   #           -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
   #           -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-  #           -DWOLF_NET_PROXYGEN=ON \
+  #           -DSIB_NET_PROXYGEN=ON \
   #           -DCMAKE_BUILD_TYPE=Release
 
   #     - name: Build Android ${{ matrix.abi }}

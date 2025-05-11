@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.28...4.0)
 
-project(wolf
+project(sib
   VERSION 4.0.0
   DESCRIPTION "A high-performance and cross-platform C++ modules optimized for streaming and rendering."
 )
@@ -16,11 +16,13 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 # set C/CXX standards
-option(WOLF_BUILD_TEST "Build tests" ON)
-option(WOLF_NET_PROXYGEN "Enable HTTP3/2/1.1 server based on Facebook's Proxygen" OFF)
-option(WOLF_NET_TCP "Enable TCP networking" OFF)
-option(WOLF_NET_UDP "Enable UDP networking" OFF)
-option(WOLF_DB_FDB "Enable FoundationDB" ON)
+option(SIB_BUILD_BENCH "Build bench" ON)
+option(SIB_BUILD_TEST "Build tests" ON)
+option(SIB_NET_PROXYGEN "Enable HTTP3/2/1.1 server based on Facebook's Proxygen" OFF)
+option(SIB_NET_TCP "Enable TCP networking" OFF)
+option(SIB_NET_UDP "Enable UDP networking" OFF)
+option(SIB_DB_FDB "Enable FoundationDB" ON)
+
 set(FOLLY_VERSION "v2025.04.28.00" CACHE STRING "set the folly version")
 set(C_STANDARD 17 CACHE STRING "C standard to use")
 set(CXX_STANDARD 20 CACHE STRING "C++ standard to use. Minimum standard is 20")
@@ -28,7 +30,7 @@ set(CMAKE_C_STANDARD ${C_STANDARD})
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_CXX_STANDARD ${CXX_STANDARD})
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS OFF)
 set(CMAKE_THREAD_PREFER_PTHREAD TRUE)
 set(THREADS_PREFER_PTHREAD_FLAG TRUE)
 
@@ -61,10 +63,10 @@ if(SANITIZER_FLAGS)
     add_link_options(${SANITIZER_FLAGS})
 endif()
 
-# setup Wolf definitions
+# setup SIB definitions
 get_cmake_property(_vars VARIABLES)
 foreach (_var ${_vars})
-    string(FIND ${_var} "WOLF_" out)
+    string(FIND ${_var} "SIB_" out)
     if(("${out}" EQUAL 0) AND ("(${${_var}}" MATCHES ON))
         add_definitions("-D${_var}")
     endif()
@@ -78,7 +80,7 @@ set(PROXYGEN_DEPS ${PROXYGEN_BUILD_DIR}/deps)
 if(NOT (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/dep/proxygen/proxygen/_build/deps"))
     message(STATUS "Running build.sh with build type: ${CMAKE_BUILD_TYPE}...")
     execute_process(
-        COMMAND bash build.sh ${CMAKE_BUILD_TYPE} ${FOLLY_VERSION} ${WOLF_NET_PROXYGEN}
+        COMMAND bash build.sh ${CMAKE_BUILD_TYPE} ${FOLLY_VERSION} ${SIB_NET_PROXYGEN}
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/dep
         RESULT_VARIABLE PROXYGEN_SCRIPT_RESULT
     )
@@ -88,7 +90,7 @@ if(NOT (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/dep/proxygen/proxygen/_build/deps"))
 endif()
 
 # check for dep
-if(WOLF_DB_FDB)
+if(SIB_DB_FDB)
     message(STATUS "Running foundationDB.sh...")
     execute_process(
         COMMAND bash foundationDB.sh
@@ -107,17 +109,19 @@ set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH}
     "${PROXYGEN_ROOT}/build/fbcode_builder/CMake"
 )
 
-find_package(Boost REQUIRED COMPONENTS filesystem system context)
+find_package(Threads REQUIRED)
+find_package(OpenSSL REQUIRED)
+find_package(Boost REQUIRED COMPONENTS filesystem system context program_options)
 
 file(GLOB_RECURSE SYSTEM_DB_FILES
-    "${CMAKE_CURRENT_SOURCE_DIR}/wolf/database/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/sib/database/*.cpp"
 )
 file(GLOB_RECURSE SYSTEM_SYS_FILES
-    "${CMAKE_CURRENT_SOURCE_DIR}/wolf/system/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/sib/system/*.cpp"
 )
 
 add_library(${PROJECT_NAME} 
-    wolf/wolf.cpp
+    sib/sib.cpp
     ${SYSTEM_DB_FILES}
     ${SYSTEM_SYS_FILES}
 )
@@ -133,8 +137,8 @@ target_include_directories(${PROJECT_NAME}
     ${Boost_INCLUDE_DIRS}
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/dep/proxygen/proxygen/_build/deps/include
-    $<$<AND:$<BOOL:${WOLF_DB_FDB}>,$<PLATFORM_ID:Darwin>>:/usr/local/include/foundationdb>
-    $<$<AND:$<BOOL:${WOLF_DB_FDB}>,$<PLATFORM_ID:Linux>>:/usr/include/foundationdb>
+    $<$<AND:$<BOOL:${SIB_DB_FDB}>,$<PLATFORM_ID:Darwin>>:/usr/local/include/foundationdb>
+    $<$<AND:$<BOOL:${SIB_DB_FDB}>,$<PLATFORM_ID:Linux>>:/usr/include/foundationdb>
     $<$<PLATFORM_ID:Darwin>:/opt/homebrew/Cellar/double-conversion/3.3.1/include>
     $<$<PLATFORM_ID:Darwin>:/opt/homebrew/Cellar/gflags/2.2.2/include>
 )
@@ -172,16 +176,21 @@ target_link_libraries(${PROJECT_NAME}
     double-conversion
     gflags
     folly
+    $<$<PLATFORM_ID:Linux>:atomic>
     $<$<CONFIG:Debug>:glogd>
     $<$<CONFIG:Debug>:fmtd>
     $<$<CONFIG:Debug>:eventd>
     $<$<NOT:$<CONFIG:Debug>>:glog>
     $<$<NOT:$<CONFIG:Debug>>:fmt>
     $<$<NOT:$<CONFIG:Debug>>:event>
-    $<$<BOOL:${WOLF_DB_FDB}>:${FDB_C_LIBRARY}> 
+    $<$<BOOL:${SIB_DB_FDB}>:${FDB_C_LIBRARY}> 
 )
 
-if(WOLF_BUILD_TEST)
+if (SIB_BUILD_BENCH)
+    include(cmake/bench.cmake)
+endif()
+
+if(SIB_BUILD_TEST)
     include(cmake/test.cmake)
 endif()
 

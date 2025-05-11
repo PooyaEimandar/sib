@@ -1,5 +1,17 @@
 /*
- * Copyright (c) WolfSource (https://github.com/wolfsource/wolf). All rights reserved.
+ * Copyright (c) 2025 Pooya Eimandar (https://github.com/PooyaEimandar/sib)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 #pragma once
@@ -15,13 +27,13 @@
 #include <string>
 #include <thread>
 
-namespace wolf::system {
+namespace sib::system {
 
 struct w_trace {
-  struct w_stack {
-    w_stack() noexcept = default;
+  struct s_stack {
+    s_stack() noexcept = default;
 
-    w_stack(
+    s_stack(
       int64_t p_err_code,
       folly::fbstring p_err_msg,
       folly::StringPiece p_source_file,
@@ -33,7 +45,7 @@ struct w_trace {
     [[nodiscard]] auto err_code() const noexcept -> int64_t { return err_code_; }
     [[nodiscard]] auto err_msg() const noexcept -> const folly::fbstring& { return err_msg_; }
 
-    friend auto operator<<(std::ostream& p_os, const w_stack& p_stack) -> std::ostream& {
+    friend auto operator<<(std::ostream& p_os, const s_stack& p_stack) -> std::ostream& {
       p_os << "|tid:" << p_stack.thread_id_ << "|code:" << p_stack.err_code_
            << "|msg:" << p_stack.err_msg_ << "|src:" << p_stack.source_file_ << "("
            << p_stack.source_file_line_ << ")\n";
@@ -50,7 +62,7 @@ struct w_trace {
 
   w_trace() noexcept = default;
 
-  explicit w_trace(w_stack&& p_stack) { stacks_.emplace_front(std::move(p_stack)); }
+  explicit w_trace(s_stack&& p_stack) { stacks_.emplace_front(std::move(p_stack)); }
 
   w_trace(int64_t p_code, folly::fbstring&& p_msg, folly::StringPiece p_file, int p_line) {
     stacks_.emplace_front(p_code, std::move(p_msg), p_file, p_line);
@@ -69,9 +81,9 @@ struct w_trace {
     return stacks_.empty() ? 0 : stacks_.front().err_code();
   }
 
-  [[nodiscard]] auto stack() const -> const std::deque<w_stack>& { return stacks_; }
+  [[nodiscard]] auto stack() const -> const std::deque<s_stack>& { return stacks_; }
 
-  void push(w_stack&& p_stack) { stacks_.emplace_front(std::move(p_stack)); }
+  void push(s_stack&& p_stack) { stacks_.emplace_front(std::move(p_stack)); }
 
   void merge(const w_trace& p_other) {
     stacks_.insert(stacks_.end(), p_other.stacks_.begin(), p_other.stacks_.end());
@@ -94,13 +106,13 @@ struct w_trace {
   }
 
  private:
-  std::deque<w_stack> stacks_;
+  std::deque<s_stack> stacks_;
 };
 
-} // namespace wolf::system
+} // namespace sib::system
 
 // NOLINTBEGIN (readability-identifier-naming, cppcoreguidelines-macro-usage)
-constexpr auto W_SUCCESS = 0;
-#define W_ERROR(p_code, p_msg) \
-  boost::leaf::new_error(wolf::system::w_trace(p_code, p_msg, __FILE__, __LINE__))
+constexpr auto S_SUCCESS = 0;
+#define S_ERROR(p_code, p_msg) \
+  boost::leaf::new_error(sib::system::w_trace(p_code, p_msg, __FILE__, __LINE__))
 // NOLINTEND

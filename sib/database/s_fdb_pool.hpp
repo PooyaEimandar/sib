@@ -14,23 +14,23 @@
  * limitations under the License.
  */
 
-// #ifdef WOLF_DB_FDB
+#ifdef SIB_DB_FDB
 
 #pragma once
 
-#include "w_fdb_trans.hpp"
+#include "s_fdb_trans.hpp"
 
 #include <filesystem>
 #include <folly/coro/WithCancellation.h>
 #include <folly/logging/xlog.h>
 #include <folly/small_vector.h>
 
-namespace wolf::db {
+namespace sib::db {
 constexpr auto FDB_MAX_POOL_SIZE = 16;
-struct w_fdb_pool {
+struct s_fdb_pool {
   static auto init(std::filesystem::path& p_path, size_t p_pool_size) -> boost::leaf::result<int> {
     if (!std::filesystem::exists(p_path)) {
-      return W_ERROR(std::errc::no_such_file_or_directory, "Missing cluster file");
+      return S_ERROR(std::errc::no_such_file_or_directory, "Missing cluster file");
     }
     s_cluster_file_path = p_path.string();
 
@@ -41,12 +41,12 @@ struct w_fdb_pool {
       FDBDatabase* fdb = nullptr;
       auto fdb_err = fdb_create_database(s_cluster_file_path.c_str(), &fdb);
       if (fdb_err) {
-        return W_ERROR(
+        return S_ERROR(
           fdb_err, folly::sformat("fdb_create_database got an error: {} ", fdb_get_error(fdb_err)));
       }
       state->pool.push_back(fdb);
     }
-    return W_SUCCESS;
+    return S_SUCCESS;
   }
 
   template <typename Duration>
@@ -54,7 +54,7 @@ struct w_fdb_pool {
     auto state = pool().wlock();
 
     if (state->pool.empty()) {
-      co_return W_ERROR(std::errc::device_or_resource_busy, "FDB pool is empty");
+      co_return S_ERROR(std::errc::device_or_resource_busy, "FDB pool is empty");
     }
 
     const size_t POOL_SIZE = state->pool.size();
@@ -80,7 +80,7 @@ struct w_fdb_pool {
       }
     }
 
-    co_return W_ERROR(std::errc::resource_unavailable_try_again, "No available FDB connections");
+    co_return S_ERROR(std::errc::resource_unavailable_try_again, "No available FDB connections");
   }
 
   static void release(fdb p_conn) {
@@ -108,10 +108,10 @@ struct w_fdb_pool {
       s_network_thread.join();
     }
     if (fdb_err) {
-      return W_ERROR(
+      return S_ERROR(
         fdb_err, folly::sformat("fdb_stop_network got an error: {} ", fdb_get_error(fdb_err)));
     }
-    return W_SUCCESS;
+    return S_SUCCESS;
   }
 
   template <typename Callback, typename Duration>
@@ -126,7 +126,7 @@ struct w_fdb_pool {
       FDBTransaction* trans = nullptr;
       const auto TRANS_ERR = fdb_database_create_transaction(p_conn, &trans);
       if (TRANS_ERR) {
-        co_return W_ERROR(
+        co_return S_ERROR(
           TRANS_ERR, fmt::format("Failed to create transaction: {}", fdb_get_error(TRANS_ERR)));
       }
 
@@ -136,28 +136,28 @@ struct w_fdb_pool {
       // NOLINTEND
       if (!fut) {
         fdb_transaction_destroy(trans);
-        co_return W_ERROR(std::errc::operation_canceled, "Failed to create watch future");
+        co_return S_ERROR(std::errc::operation_canceled, "Failed to create watch future");
       }
 
-      W_DEFER([trans, fut]() noexcept {
+      S_DEFER([trans, fut]() noexcept {
         fdb_future_destroy(fut);
         fdb_transaction_destroy(trans);
       });
 
       try {
         co_await folly::coro::co_withCancellation(p_cancel_token, [&]() -> folly::coro::Task<void> {
-          co_await w_fdb_future(fut);
+          co_await s_fdb_future(fut);
           co_return;
         }());
       } catch (const folly::OperationCancelled& p_excp) {
-        co_return W_ERROR(
+        co_return S_ERROR(
           std::errc::operation_canceled, fmt::format("Watch loop cancelled for key: {}", p_key));
       }
 
-      // Try to get the new value using w_fdb_trans
-      auto trans_result = w_fdb_trans::make(p_conn);
+      // Try to get the new value using s_fdb_trans
+      auto trans_result = s_fdb_trans::make(p_conn);
       if (!trans_result) {
-        co_return W_ERROR(
+        co_return S_ERROR(
           std::errc::io_error,
           fmt::format("Failed to create transaction for get new key value of watch: {}", p_key));
       }
@@ -167,7 +167,7 @@ struct w_fdb_pool {
       std::invoke(std::forward<Callback>(p_on_change), std::move(new_value_result));
     }
 
-    co_return W_SUCCESS;
+    co_return S_SUCCESS;
   }
 
   static auto size() -> size_t { return pool().rlock()->pool.size(); }
@@ -205,12 +205,12 @@ struct w_fdb_pool {
       co_return false;
     }
 
-    W_DEFER([fut, trans]() noexcept {
+    S_DEFER([fut, trans]() noexcept {
       fdb_future_destroy(fut);
       fdb_transaction_destroy(trans);
     });
 
-    co_return co_await w_fdb_wait_for_fut(p_timeout, fut);
+    co_return co_await s_fdb_wait_for_fut(p_timeout, fut);
   }
 
   static void run_network() {
@@ -249,6 +249,6 @@ struct w_fdb_pool {
   static inline std::thread s_network_thread;
   static inline std::atomic<bool> s_network_started = false;
 };
-} // namespace wolf::db
+} // namespace sib::db
 
-// #endif // WOLF_DB_FDB
+#endif // SIB_DB_FDB

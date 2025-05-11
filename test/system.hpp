@@ -17,11 +17,11 @@
 #pragma once
 
 #include <gtest/gtest.h>
-#include <wolf/system/w_trace.hpp>
+#include <sib/system/s_trace.hpp>
 
 // NOLINTBEGIN (modernize-use-trailing-return-type)
 
-using w_trace = wolf::system::w_trace;
+using w_trace = sib::system::w_trace;
 
 TEST(WTraceTest, BasicTraceConstruction) {
   const int64_t code = 404;

@@ -28,32 +28,32 @@
 #include <tuple>
 
 #if defined(_WIN32) || defined(_WIN64)
-#ifdef WOLF_EXPORTS
-#define WOLF_API __declspec(dllexport)
+#ifdef SIB_EXPORTS
+#define SIB_API __declspec(dllexport)
 #else
-#define WOLF_API __declspec(dllimport)
+#define SIB_API __declspec(dllimport)
 #endif
 #else
-#define WOLF_API __attribute__((visibility("default")))
+#define SIB_API __attribute__((visibility("default")))
 #endif
 
-[[nodiscard]] WOLF_API inline auto init(int p_argc, std::span<char *> p_argv)
+[[nodiscard]] SIB_API inline auto init(int p_argc, std::span<char *> p_argv)
   -> folly::Expected<folly::Unit, folly::fbstring> {
   if (p_argc <= 0 || p_argv.data() == nullptr) {
-    return folly::makeUnexpected("wolf::init: invalid arguments");
+    return folly::makeUnexpected("sib::init: invalid arguments");
   }
   auto *ptr = p_argv.data();
   std::ignore = folly::Init(&p_argc, &ptr, false);
   return folly::unit;
 }
 
-#ifdef WOLF_BUILD_TEST
+#ifdef SIB_BUILD_TEST
 #include <gtest/gtest.h>
 
 // NOLINTBEGIN (modernize-use-trailing-return-type)
-TEST(WolfInitTest, RunsWithoutCrash) {
+TEST(SibInitTest, RunsWithoutCrash) {
   constexpr int kArgc = 1;
-  constexpr char kArg0[] = "wolf_test_app";
+  constexpr char kArg0[] = "sib_test_app";
   std::array<char *, 2> argv = {const_cast<char *>(kArg0), nullptr};
   std::span<char *> argvSpan(argv.data(), kArgc);
 

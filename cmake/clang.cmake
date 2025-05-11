@@ -36,8 +36,8 @@ message(STATUS "✅ clang-format: ${CLANG_FORMAT_BIN}")
 message(STATUS "✅ clang-tidy: ${CLANG_TIDY_BIN}")
 
 file(GLOB_RECURSE ALL_SOURCE_FILES CONFIGURE_DEPENDS
-  ${CMAKE_SOURCE_DIR}/wolf/*.[ch]pp
-  ${CMAKE_SOURCE_DIR}/wolf/*.h
+  ${CMAKE_SOURCE_DIR}/sib/*.[ch]pp
+  ${CMAKE_SOURCE_DIR}/sib/*.h
 )
 
 # -------------------------------
@@ -79,7 +79,7 @@ endforeach()
 file(APPEND ${CLANG_TIDY_SCRIPT}
 "if [ \${#UPDATED[@]} -ne 0 ]; then\n"
 "  echo \"Running clang-tidy on modified files...\"\n"
-"  \"${CLANG_TIDY_BIN}\" \"\${UPDATED[@]}\" -p \"${CMAKE_BINARY_DIR}\" -header-filter=\"^${CMAKE_SOURCE_DIR}/wolf/\" || exit 1\n"
+"  \"${CLANG_TIDY_BIN}\" \"\${UPDATED[@]}\" -p \"${CMAKE_BINARY_DIR}\" -header-filter=\"^${CMAKE_SOURCE_DIR}/sib/\" || exit 1\n"
 "  touch \"${CLANG_TIDY_STAMP}\"\n"
 "else\n"
 "  echo \"No tidy changes detected.\"\n"

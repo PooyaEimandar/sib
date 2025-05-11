@@ -14,14 +14,13 @@
  * limitations under the License.
  */
 
-#ifdef SIB_BUILD_TEST
+#ifdef SIB_BUILD_BENCH
 
-#include "database.hpp"
 #include "system.hpp"
 
-auto main(int p_argc, char** p_argv) -> int {
-  ::testing::InitGoogleTest(&p_argc, p_argv);
-  return RUN_ALL_TESTS();
+auto main(int argc, char** argv) -> int {
+  folly::runBenchmarks();
+  return 0;
 }
 
-#endif // SIB_BUILD_TEST
+#endif // SIB_BUILD_BENCH

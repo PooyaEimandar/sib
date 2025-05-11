@@ -3,7 +3,7 @@
 source ./const.sh
 detect_platform
 
-FDB_VERSION="7.3.43"
+FDB_VERSION="7.3.63"
 FDB_BASE_URL="https://github.com/apple/foundationdb/releases/download/${FDB_VERSION}"
 
 install_fdb_macos() {

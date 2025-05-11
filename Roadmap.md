@@ -4,8 +4,8 @@
 [x] Clang-format
 [x] Clang-tidy
 [x] FoundationDB pool
-[] Clickhouse client
 [] http1.1/2/3 server based on Proxygen
+[] Clickhouse client
 [] webtrasport based on Proxygen
 [] tcp
 [] udp

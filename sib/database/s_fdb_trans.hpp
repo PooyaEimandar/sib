@@ -14,24 +14,24 @@
  * limitations under the License.
  */
 
-// #ifdef WOLF_DB_FDB
+#ifdef SIB_DB_FDB
 
 #pragma once
 
 #include <folly/FBString.h>
 #include <folly/Format.h>
 
-#include <wolf/system/w_defer.hpp>
-#include <wolf/system/w_htobe64.hpp>
-#include <wolf/system/w_trace.hpp>
+#include <sib/system/s_defer.hpp>
+#include <sib/system/s_htobe64.hpp>
+#include <sib/system/s_trace.hpp>
 
-#include <wolf/database/w_fdb_future.hpp>
+#include <sib/database/s_fdb_future.hpp>
 
-namespace wolf::db {
+namespace sib::db {
 
 using fdb = FDBDatabase*;
 
-struct w_fdb_range_view {
+struct s_fdb_range_view {
   std::shared_ptr<FDBFuture> fut_guard;
   folly::Range<const FDBKeyValue*> range;
   bool has_more = false;
@@ -39,29 +39,29 @@ struct w_fdb_range_view {
 
 // NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast,
 // cppcoreguidelines-pro-type-cstyle-cast)
-struct w_fdb_trans {
-  static auto make(fdb p_db) -> boost::leaf::result<w_fdb_trans> {
+struct s_fdb_trans {
+  static auto make(fdb p_db) -> boost::leaf::result<s_fdb_trans> {
     if (p_db == nullptr) {
-      return W_ERROR(std::errc::not_supported, "Database connection is null");
+      return S_ERROR(std::errc::not_supported, "Database connection is null");
     }
     FDBTransaction* trans = nullptr;
     const auto FDB_RES = fdb_database_create_transaction(p_db, &trans);
     if (FDB_RES) {
-      return W_ERROR(FDB_RES, folly::sformat("FoundationDB error: {}", fdb_get_error(FDB_RES)));
+      return S_ERROR(FDB_RES, folly::sformat("FoundationDB error: {}", fdb_get_error(FDB_RES)));
     }
-    return w_fdb_trans(trans);
+    return s_fdb_trans(trans);
   }
 
-  w_fdb_trans(const w_fdb_trans&) = delete;
-  auto operator=(const w_fdb_trans&) -> w_fdb_trans& = delete;
-  w_fdb_trans(w_fdb_trans&& p_obj) noexcept { move_fn(p_obj); }
-  auto operator=(w_fdb_trans&& p_obj) noexcept -> w_fdb_trans& {
+  s_fdb_trans(const s_fdb_trans&) = delete;
+  auto operator=(const s_fdb_trans&) -> s_fdb_trans& = delete;
+  s_fdb_trans(s_fdb_trans&& p_obj) noexcept { move_fn(p_obj); }
+  auto operator=(s_fdb_trans&& p_obj) noexcept -> s_fdb_trans& {
     if (this != &p_obj) {
       move_fn(p_obj);
     }
     return *this;
   }
-  ~w_fdb_trans() {
+  ~s_fdb_trans() {
     if (trans_) {
       fdb_transaction_destroy(trans_);
     }
@@ -73,17 +73,17 @@ struct w_fdb_trans {
     auto* fut = fdb_transaction_get(
       trans_, reinterpret_cast<const uint8_t*>(p_key.data()), p_key.size(), p_snapshot);
     if (!fut) {
-      co_return W_ERROR(std::errc::operation_canceled, "failed to create fdb future");
+      co_return S_ERROR(std::errc::operation_canceled, "failed to create fdb future");
     }
-    W_DEFER([fut]() noexcept {
+    S_DEFER([fut]() noexcept {
       if (fut) {
         fdb_future_destroy(fut);
       }
     });
 
-    auto res = co_await w_fdb_wait_for_fut(p_timeout, fut);
+    auto res = co_await s_fdb_wait_for_fut(p_timeout, fut);
     if (!res) {
-      co_return W_ERROR(
+      co_return S_ERROR(
         std::errc::operation_canceled,
         fmt::format(
           "FoundationDB got timeout or error while waiting for future of key: {}", p_key));
@@ -94,7 +94,7 @@ struct w_fdb_trans {
     int len = 0;
     auto fdb_err = fdb_future_get_value(fut, &present, &val, &len);
     if (fdb_err) {
-      co_return W_ERROR(
+      co_return S_ERROR(
         fdb_err,
         folly::sformat(
           "FoundationDB got an error while reading key: {}. Error: {}",
@@ -102,7 +102,7 @@ struct w_fdb_trans {
           p_key));
     }
     if (!present) {
-      co_return W_ERROR(std::errc::invalid_seek, "key not found");
+      co_return S_ERROR(std::errc::invalid_seek, "key not found");
     }
     co_return folly::fbstring((const char*)val, len);
   }
@@ -121,10 +121,10 @@ struct w_fdb_trans {
     FDBStreamingMode p_mode = FDBStreamingMode::FDB_STREAMING_MODE_WANT_ALL,
     int p_iteration = 0,
     bool p_snapshot = false,
-    bool p_reverse = false) -> folly::coro::Task<boost::leaf::result<w_fdb_range_view>> {
+    bool p_reverse = false) -> folly::coro::Task<boost::leaf::result<s_fdb_range_view>> {
     // check if the range is valid
     if ((p_begin.empty() && p_end.empty()) || p_begin >= p_end) {
-      co_return W_ERROR(
+      co_return S_ERROR(
         std::errc::invalid_argument,
         "Invalid range: 'begin' key must be strictly less than 'end' key");
     }
@@ -146,14 +146,14 @@ struct w_fdb_trans {
       p_snapshot,
       p_reverse);
     if (!fut_raw) {
-      co_return W_ERROR(std::errc::operation_canceled, "fdb_transaction_get_range failed");
+      co_return S_ERROR(std::errc::operation_canceled, "fdb_transaction_get_range failed");
     }
 
     auto fut = std::shared_ptr<FDBFuture>(fut_raw, fdb_future_destroy);
 
     auto res = co_await w_fdb_wait_for_fut(p_timeout, fut);
     if (!res) {
-      co_return W_ERROR(
+      co_return S_ERROR(
         std::errc::operation_canceled,
         "FoundationDB got timeout or error while waiting for future of read_range");
     }
@@ -163,14 +163,14 @@ struct w_fdb_trans {
     fdb_bool_t has_more = 0;
     auto fdb_err = fdb_future_get_keyvalue_array(fut_raw, &kvs, &count, &has_more);
     if (fdb_err) {
-      co_return W_ERROR(
+      co_return S_ERROR(
         fdb_err,
         fmt::format(
           "FoundationDB got an error while waiting for future. Error: {} ",
           fdb_get_error(fdb_err)));
     }
 
-    co_return w_fdb_range_view{
+    co_return s_fdb_range_view{
       .fut_guard = fut,
       .range = folly::Range<const FDBKeyValue*>(kvs, kvs + count),
       .has_more = (has_more != 0),
@@ -188,12 +188,12 @@ struct w_fdb_trans {
           (const uint8_t*)p_end->data(),
           p_end->size())
       : fdb_transaction_clear(trans_, (const uint8_t*)p_begin.data(), p_begin.size());
-    co_return W_SUCCESS;
+    co_return S_SUCCESS;
   }
 
   auto atomic_add_async(std::string_view p_key, int64_t p_value)
     -> folly::coro::Task<boost::leaf::result<int>> {
-    auto value = wolf::system::htobe64(p_value);
+    auto value = sib::system::htobe64(p_value);
 
     fdb_transaction_atomic_op(
       trans_,
@@ -202,16 +202,16 @@ struct w_fdb_trans {
       (const uint8_t*)&value,
       sizeof(int64_t),
       FDB_MUTATION_TYPE_ADD);
-    co_return W_SUCCESS;
+    co_return S_SUCCESS;
   }
 
   template <typename Duration>
   auto commit(Duration p_timeout) -> folly::coro::Task<boost::leaf::result<int>> {
     auto* fut = fdb_transaction_commit(trans_);
     if (!fut) {
-      co_return W_ERROR(std::errc::operation_canceled, "fdb_transaction_commit failed");
+      co_return S_ERROR(std::errc::operation_canceled, "fdb_transaction_commit failed");
     }
-    W_DEFER([fut]() noexcept {
+    S_DEFER([fut]() noexcept {
       if (fut) {
         fdb_future_destroy(fut);
       }
@@ -219,12 +219,12 @@ struct w_fdb_trans {
 
     auto res = co_await w_fdb_wait_for_fut(p_timeout, fut);
     if (!res) {
-      co_return W_ERROR(
+      co_return S_ERROR(
         std::errc::operation_canceled,
         "FoundationDB got timeout or error while waiting for future of commit");
     }
 
-    co_return W_SUCCESS;
+    co_return S_SUCCESS;
   }
 
   void set(std::string_view p_key, std::string_view p_val) {
@@ -247,8 +247,8 @@ struct w_fdb_trans {
   }
 
  private:
-  explicit w_fdb_trans(FDBTransaction* p_trans) : trans_(p_trans) {}
-  void move_fn(w_fdb_trans& p_obj) {
+  explicit s_fdb_trans(FDBTransaction* p_trans) : trans_(p_trans) {}
+  void move_fn(s_fdb_trans& p_obj) {
     if (trans_) {
       fdb_transaction_destroy(trans_);
     }
@@ -259,6 +259,6 @@ struct w_fdb_trans {
 };
 // NOLINTEND
 
-} // namespace wolf::db
+} // namespace sib::db
 
-// #endif // WOLF_DB_FDB
+#endif // SIB_DB_FDB

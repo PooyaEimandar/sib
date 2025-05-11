@@ -1,4 +1,20 @@
-// #ifdef WOLF_DB_FDB
+/*
+ * Copyright (c) 2025 Pooya Eimandar (https://github.com/PooyaEimandar/sib)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#ifdef SIB_DB_FDB
 
 #pragma once
 
@@ -6,13 +22,13 @@
 #include <folly/coro/Sleep.h>
 #include <folly/coro/Task.h>
 #include <folly/coro/Timeout.h>
-#include <wolf/database/w_fdb.hpp>
+#include <sib/database/s_fdb.hpp>
 
-namespace wolf::db {
+namespace sib::db {
 
-struct w_fdb_future {
+struct s_fdb_future {
  public:
-  explicit w_fdb_future(FDBFuture* p_future) noexcept : future_(p_future) {}
+  explicit s_fdb_future(FDBFuture* p_future) noexcept : future_(p_future) {}
 
   [[nodiscard]] auto await_ready() const noexcept -> bool { return fdb_future_is_ready(future_); }
 
@@ -22,7 +38,7 @@ struct w_fdb_future {
     const fdb_error_t FDB_ERR = fdb_future_set_callback(
       future_,
       []([[maybe_unused]] FDBFuture* p_fut, void* p_ctx) {
-        auto* self = static_cast<w_fdb_future*>(p_ctx);
+        auto* self = static_cast<s_fdb_future*>(p_ctx);
         self->handle_.resume();
       },
       static_cast<void*>(this));
@@ -62,6 +78,6 @@ inline auto w_fdb_wait_for_fut(
   co_return false;
 }
 
-} // namespace wolf::db
+} // namespace sib::db
 
-// #endif // WOLF_DB_FDB
+#endif // SIB_DB_FDB

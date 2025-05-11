@@ -30,9 +30,9 @@ install_dependencies_linux() {
     git \
     cmake \
     m4 \
-    gcc-12 \
-    g++-12 \
-    g++ \
+    clang \
+    clang-format \
+    clang-tidy \
     ninja-build \
     flex \
     bison \
@@ -99,7 +99,7 @@ install_dependencies_mac() {
 }
 
 install_dependencies() {
-  echo -e "${COLOR_GREEN}[ INFO ] install dependencies ${COLOR_OFF}"
+  echo -e "${COLOR_GREEN}[ INFO ] install dependencies for $PLATFORM ${COLOR_OFF}"
   if [ "$PLATFORM" = "Linux" ]; then
     install_dependencies_linux
   elif [ "$PLATFORM" = "Mac" ]; then
@@ -139,11 +139,13 @@ setup_fast_float() {
   mkdir -p "$FAST_FLOAT_BUILD_DIR"
   cd "$FAST_FLOAT_BUILD_DIR" || exit
 
-  PARALLEL_LEVEL=$JOBS cmake -G Ninja             \
-    -DCMAKE_PREFIX_PATH="$DEPS_DIR"               \
-    -DCMAKE_INSTALL_PREFIX="$DEPS_DIR"            \
-    -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE          \
-    "$MAYBE_OVERRIDE_CXX_FLAGS"                   \
+  PARALLEL_LEVEL=$JOBS cmake -G Ninja          \
+    -DCMAKE_C_COMPILER=clang                   \
+    -DCMAKE_CXX_COMPILER=clang++               \
+    -DCMAKE_PREFIX_PATH="$DEPS_DIR"            \
+    -DCMAKE_INSTALL_PREFIX="$DEPS_DIR"         \
+    -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE       \
+    $MAYBE_OVERRIDE_CXX_FLAGS                  \
     ..
   
   ninja -C .
@@ -170,12 +172,14 @@ setup_glog() {
   mkdir -p "$GLOG_BUILD_DIR"
   cd "$GLOG_BUILD_DIR" || exit
 
-  PARALLEL_LEVEL=$JOBS cmake -G Ninja             \
-    -DCMAKE_POLICY_VERSION_MINIMUM=3.5            \
-    -DCMAKE_PREFIX_PATH="$DEPS_DIR"               \
-    -DCMAKE_INSTALL_PREFIX="$DEPS_DIR"            \
-    -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE          \
-    "$MAYBE_OVERRIDE_CXX_FLAGS"                   \
+  PARALLEL_LEVEL=$JOBS cmake -G Ninja          \
+    -DCMAKE_C_COMPILER=clang                   \
+    -DCMAKE_CXX_COMPILER=clang++               \
+    -DCMAKE_POLICY_VERSION_MINIMUM=3.5         \
+    -DCMAKE_PREFIX_PATH="$DEPS_DIR"            \
+    -DCMAKE_INSTALL_PREFIX="$DEPS_DIR"         \
+    -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE       \
+    "$MAYBE_OVERRIDE_CXX_FLAGS"                \
     ..
   
   ninja -C .
@@ -199,13 +203,15 @@ setup_fmt() {
   mkdir -p "$FMT_BUILD_DIR"
   cd "$FMT_BUILD_DIR" || exit
 
-  PARALLEL_LEVEL=$JOBS cmake -G Ninja             \
-    -DCMAKE_PREFIX_PATH="$DEPS_DIR"               \
-    -DCMAKE_INSTALL_PREFIX="$DEPS_DIR"            \
-    -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE          \
-    "$MAYBE_OVERRIDE_CXX_FLAGS"                   \
-    -DFMT_DOC=OFF                                 \
-    -DFMT_TEST=OFF                                \
+  PARALLEL_LEVEL=$JOBS cmake -G Ninja          \
+    -DCMAKE_C_COMPILER=clang                   \
+    -DCMAKE_CXX_COMPILER=clang++               \
+    -DCMAKE_PREFIX_PATH="$DEPS_DIR"            \
+    -DCMAKE_INSTALL_PREFIX="$DEPS_DIR"         \
+    -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE       \
+    "$MAYBE_OVERRIDE_CXX_FLAGS"                \
+    -DFMT_DOC=OFF                              \
+    -DFMT_TEST=OFF                             \
     ..
   ninja -C .
   ninja install
@@ -228,10 +234,12 @@ setup_googletest() {
   mkdir -p "$GTEST_BUILD_DIR"
   cd "$GTEST_BUILD_DIR" || exit
 
-  PARALLEL_LEVEL=$JOBS cmake -G Ninja             \
-    -DCMAKE_PREFIX_PATH="$DEPS_DIR"               \
-    -DCMAKE_INSTALL_PREFIX="$DEPS_DIR"            \
-    -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE          \
+  PARALLEL_LEVEL=$JOBS cmake -G Ninja          \
+    -DCMAKE_C_COMPILER=clang                   \
+    -DCMAKE_CXX_COMPILER=clang++               \
+    -DCMAKE_PREFIX_PATH="$DEPS_DIR"            \
+    -DCMAKE_INSTALL_PREFIX="$DEPS_DIR"         \
+    -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE       \
     ..
   ninja -C .
   ninja install
@@ -256,6 +264,8 @@ setup_zstd() {
   cd "$ZSTD_BUILD_DIR" || exit
 
   PARALLEL_LEVEL=$JOBS cmake -G Ninja               \
+    -DCMAKE_C_COMPILER=clang                   \
+    -DCMAKE_CXX_COMPILER=clang++               \
     -DCMAKE_POLICY_VERSION_MINIMUM=3.5              \
     -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE            \
     -DCMAKE_PREFIX_PATH="$ZSTD_INSTALL_DIR"         \
@@ -311,18 +321,20 @@ setup_folly() {
   fi
 
   # ignore fmt of the system
-  PARALLEL_LEVEL=$JOBS cmake -G Ninja             \
-    -DCMAKE_POLICY_VERSION_MINIMUM=3.5            \
-    -DCMAKE_PREFIX_PATH="$DEPS_DIR"               \
-    -DCMAKE_INSTALL_PREFIX="$DEPS_DIR"            \
-    -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE          \
-    -DBUILD_TESTS=OFF                             \
-    -DCMAKE_CXX_STANDARD=20                       \
-    "$MAYBE_USE_STATIC_DEPS"                      \
-    "$MAYBE_USE_STATIC_BOOST"                     \
-    "$MAYBE_BUILD_SHARED_LIBS"                    \
-    "$MAYBE_OVERRIDE_CXX_FLAGS"                   \
-    $MAYBE_DISABLE_JEMALLOC                       \
+  PARALLEL_LEVEL=$JOBS cmake -G Ninja          \
+    -DCMAKE_C_COMPILER=clang                   \
+    -DCMAKE_CXX_COMPILER=clang++               \
+    -DCMAKE_POLICY_VERSION_MINIMUM=3.5         \
+    -DCMAKE_PREFIX_PATH="$DEPS_DIR"            \
+    -DCMAKE_INSTALL_PREFIX="$DEPS_DIR"         \
+    -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE       \
+    -DBUILD_TESTS=OFF                          \
+    -DCMAKE_CXX_STANDARD=20                    \
+    "$MAYBE_USE_STATIC_DEPS"                   \
+    "$MAYBE_USE_STATIC_BOOST"                  \
+    "$MAYBE_BUILD_SHARED_LIBS"                 \
+    "$MAYBE_OVERRIDE_CXX_FLAGS"                \
+    $MAYBE_DISABLE_JEMALLOC                    \
     ..
   ninja -C .
   ninja install
@@ -352,17 +364,19 @@ setup_fizz() {
     MAYBE_BUILD_SHARED_LIBS="-DBUILD_SHARED_LIBS=OFF"
   fi
 
-  PARALLEL_LEVEL=$JOBS cmake -G Ninja           \
-    -DCMAKE_POLICY_VERSION_MINIMUM=3.5          \
-    -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE        \
-    -DCMAKE_PREFIX_PATH="$DEPS_DIR"             \
-    -DCMAKE_INSTALL_PREFIX="$DEPS_DIR"          \
-    -DBUILD_TESTS=OFF                           \
-    -DBUILD_EXAMPLES=OFF                        \
-    "$MAYBE_USE_STATIC_DEPS"                    \
-    "$MAYBE_BUILD_SHARED_LIBS"                  \
-    "$MAYBE_OVERRIDE_CXX_FLAGS"                 \
-    "$MAYBE_USE_SODIUM_STATIC_LIBS"             \
+  PARALLEL_LEVEL=$JOBS cmake -G Ninja          \
+    -DCMAKE_C_COMPILER=clang                   \
+    -DCMAKE_CXX_COMPILER=clang++               \
+    -DCMAKE_POLICY_VERSION_MINIMUM=3.5         \
+    -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE       \
+    -DCMAKE_PREFIX_PATH="$DEPS_DIR"            \
+    -DCMAKE_INSTALL_PREFIX="$DEPS_DIR"         \
+    -DBUILD_TESTS=OFF                          \
+    -DBUILD_EXAMPLES=OFF                       \
+    "$MAYBE_USE_STATIC_DEPS"                   \
+    "$MAYBE_BUILD_SHARED_LIBS"                 \
+    "$MAYBE_OVERRIDE_CXX_FLAGS"                \
+    "$MAYBE_USE_SODIUM_STATIC_LIBS"            \
     "$FIZZ_DIR/fizz"
   ninja -C .
   ninja install
@@ -389,15 +403,17 @@ setup_wangle() {
     MAYBE_BUILD_SHARED_LIBS="-DBUILD_SHARED_LIBS=OFF"
   fi
 
-  PARALLEL_LEVEL=$JOBS cmake -G Ninja           \
-    -DCMAKE_POLICY_VERSION_MINIMUM=3.5          \
-    -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE        \
-    -DCMAKE_PREFIX_PATH="$DEPS_DIR"             \
-    -DCMAKE_INSTALL_PREFIX="$DEPS_DIR"          \
-    -DBUILD_TESTS=OFF                           \
-    "$MAYBE_USE_STATIC_DEPS"                    \
-    "$MAYBE_BUILD_SHARED_LIBS"                  \
-    "$MAYBE_OVERRIDE_CXX_FLAGS"                 \
+  PARALLEL_LEVEL=$JOBS cmake -G Ninja          \
+    -DCMAKE_C_COMPILER=clang                   \
+    -DCMAKE_CXX_COMPILER=clang++               \
+    -DCMAKE_POLICY_VERSION_MINIMUM=3.5         \
+    -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE       \
+    -DCMAKE_PREFIX_PATH="$DEPS_DIR"            \
+    -DCMAKE_INSTALL_PREFIX="$DEPS_DIR"         \
+    -DBUILD_TESTS=OFF                          \
+    "$MAYBE_USE_STATIC_DEPS"                   \
+    "$MAYBE_BUILD_SHARED_LIBS"                 \
+    "$MAYBE_OVERRIDE_CXX_FLAGS"                \
     "$WANGLE_DIR/wangle"
   ninja -C .
   ninja install
@@ -424,14 +440,16 @@ setup_mvfst() {
     MAYBE_BUILD_SHARED_LIBS="-DBUILD_SHARED_LIBS=OFF"
   fi
 
-  PARALLEL_LEVEL=$JOBS cmake -G Ninja           \
-    -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE        \
-    -DCMAKE_PREFIX_PATH="$DEPS_DIR"             \
-    -DCMAKE_INSTALL_PREFIX="$DEPS_DIR"          \
-    -DBUILD_TESTS=OFF                           \
-    "$MAYBE_USE_STATIC_DEPS"                    \
-    "$MAYBE_BUILD_SHARED_LIBS"                  \
-    "$MAYBE_OVERRIDE_CXX_FLAGS"                 \
+  PARALLEL_LEVEL=$JOBS cmake -G Ninja          \
+    -DCMAKE_C_COMPILER=clang                   \
+    -DCMAKE_CXX_COMPILER=clang++               \
+    -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE       \
+    -DCMAKE_PREFIX_PATH="$DEPS_DIR"            \
+    -DCMAKE_INSTALL_PREFIX="$DEPS_DIR"         \
+    -DBUILD_TESTS=OFF                          \
+    "$MAYBE_USE_STATIC_DEPS"                   \
+    "$MAYBE_BUILD_SHARED_LIBS"                 \
+    "$MAYBE_OVERRIDE_CXX_FLAGS"                \
     "$MVFST_DIR"
   ninja -C .
   ninja install
@@ -456,13 +474,15 @@ setup_libevent() {
   mkdir -p "$LIBEVENT_BUILD_DIR"
   cd "$LIBEVENT_BUILD_DIR" || exit
 
-  PARALLEL_LEVEL=$JOBS cmake -G Ninja \
-    -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE \
-    -DCMAKE_INSTALL_PREFIX="$DEPS_DIR" \
-    -DEVENT__DISABLE_TESTS=ON \
-    -DEVENT__DISABLE_BENCHMARK=ON \
-    -DEVENT__DISABLE_SAMPLES=ON \
-    -DBUILD_SHARED_LIBS=ON \
+  PARALLEL_LEVEL=$JOBS cmake -G Ninja          \
+    -DCMAKE_C_COMPILER=clang                   \
+    -DCMAKE_CXX_COMPILER=clang++               \
+    -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE       \
+    -DCMAKE_INSTALL_PREFIX="$DEPS_DIR"         \
+    -DEVENT__DISABLE_TESTS=ON                  \
+    -DEVENT__DISABLE_BENCHMARK=ON              \
+    -DEVENT__DISABLE_SAMPLES=ON                \
+    -DBUILD_SHARED_LIBS=ON                     \
     ..
 
   ninja -C .
@@ -566,18 +586,20 @@ if $BUILD_PROXYGEN; then
   # Build proxygen with cmake
   cd "$BWD" || exit
   echo -e "${COLOR_GREEN}Building proxygen in $BWD in $CMAKE_BUILD_TYPE mode ${COLOR_OFF}"
-  PARALLEL_LEVEL=$JOBS cmake -G Ninja       \
-    -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE    \
-    -DCMAKE_PREFIX_PATH="$DEPS_DIR"         \
-    -DCMAKE_INSTALL_PREFIX="$PREFIX"        \
-    -DCMAKE_CXX_STANDARD=20                 \
-    -DBUILD_SAMPLES=ON                      \
-    "$MAYBE_BUILD_TESTS"                    \
-    "$MAYBE_BUILD_FUZZERS"                  \
-    "$MAYBE_BUILD_SHARED_LIBS"              \
-    "$MAYBE_OVERRIDE_CXX_FLAGS"             \
-    "$MAYBE_USE_STATIC_DEPS"                \
-    "$MAYBE_LIB_FUZZING_ENGINE"             \
+  PARALLEL_LEVEL=$JOBS cmake -G Ninja          \
+    -DCMAKE_C_COMPILER=clang                   \
+    -DCMAKE_CXX_COMPILER=clang++               \
+    -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE       \
+    -DCMAKE_PREFIX_PATH="$DEPS_DIR"            \
+    -DCMAKE_INSTALL_PREFIX="$PREFIX"           \
+    -DCMAKE_CXX_STANDARD=20                    \
+    -DBUILD_SAMPLES=ON                         \
+    "$MAYBE_BUILD_TESTS"                       \
+    "$MAYBE_BUILD_FUZZERS"                     \
+    "$MAYBE_BUILD_SHARED_LIBS"                 \
+    "$MAYBE_OVERRIDE_CXX_FLAGS"                \
+    "$MAYBE_USE_STATIC_DEPS"                   \
+    "$MAYBE_LIB_FUZZING_ENGINE"                \
     ../..
 
   ninja -C .

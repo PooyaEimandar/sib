@@ -1,16 +1,17 @@
-add_executable(sib_tests
-  test/main.cpp
+add_executable(sib_bench
+  ${CMAKE_CURRENT_SOURCE_DIR}/dep/proxygen/proxygen/_build/deps/folly/folly/Benchmark.cpp
+  bench/main.cpp
 )
 
 if (APPLE AND SIB_DB_FDB)
   get_filename_component(FDB_LIB_DIR ${FDB_C_LIBRARY} DIRECTORY)
-  set_target_properties(sib_tests PROPERTIES
+  set_target_properties(sib_bench PROPERTIES
     BUILD_RPATH "${FDB_LIB_DIR}"
     INSTALL_RPATH "${FDB_LIB_DIR}"
   )
 endif()
 
-target_include_directories(sib_tests
+target_include_directories(sib_bench
   PRIVATE
     /usr/local/include
     ${Boost_INCLUDE_DIRS}
@@ -22,7 +23,7 @@ target_include_directories(sib_tests
     $<$<PLATFORM_ID:Darwin>:/opt/homebrew/Cellar/gflags/2.2.2/include>
 )
 
-target_link_directories(sib_tests
+target_link_directories(sib_bench
     PRIVATE
     /usr/local/lib/
     /opt/homebrew/lib/
@@ -32,16 +33,9 @@ target_link_directories(sib_tests
     /opt/homebrew/Cellar/gflags/2.2.2/lib
 )
 
-target_link_libraries(sib_tests
+target_link_libraries(sib_bench
   PRIVATE
-    gtest
-    gtest_main
-    gmock
     folly
     $<$<BOOL:${SIB_DB_FDB}>:${FDB_C_LIBRARY}> 
     ${PROJECT_NAME}
 )
-
-if(UNIX AND NOT APPLE)
-  target_link_libraries(sib_tests PRIVATE unwind iberty)
-endif()
