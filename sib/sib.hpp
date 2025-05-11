@@ -40,25 +40,9 @@
 [[nodiscard]] SIB_API inline auto init(int p_argc, std::span<char *> p_argv)
   -> folly::Expected<folly::Unit, folly::fbstring> {
   if (p_argc <= 0 || p_argv.data() == nullptr) {
-    return folly::makeUnexpected("sib::init: invalid arguments");
+    return folly::makeUnexpected("sib::init invalid arguments");
   }
   auto *ptr = p_argv.data();
   std::ignore = folly::Init(&p_argc, &ptr, false);
   return folly::unit;
 }
-
-#ifdef SIB_BUILD_TEST
-#include <gtest/gtest.h>
-
-// NOLINTBEGIN (modernize-use-trailing-return-type)
-TEST(SibInitTest, RunsWithoutCrash) {
-  constexpr int kArgc = 1;
-  constexpr char kArg0[] = "sib_test_app";
-  std::array<char *, 2> argv = {const_cast<char *>(kArg0), nullptr};
-  std::span<char *> argvSpan(argv.data(), kArgc);
-
-  const auto result = init(kArgc, argvSpan);
-  ASSERT_TRUE(result.hasValue()) << result.error();
-}
-// NOLINTEND
-#endif

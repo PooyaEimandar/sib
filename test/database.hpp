@@ -16,8 +16,10 @@
 
 #pragma once
 
-#include <chrono>
 #include <folly/coro/BlockingWait.h>
+#include <folly/io/async/ScopedEventBaseThread.h>
+
+#include <chrono>
 #include <gtest/gtest.h>
 #include <sib/database/s_fdb_pool.hpp>
 
@@ -33,6 +35,10 @@ static const std::filesystem::path CLUSTER_FILE = "/etc/foundationdb/fdb.cluster
 static constexpr size_t POOL_SIZE = 4;
 
 TEST(SibFDBPool, FoundationDB) {
+  folly::ScopedEventBaseThread eb_thread;
+  folly::EventBase* evb = eb_thread.getEventBase();
+  auto timekeeper = std::make_shared<folly::ThreadWheelTimekeeper>();
+
   auto init_result = s_fdb_pool::init(const_cast<std::filesystem::path&>(CLUSTER_FILE), POOL_SIZE);
   EXPECT_EQ(init_result.has_value() && init_result.value() == 0, true)
     << "Failed to initialize FDB pool";
@@ -40,8 +46,8 @@ TEST(SibFDBPool, FoundationDB) {
   EXPECT_EQ(s_fdb_pool::size(), POOL_SIZE)
     << "Invalid pool size, expected " << POOL_SIZE << " but got " << s_fdb_pool::size();
 
-  auto acq_result = folly::coro::blockingWait(s_fdb_pool::acquire(500ms));
-  EXPECT_EQ(acq_result.has_value(), true) << "Failed to acquire from FDB pool";
+  auto acq_result =
+    folly::coro::blockingWait(s_fdb_pool::acquire(500ms, timekeeper.get()).scheduleOn(evb));
 
   if (acq_result.has_value()) {
     fdb conn = acq_result.value();

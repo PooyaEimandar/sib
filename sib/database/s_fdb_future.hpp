@@ -22,6 +22,8 @@
 #include <folly/coro/Sleep.h>
 #include <folly/coro/Task.h>
 #include <folly/coro/Timeout.h>
+#include <folly/futures/ThreadWheelTimekeeper.h>
+
 #include <sib/database/s_fdb.hpp>
 
 namespace sib::db {
@@ -44,7 +46,8 @@ struct s_fdb_future {
       static_cast<void*>(this));
 
     if (FDB_ERR != 0) {
-      p_handle.resume(); // resume immediately on failure
+      // resume immediately on failure
+      p_handle.resume();
     }
   }
 
@@ -59,9 +62,11 @@ struct s_fdb_future {
 
 constexpr auto INTERVAL_POOL = std::chrono::milliseconds(5);
 template <typename Duration>
-inline auto w_fdb_wait_for_fut(
-  Duration p_timeout, FDBFuture* p_fut, Duration p_interval_pool = INTERVAL_POOL)
-  -> folly::coro::Task<bool> {
+inline auto s_fdb_wait_for_fut(
+  Duration p_timeout,
+  FDBFuture* p_fut,
+  folly::Timekeeper* p_tk,
+  Duration p_interval_pool = INTERVAL_POOL) -> folly::coro::Task<bool> {
   if (!p_fut) {
     co_return false;
   }
@@ -71,7 +76,7 @@ inline auto w_fdb_wait_for_fut(
     if (fdb_future_is_ready(p_fut)) {
       co_return fdb_future_get_error(p_fut) == 0;
     }
-    co_await folly::coro::sleep(p_interval_pool);
+    co_await folly::coro::sleep(p_interval_pool, p_tk);
   }
 
   // timeout reached

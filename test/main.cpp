@@ -16,11 +16,19 @@
 
 #ifdef SIB_BUILD_TEST
 
+#include <gtest/gtest.h>
+#include <sib/sib.hpp>
+
 #include "database.hpp"
 #include "system.hpp"
 
-auto main(int p_argc, char** p_argv) -> int {
-  ::testing::InitGoogleTest(&p_argc, p_argv);
+auto main(int p_argc, char **p_argv) -> int {
+  std::span<char *> argv_span(p_argv, p_argc);
+  const auto result = init(p_argc, argv_span);
+  assert(result.hasValue());
+
+  testing::InitGoogleTest(&p_argc, p_argv);
+
   return RUN_ALL_TESTS();
 }
 

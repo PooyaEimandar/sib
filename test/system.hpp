@@ -21,13 +21,13 @@
 
 // NOLINTBEGIN (modernize-use-trailing-return-type)
 
-using w_trace = sib::system::w_trace;
+using s_trace = sib::system::s_trace;
 
 TEST(WTraceTest, BasicTraceConstruction) {
   const int64_t code = 404;
   folly::fbstring msg = "Resource not found";
 
-  w_trace trace(code, folly::fbstring(msg), "main.cpp", 42);
+  s_trace trace(code, folly::fbstring(msg), "main.cpp", 42);
 
   EXPECT_EQ(trace.last_err_code(), code);
   EXPECT_EQ(trace.last_err_msg(), msg);
@@ -38,7 +38,7 @@ TEST(WTraceTest, TraceFromErrc) {
   auto code = std::errc::timed_out;
   folly::fbstring msg = "Operation timed out";
 
-  w_trace trace(code, folly::fbstring(msg), "timeout.cpp", 88);
+  s_trace trace(code, folly::fbstring(msg), "timeout.cpp", 88);
 
   EXPECT_EQ(trace.last_err_code(), static_cast<int64_t>(std::make_error_code(code).value()));
   EXPECT_EQ(trace.last_err_msg(), msg);

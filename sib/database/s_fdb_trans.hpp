@@ -151,7 +151,7 @@ struct s_fdb_trans {
 
     auto fut = std::shared_ptr<FDBFuture>(fut_raw, fdb_future_destroy);
 
-    auto res = co_await w_fdb_wait_for_fut(p_timeout, fut);
+    auto res = co_await s_fdb_wait_for_fut(p_timeout, fut);
     if (!res) {
       co_return S_ERROR(
         std::errc::operation_canceled,
@@ -217,7 +217,7 @@ struct s_fdb_trans {
       }
     });
 
-    auto res = co_await w_fdb_wait_for_fut(p_timeout, fut);
+    auto res = co_await s_fdb_wait_for_fut(p_timeout, fut);
     if (!res) {
       co_return S_ERROR(
         std::errc::operation_canceled,

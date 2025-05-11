@@ -29,7 +29,7 @@
 
 namespace sib::system {
 
-struct w_trace {
+struct s_trace {
   struct s_stack {
     s_stack() noexcept = default;
 
@@ -60,15 +60,15 @@ struct w_trace {
     int source_file_line_ = 0;
   };
 
-  w_trace() noexcept = default;
+  s_trace() noexcept = default;
 
-  explicit w_trace(s_stack&& p_stack) { stacks_.emplace_front(std::move(p_stack)); }
+  explicit s_trace(s_stack&& p_stack) { stacks_.emplace_front(std::move(p_stack)); }
 
-  w_trace(int64_t p_code, folly::fbstring&& p_msg, folly::StringPiece p_file, int p_line) {
+  s_trace(int64_t p_code, folly::fbstring&& p_msg, folly::StringPiece p_file, int p_line) {
     stacks_.emplace_front(p_code, std::move(p_msg), p_file, p_line);
   }
 
-  w_trace(std::errc p_code, folly::fbstring&& p_msg, folly::StringPiece p_file, int p_line) {
+  s_trace(std::errc p_code, folly::fbstring&& p_msg, folly::StringPiece p_file, int p_line) {
     stacks_.emplace_front(folly::to<int64_t>(p_code), std::move(p_msg), p_file, p_line);
   }
 
@@ -85,7 +85,7 @@ struct w_trace {
 
   void push(s_stack&& p_stack) { stacks_.emplace_front(std::move(p_stack)); }
 
-  void merge(const w_trace& p_other) {
+  void merge(const s_trace& p_other) {
     stacks_.insert(stacks_.end(), p_other.stacks_.begin(), p_other.stacks_.end());
   }
 
@@ -98,7 +98,7 @@ struct w_trace {
     return oss.str();
   }
 
-  friend auto operator<<(std::ostream& p_os, const w_trace& p_trace) -> std::ostream& {
+  friend auto operator<<(std::ostream& p_os, const s_trace& p_trace) -> std::ostream& {
     for (const auto& iter : p_trace.stacks_) {
       p_os << iter;
     }
@@ -114,5 +114,5 @@ struct w_trace {
 // NOLINTBEGIN (readability-identifier-naming, cppcoreguidelines-macro-usage)
 constexpr auto S_SUCCESS = 0;
 #define S_ERROR(p_code, p_msg) \
-  boost::leaf::new_error(sib::system::w_trace(p_code, p_msg, __FILE__, __LINE__))
+  boost::leaf::new_error(sib::system::s_trace(p_code, p_msg, __FILE__, __LINE__))
 // NOLINTEND

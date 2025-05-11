@@ -50,7 +50,8 @@ struct s_fdb_pool {
   }
 
   template <typename Duration>
-  static auto acquire(Duration p_timeout) -> folly::coro::Task<boost::leaf::result<fdb>> {
+  static auto acquire(Duration p_timeout, folly::Timekeeper* p_timekeeper)
+    -> folly::coro::Task<boost::leaf::result<fdb>> {
     auto state = pool().wlock();
 
     if (state->pool.empty()) {
@@ -67,7 +68,7 @@ struct s_fdb_pool {
           continue;
         }
 
-        auto available = co_await is_db_available(conn, p_timeout);
+        auto available = co_await is_db_available(conn, p_timeout, p_timekeeper);
         if (!available) {
           continue;
         }
@@ -192,7 +193,8 @@ struct s_fdb_pool {
   }
 
   template <typename Duration>
-  static auto is_db_available(fdb p_conn, Duration p_timeout) -> folly::coro::Task<bool> {
+  static auto is_db_available(fdb p_conn, Duration p_timeout, folly::Timekeeper* p_tk)
+    -> folly::coro::Task<bool> {
     FDBTransaction* trans = nullptr;
     auto fdb_err = fdb_database_create_transaction(p_conn, &trans);
     if (fdb_err != 0) {
@@ -210,7 +212,7 @@ struct s_fdb_pool {
       fdb_transaction_destroy(trans);
     });
 
-    co_return co_await s_fdb_wait_for_fut(p_timeout, fut);
+    co_return co_await s_fdb_wait_for_fut(p_timeout, fut, p_tk);
   }
 
   static void run_network() {
