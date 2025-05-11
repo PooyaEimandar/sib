@@ -43,5 +43,5 @@ target_link_libraries(sib_test
 )
 
 if(UNIX AND NOT APPLE)
-  target_link_libraries(sib_tests PRIVATE unwind iberty)
+  target_link_libraries(sib_test PRIVATE unwind iberty)
 endif()
