@@ -99,6 +99,20 @@ jobs:
           fi
           ninja -j$CORES
 
+      - name: Run Tests
+        shell: bash
+        run: |
+          cd build
+          echo "Running sib_test"
+          ./sib_test
+
+      - name: Run Benchmarks
+        shell: bash
+        run: |
+          cd build
+          echo "Running sib_bench"
+          ./sib_bench
+
   # android:
   #   name: android
   #   runs-on: ubuntu-latest

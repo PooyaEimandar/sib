@@ -1,16 +1,16 @@
-add_executable(sib_tests
+add_executable(sib_test
   test/main.cpp
 )
 
 if (APPLE AND SIB_DB_FDB)
   get_filename_component(FDB_LIB_DIR ${FDB_C_LIBRARY} DIRECTORY)
-  set_target_properties(sib_tests PROPERTIES
+  set_target_properties(sib_test PROPERTIES
     BUILD_RPATH "${FDB_LIB_DIR}"
     INSTALL_RPATH "${FDB_LIB_DIR}"
   )
 endif()
 
-target_include_directories(sib_tests
+target_include_directories(sib_test
   PRIVATE
     /usr/local/include
     ${Boost_INCLUDE_DIRS}
@@ -22,7 +22,7 @@ target_include_directories(sib_tests
     $<$<PLATFORM_ID:Darwin>:/opt/homebrew/Cellar/gflags/2.2.2/include>
 )
 
-target_link_directories(sib_tests
+target_link_directories(sib_test
     PRIVATE
     /usr/local/lib/
     /opt/homebrew/lib/
@@ -32,7 +32,7 @@ target_link_directories(sib_tests
     /opt/homebrew/Cellar/gflags/2.2.2/lib
 )
 
-target_link_libraries(sib_tests
+target_link_libraries(sib_test
   PRIVATE
     gtest
     gtest_main
