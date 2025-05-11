@@ -16,10 +16,11 @@
 
 #pragma once
 
-#include <folly/Expected.h>
 #include <folly/FBString.h>
 #include <folly/Unit.h>
 #include <folly/init/Init.h>
+
+#include <sib/system/s_trace.hpp>
 
 #include <cwchar>
 #include <array>
@@ -37,12 +38,14 @@
 #define SIB_API __attribute__((visibility("default")))
 #endif
 
+namespace sib {
 [[nodiscard]] SIB_API inline auto init(int p_argc, std::span<char *> p_argv)
-  -> folly::Expected<folly::Unit, folly::fbstring> {
+  -> boost::leaf::result<int> {
   if (p_argc <= 0 || p_argv.data() == nullptr) {
-    return folly::makeUnexpected("sib::init invalid arguments");
+    return S_ERROR(std::errc::operation_canceled, "sib::init invalid arguments");
   }
   auto *ptr = p_argv.data();
   std::ignore = folly::Init(&p_argc, &ptr, false);
-  return folly::unit;
+  return S_SUCCESS;
 }
+} // namespace sib

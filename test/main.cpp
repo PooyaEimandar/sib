@@ -24,8 +24,8 @@
 
 auto main(int p_argc, char **p_argv) -> int {
   std::span<char *> argv_span(p_argv, p_argc);
-  const auto result = init(p_argc, argv_span);
-  assert(result.hasValue());
+  const auto result = sib::init(p_argc, argv_span);
+  assert(result.has_value());
 
   testing::InitGoogleTest(&p_argc, p_argv);
 

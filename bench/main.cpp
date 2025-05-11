@@ -16,9 +16,15 @@
 
 #ifdef SIB_BUILD_BENCH
 
+#include <sib/sib.hpp>
+
 #include "system.hpp"
 
-auto main(int argc, char** argv) -> int {
+auto main(int p_argc, char** p_argv) -> int {
+  std::span<char*> argv_span(p_argv, p_argc);
+  const auto result = sib::init(p_argc, argv_span);
+  assert(result.has_value());
+
   folly::runBenchmarks();
   return 0;
 }
