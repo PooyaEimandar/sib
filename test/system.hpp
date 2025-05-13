@@ -17,11 +17,11 @@
 #pragma once
 
 #include <gtest/gtest.h>
-#include <sib/system/s_trace.hpp>
+#include <sib/sib.hpp>
 
 // NOLINTBEGIN (modernize-use-trailing-return-type)
 
-using s_trace = sib::system::s_trace;
+using namespace sib::system;
 
 TEST(WTraceTest, BasicTraceConstruction) {
   const int64_t code = 404;
@@ -44,5 +44,3 @@ TEST(WTraceTest, TraceFromErrc) {
   EXPECT_EQ(trace.last_err_msg(), msg);
   EXPECT_NE(trace.to_std_string().find("timeout.cpp(88)"), std::string::npos);
 }
-
-// NOLINTEND

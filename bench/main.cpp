@@ -24,10 +24,10 @@
 auto main(int p_argc, char** p_argv) -> int {
   std::span<char*> argv_span(p_argv, p_argc);
   const auto result = sib::init(p_argc, argv_span);
-  assert(result.has_value());
+  assert(result.hasValue());
 
   folly::runBenchmarks();
-  return 0;
+  return S_SUCCESS;
 }
 
 #endif // SIB_BUILD_BENCH

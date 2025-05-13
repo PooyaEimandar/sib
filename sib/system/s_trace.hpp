@@ -16,11 +16,8 @@
 
 #pragma once
 
-#include <folly/Conv.h>
 #include <folly/FBString.h>
 #include <folly/String.h>
-
-#include <boost/leaf.hpp>
 
 #include <deque>
 #include <sstream>
@@ -72,6 +69,8 @@ struct s_trace {
     stacks_.emplace_front(folly::to<int64_t>(p_code), std::move(p_msg), p_file, p_line);
   }
 
+  [[nodiscard]] auto size() const -> size_t { return stacks_.size(); }
+
   [[nodiscard]] auto last_err_msg() const -> const folly::fbstring& {
     static const folly::fbstring EMPTY{};
     return stacks_.empty() ? EMPTY : stacks_.front().err_msg();
@@ -110,9 +109,3 @@ struct s_trace {
 };
 
 } // namespace sib::system
-
-// NOLINTBEGIN (readability-identifier-naming, cppcoreguidelines-macro-usage)
-constexpr auto S_SUCCESS = 0;
-#define S_ERROR(p_code, p_msg) \
-  boost::leaf::new_error(sib::system::s_trace(p_code, p_msg, __FILE__, __LINE__))
-// NOLINTEND

@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-// #ifdef SIB_DB_FDB
+#ifdef SIB_DB_FDB
 
 #pragma once
 
@@ -23,4 +23,4 @@
 #include <fdb_c.h>
 #include <fdb_c_options.g.h>
 
-// #endif // SIB_DB_FDB
+#endif // SIB_DB_FDB

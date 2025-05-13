@@ -43,41 +43,25 @@ auto fdb_pool_fini() {
 }
 
 BENCHMARK(fdb_pool_init_bench) {
-  boost::leaf::try_handle_all(
-    []() -> boost::leaf::result<int> {
-      BOOST_LEAF_CHECK(fdb_pool_init());
-      BOOST_LEAF_CHECK(fdb_pool_fini());
-      return {};
-    },
-    [](const sib::system::s_trace& p_trace) {
-      std::cerr << "got leaf exception: " << p_trace << "\n";
-      return 1;
-    },
-    [](const std::exception& p_exc) {
-      std::cerr << "got an exception: " << p_exc.what() << "\n";
-      return 1;
-    },
-    []() {
-      std::cerr << "got an unknown exception" << "\n";
-      return 1;
-    });
+  TRY(fdb_pool_init());
+  TRY(fdb_pool_fini());
 }
 
-// BENCHMARK(fdb_pool_acquire_release_bench) {
-//   static folly::ScopedEventBaseThread evb_thread;
-//   static folly::EventBase* evb = evb_thread.getEventBase();
-//   static auto tk = std::make_shared<folly::ThreadWheelTimekeeper>();
-//   static bool initialized = false;
+BENCHMARK(fdb_pool_acquire_release_bench) {
+  static folly::ScopedEventBaseThread evb_thread;
+  static folly::EventBase* evb = evb_thread.getEventBase();
+  static auto tk = std::make_shared<folly::ThreadWheelTimekeeper>();
+  static bool initialized = false;
 
-//   if (!initialized) {
-//     fdb_pool_init();
-//     initialized = true;
-//   }
+  if (!initialized) {
+    fdb_pool_init();
+    initialized = true;
+  }
 
-//   auto result = folly::coro::blockingWait(s_fdb_pool::acquire(100ms, tk.get()).scheduleOn(evb));
-//   if (!result.has_value()) {
-//     XLOG(FATAL) << "Failed to acquire from FDB pool";
-//   }
-
-//   s_fdb_pool::release(*result);
-// }
+  auto res = folly::coro::blockingWait(s_fdb_pool::acquire(100ms, tk.get()).scheduleOn(evb));
+  if (res.hasError()) {
+    std::cerr << "Error acquiring fdb pool: " << res.error() << std::endl;
+    return;
+  }
+  s_fdb_pool::release(*res);
+}

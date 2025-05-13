@@ -16,17 +16,15 @@
 
 #pragma once
 
+#include <folly/Expected.h>
 #include <folly/FBString.h>
-#include <folly/Unit.h>
+#include <folly/Format.h>
 #include <folly/init/Init.h>
 
+#include <sib/system/s_defer.hpp>
 #include <sib/system/s_trace.hpp>
 
-#include <cwchar>
-#include <array>
 #include <span>
-#include <string>
-#include <tuple>
 
 #if defined(_WIN32) || defined(_WIN64)
 #ifdef SIB_EXPORTS
@@ -38,14 +36,61 @@
 #define SIB_API __attribute__((visibility("default")))
 #endif
 
+constexpr auto S_SUCCESS = 0;
+
+// NOLINTBEGIN (readability-identifier-naming, cppcoreguidelines-macro-usage)
+#define S_ERROR(p_code, p_msg) \
+  folly::makeUnexpected(sib::system::s_trace(p_code, p_msg, __FILE__, __LINE__))
+
+#define TRY_M(p_expr, p_msg)                                                           \
+  ({                                                                                   \
+    auto res = (p_expr);                                                               \
+    if (res.hasError()) {                                                              \
+      res.merge(sib::system::s_trace(res.last_err_code(), p_msg, __FILE__, __LINE__)); \
+      return folly::makeUnexpected(res.error());                                       \
+    }                                                                                  \
+    std::move(res).value();                                                            \
+  })
+
+#define TRY_A(p_expr)                            \
+  ({                                             \
+    auto res = (p_expr);                         \
+    if (res.hasError())                          \
+      return folly::makeUnexpected(res.error()); \
+    std::move(res).value();                      \
+  })
+
+#define TRY(p_expr)      \
+  ({                     \
+    auto res = (p_expr); \
+    if (res.hasError())  \
+      return;            \
+  })
+
+#define CONCAT_IMPL(x, y) x##y
+#define CONCAT(x, y) CONCAT_IMPL(x, y)
+#define S_DEFER auto CONCAT(_defer_, __LINE__) = sib::system::defer_ini
+// NOLINTEND
+
 namespace sib {
-[[nodiscard]] SIB_API inline auto init(int p_argc, std::span<char *> p_argv)
-  -> boost::leaf::result<int> {
+
+template <typename T>
+using s_result = folly::Expected<T, system::s_trace>;
+
+[[nodiscard]] SIB_API inline auto init(int p_argc, std::span<char*> p_argv)
+  -> s_result<folly::Unit> {
   if (p_argc <= 0 || p_argv.data() == nullptr) {
-    return S_ERROR(std::errc::operation_canceled, "sib::init invalid arguments");
+    return S_ERROR(std::errc::invalid_argument, "missing p_argc or p_argv");
   }
-  auto *ptr = p_argv.data();
-  std::ignore = folly::Init(&p_argc, &ptr, false);
-  return S_SUCCESS;
+
+  auto* ptr = p_argv.data();
+  try {
+    std::ignore = folly::Init(&p_argc, &ptr, false);
+  } catch (const std::exception& p_exc) {
+    return S_ERROR(
+      std::errc::operation_canceled,
+      folly::sformat("folly::Init failed: because: {}", p_exc.what()));
+  }
+  return folly::unit;
 }
 } // namespace sib

@@ -23,7 +23,7 @@
 #include <span>
 #include <variant>
 
-#include <sib/system/s_trace.hpp>
+#include <sib/sib.hpp>
 
 namespace sib::system {
 
@@ -56,11 +56,12 @@ struct s_buffer {
 
   [[nodiscard]] auto capacity() noexcept -> size_t { return N; }
 
-  [[nodiscard]] auto as_string_view() const -> boost::leaf::result<std::string_view> {
+  [[nodiscard]] auto as_string_view() const -> s_result<std::string_view> {
     if (type_ != s_buffer_type::TEXT) {
       return S_ERROR(std::errc::operation_canceled, "s_buffer is not of type TEXT");
     }
 
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
     std::string_view view(reinterpret_cast<const char*>(data().data()), size());
     // Check for null-terminator in the middle of the buffer
     if (view.find('\0') != std::string_view::npos) {

@@ -18,12 +18,8 @@
 
 #pragma once
 
-#include <folly/FBString.h>
-#include <folly/Format.h>
-
-#include <sib/system/s_defer.hpp>
+#include <sib/sib.hpp>
 #include <sib/system/s_htobe64.hpp>
-#include <sib/system/s_trace.hpp>
 
 #include <sib/database/s_fdb_future.hpp>
 
@@ -40,7 +36,7 @@ struct s_fdb_range_view {
 // NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast,
 // cppcoreguidelines-pro-type-cstyle-cast)
 struct s_fdb_trans {
-  static auto make(fdb p_db) -> boost::leaf::result<s_fdb_trans> {
+  static auto make(fdb p_db) -> s_result<s_fdb_trans> {
     if (p_db == nullptr) {
       return S_ERROR(std::errc::not_supported, "Database connection is null");
     }
@@ -69,7 +65,7 @@ struct s_fdb_trans {
 
   template <typename Duration>
   auto get(Duration p_timeout, std::string_view p_key, bool p_snapshot = false)
-    -> folly::coro::Task<boost::leaf::result<folly::fbstring>> {
+    -> folly::coro::Task<s_result<folly::fbstring>> {
     auto* fut = fdb_transaction_get(
       trans_, reinterpret_cast<const uint8_t*>(p_key.data()), p_key.size(), p_snapshot);
     if (!fut) {
@@ -85,7 +81,7 @@ struct s_fdb_trans {
     if (!res) {
       co_return S_ERROR(
         std::errc::operation_canceled,
-        fmt::format(
+        folly::sformat(
           "FoundationDB got timeout or error while waiting for future of key: {}", p_key));
     }
 
@@ -121,7 +117,7 @@ struct s_fdb_trans {
     FDBStreamingMode p_mode = FDBStreamingMode::FDB_STREAMING_MODE_WANT_ALL,
     int p_iteration = 0,
     bool p_snapshot = false,
-    bool p_reverse = false) -> folly::coro::Task<boost::leaf::result<s_fdb_range_view>> {
+    bool p_reverse = false) -> folly::coro::Task<s_result<s_fdb_range_view>> {
     // check if the range is valid
     if ((p_begin.empty() && p_end.empty()) || p_begin >= p_end) {
       co_return S_ERROR(
@@ -165,7 +161,7 @@ struct s_fdb_trans {
     if (fdb_err) {
       co_return S_ERROR(
         fdb_err,
-        fmt::format(
+        folly::sformat(
           "FoundationDB got an error while waiting for future. Error: {} ",
           fdb_get_error(fdb_err)));
     }
@@ -179,7 +175,7 @@ struct s_fdb_trans {
 
   template <typename Duration>
   auto clear(std::string_view p_begin, std::optional<std::string_view> p_end)
-    -> folly::coro::Task<boost::leaf::result<int>> {
+    -> folly::coro::Task<s_result<int>> {
     p_end
       ? fdb_transaction_clear_range(
           trans_,
@@ -192,7 +188,7 @@ struct s_fdb_trans {
   }
 
   auto atomic_add_async(std::string_view p_key, int64_t p_value)
-    -> folly::coro::Task<boost::leaf::result<int>> {
+    -> folly::coro::Task<s_result<int>> {
     auto value = sib::system::htobe64(p_value);
 
     fdb_transaction_atomic_op(
@@ -206,7 +202,7 @@ struct s_fdb_trans {
   }
 
   template <typename Duration>
-  auto commit(Duration p_timeout) -> folly::coro::Task<boost::leaf::result<int>> {
+  auto commit(Duration p_timeout) -> folly::coro::Task<s_result<int>> {
     auto* fut = fdb_transaction_commit(trans_);
     if (!fut) {
       co_return S_ERROR(std::errc::operation_canceled, "fdb_transaction_commit failed");

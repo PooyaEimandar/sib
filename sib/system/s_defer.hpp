@@ -19,6 +19,7 @@
 #include <type_traits>
 #include <utility>
 
+namespace sib::system {
 template <typename F>
 struct s_defer {
   explicit s_defer(F&& p_func) noexcept(std::is_nothrow_move_constructible_v<F>)
@@ -40,11 +41,7 @@ struct s_defer {
 
 template <typename F>
 [[nodiscard]] auto defer_ini(F&& p_func) noexcept(std::is_nothrow_constructible_v<F, F&&>) {
-  return s_defer<F>(std::forward<F>(p_func));
+  return sib::system::s_defer<F>(std::forward<F>(p_func));
 }
 
-// NOLINTBEGIN (cppcoreguidelines-macro-usage)
-#define CONCAT_IMPL(x, y) x##y
-#define CONCAT(x, y) CONCAT_IMPL(x, y)
-#define S_DEFER auto CONCAT(_defer_, __LINE__) = defer_ini
-// NOLINTEND
+} // namespace sib::system

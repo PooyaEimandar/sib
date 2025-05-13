@@ -28,7 +28,7 @@
 namespace sib::db {
 constexpr auto FDB_MAX_POOL_SIZE = 16;
 struct s_fdb_pool {
-  static auto init(std::filesystem::path& p_path, size_t p_pool_size) -> boost::leaf::result<int> {
+  static auto init(std::filesystem::path& p_path, size_t p_pool_size) -> s_result<int> {
     if (!std::filesystem::exists(p_path)) {
       return S_ERROR(std::errc::no_such_file_or_directory, "Missing cluster file");
     }
@@ -51,7 +51,7 @@ struct s_fdb_pool {
 
   template <typename Duration>
   static auto acquire(Duration p_timeout, folly::Timekeeper* p_timekeeper)
-    -> folly::coro::Task<boost::leaf::result<fdb>> {
+    -> folly::coro::Task<s_result<fdb>> {
     auto state = pool().wlock();
 
     if (state->pool.empty()) {
@@ -93,7 +93,7 @@ struct s_fdb_pool {
     }
   }
 
-  static auto fini() -> boost::leaf::result<int> {
+  static auto fini() -> s_result<int> {
     auto state = pool().wlock();
     for (auto& iter : state->pool) {
       if (iter) {
@@ -121,14 +121,14 @@ struct s_fdb_pool {
     Duration p_timeout,
     folly::fbstring p_key,
     Callback p_on_change,
-    folly::CancellationToken p_cancel_token) -> folly::coro::Task<boost::leaf::result<int>> {
+    folly::CancellationToken p_cancel_token) -> folly::coro::Task<s_result<int>> {
     while (!p_cancel_token.isCancellationRequested()) {
       // create a transaction
       FDBTransaction* trans = nullptr;
       const auto TRANS_ERR = fdb_database_create_transaction(p_conn, &trans);
       if (TRANS_ERR) {
         co_return S_ERROR(
-          TRANS_ERR, fmt::format("Failed to create transaction: {}", fdb_get_error(TRANS_ERR)));
+          TRANS_ERR, folly::sformat("Failed to create transaction: {}", fdb_get_error(TRANS_ERR)));
       }
 
       // NOLINTBEGIN (cppcoreguidelines-pro-type-reinterpret-cast)
@@ -152,7 +152,7 @@ struct s_fdb_pool {
         }());
       } catch (const folly::OperationCancelled& p_excp) {
         co_return S_ERROR(
-          std::errc::operation_canceled, fmt::format("Watch loop cancelled for key: {}", p_key));
+          std::errc::operation_canceled, folly::sformat("Watch loop cancelled for key: {}", p_key));
       }
 
       // Try to get the new value using s_fdb_trans
@@ -160,7 +160,7 @@ struct s_fdb_pool {
       if (!trans_result) {
         co_return S_ERROR(
           std::errc::io_error,
-          fmt::format("Failed to create transaction for get new key value of watch: {}", p_key));
+          folly::sformat("Failed to create transaction for get new key value of watch: {}", p_key));
       }
 
       auto new_value_result = co_await trans_result->get(p_timeout, p_key, false);
