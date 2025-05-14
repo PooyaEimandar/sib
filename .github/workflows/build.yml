@@ -12,7 +12,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [macos-latest, ubuntu-latest]
+        os: [ubuntu-latest]
         # os: [ubuntu-latest, windows-latest, macos-latest]
         include:
           - os: ubuntu-latest
@@ -25,11 +25,11 @@ jobs:
           #     -DCMAKE_C_COMPILER=clang-cl
           #     -DCMAKE_CXX_COMPILER=clang-cl
           #     -DCMAKE_BUILD_TYPE=Release
-          - os: macos-latest
-            cmake_compiler_options: >
-              -DCMAKE_C_COMPILER=clang
-              -DCMAKE_CXX_COMPILER=clang++
-              -DCMAKE_BUILD_TYPE=Release
+          # - os: macos-latest
+          #   cmake_compiler_options: >
+          #     -DCMAKE_C_COMPILER=clang
+          #     -DCMAKE_CXX_COMPILER=clang++
+          #     -DCMAKE_BUILD_TYPE=Release
 
     steps:
       - name: Checkout
@@ -41,10 +41,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ninja-build cmake clang ccache
 
-      - name: Install Dependencies (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          brew install ninja cmake llvm ccache
+      # - name: Install Dependencies (macOS)
+      #   if: runner.os == 'macOS'
+      #   run: |
+      #     brew install ninja cmake llvm ccache
 
       # - name: Install Dependencies (Windows)
       #   if: runner.os == 'Windows'
