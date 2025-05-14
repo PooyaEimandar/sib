@@ -56,8 +56,8 @@ struct s_fdb_future {
   }
 
  private:
-  FDBFuture* future_;
-  mutable folly::coro::coroutine_handle<> handle_;
+  FDBFuture* future_ = nullptr;
+  mutable folly::coro::coroutine_handle<> handle_ = nullptr;
 };
 
 constexpr auto INTERVAL_POOL = std::chrono::milliseconds(5);
