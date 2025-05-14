@@ -25,7 +25,9 @@ install_dependencies_linux() {
     git \
     cmake \
     m4 \
-    clang \
+    g++ \
+    gcc-12 \
+    g++-12 \
     clang-format \
     clang-tidy \
     ninja-build \
@@ -135,8 +137,6 @@ setup_fast_float() {
   cd "$FAST_FLOAT_BUILD_DIR" || exit
 
   PARALLEL_LEVEL=$JOBS cmake -G Ninja          \
-    -DCMAKE_C_COMPILER=clang                   \
-    -DCMAKE_CXX_COMPILER=clang++               \
     -DCMAKE_PREFIX_PATH="$DEPS_DIR"            \
     -DCMAKE_INSTALL_PREFIX="$DEPS_DIR"         \
     -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE       \
@@ -167,8 +167,6 @@ setup_glog() {
   cd "$GLOG_BUILD_DIR" || exit
 
   PARALLEL_LEVEL=$JOBS cmake -G Ninja          \
-    -DCMAKE_C_COMPILER=clang                   \
-    -DCMAKE_CXX_COMPILER=clang++               \
     -DCMAKE_POLICY_VERSION_MINIMUM=3.5         \
     -DCMAKE_PREFIX_PATH="$DEPS_DIR"            \
     -DCMAKE_INSTALL_PREFIX="$DEPS_DIR"         \
@@ -197,8 +195,6 @@ setup_fmt() {
   cd "$FMT_BUILD_DIR" || exit
 
   PARALLEL_LEVEL=$JOBS cmake -G Ninja          \
-    -DCMAKE_C_COMPILER=clang                   \
-    -DCMAKE_CXX_COMPILER=clang++               \
     -DCMAKE_PREFIX_PATH="$DEPS_DIR"            \
     -DCMAKE_INSTALL_PREFIX="$DEPS_DIR"         \
     -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE       \
@@ -227,8 +223,6 @@ setup_googletest() {
   cd "$GTEST_BUILD_DIR" || exit
 
   PARALLEL_LEVEL=$JOBS cmake -G Ninja          \
-    -DCMAKE_C_COMPILER=clang                   \
-    -DCMAKE_CXX_COMPILER=clang++               \
     -DCMAKE_PREFIX_PATH="$DEPS_DIR"            \
     -DCMAKE_INSTALL_PREFIX="$DEPS_DIR"         \
     -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE       \
@@ -256,8 +250,6 @@ setup_zstd() {
   cd "$ZSTD_BUILD_DIR" || exit
 
   PARALLEL_LEVEL=$JOBS cmake -G Ninja               \
-    -DCMAKE_C_COMPILER=clang                        \
-    -DCMAKE_CXX_COMPILER=clang++                    \
     -DCMAKE_POLICY_VERSION_MINIMUM=3.5              \
     -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE            \
     -DCMAKE_PREFIX_PATH="$ZSTD_INSTALL_DIR"         \
@@ -314,8 +306,6 @@ setup_folly() {
 
   # ignore fmt of the system
   PARALLEL_LEVEL=$JOBS cmake -G Ninja          \
-    -DCMAKE_C_COMPILER=clang                   \
-    -DCMAKE_CXX_COMPILER=clang++               \
     -DCMAKE_POLICY_VERSION_MINIMUM=3.5         \
     -DCMAKE_PREFIX_PATH="$DEPS_DIR"            \
     -DCMAKE_INSTALL_PREFIX="$DEPS_DIR"         \
@@ -356,8 +346,6 @@ setup_fizz() {
   fi
 
   PARALLEL_LEVEL=$JOBS cmake -G Ninja          \
-    -DCMAKE_C_COMPILER=clang                   \
-    -DCMAKE_CXX_COMPILER=clang++               \
     -DCMAKE_POLICY_VERSION_MINIMUM=3.5         \
     -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE       \
     -DCMAKE_PREFIX_PATH="$DEPS_DIR"            \
@@ -394,8 +382,6 @@ setup_wangle() {
   fi
 
   PARALLEL_LEVEL=$JOBS cmake -G Ninja          \
-    -DCMAKE_C_COMPILER=clang                   \
-    -DCMAKE_CXX_COMPILER=clang++               \
     -DCMAKE_POLICY_VERSION_MINIMUM=3.5         \
     -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE       \
     -DCMAKE_PREFIX_PATH="$DEPS_DIR"            \
@@ -430,8 +416,6 @@ setup_mvfst() {
   fi
 
   PARALLEL_LEVEL=$JOBS cmake -G Ninja          \
-    -DCMAKE_C_COMPILER=clang                   \
-    -DCMAKE_CXX_COMPILER=clang++               \
     -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE       \
     -DCMAKE_PREFIX_PATH="$DEPS_DIR"            \
     -DCMAKE_INSTALL_PREFIX="$DEPS_DIR"         \
@@ -463,8 +447,6 @@ setup_libevent() {
   cd "$LIBEVENT_BUILD_DIR" || exit
 
   PARALLEL_LEVEL=$JOBS cmake -G Ninja          \
-    -DCMAKE_C_COMPILER=clang                   \
-    -DCMAKE_CXX_COMPILER=clang++               \
     -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE       \
     -DCMAKE_INSTALL_PREFIX="$DEPS_DIR"         \
     -DEVENT__DISABLE_TESTS=ON                  \
@@ -567,8 +549,6 @@ if $BUILD_PROXYGEN; then
   cd "$BWD" || exit
   ECHO_INFO "Building proxygen in $BWD in $CMAKE_BUILD_TYPE mode"
   PARALLEL_LEVEL=$JOBS cmake -G Ninja          \
-    -DCMAKE_C_COMPILER=clang                   \
-    -DCMAKE_CXX_COMPILER=clang++               \
     -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE       \
     -DCMAKE_PREFIX_PATH="$DEPS_DIR"            \
     -DCMAKE_INSTALL_PREFIX="$PREFIX"           \
