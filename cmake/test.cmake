@@ -1,6 +1,7 @@
 add_executable(sib_test
   test/main.cpp
 )
+set_target_properties(sib_test PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED YES)
 
 if (APPLE AND SIB_DB_FDB)
   get_filename_component(FDB_LIB_DIR ${FDB_C_LIBRARY} DIRECTORY)
@@ -14,6 +15,9 @@ target_include_directories(sib_test
   PRIVATE
     /usr/local/include
     ${Boost_INCLUDE_DIRS}
+    ${PROXYGEN_ROOT}
+    ${PROXYGEN_ROOT}/proxygen/_build/generated
+    ${PROXYGEN_DEPS}/include
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/dep/proxygen/proxygen/_build/deps/include
     $<$<AND:$<BOOL:${SIB_DB_FDB}>,$<PLATFORM_ID:Darwin>>:/usr/local/include/foundationdb>
@@ -37,8 +41,8 @@ target_link_libraries(sib_test
     gtest
     gtest_main
     gmock
-    folly
-    $<$<BOOL:${SIB_DB_FDB}>:${FDB_C_LIBRARY}> 
+    OpenSSL::SSL 
+    OpenSSL::Crypto
     ${PROJECT_NAME}
 )
 

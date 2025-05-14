@@ -1,18 +1,20 @@
 /*
- * Copyright (c) 2025 Pooya Eimandar (https://github.com/PooyaEimandar/sib)
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+  Mozilla Public License 2.0 (MPL-2.0)
+
+  This file is part of the "https://github.com/PooyaEimandar/sib" project, which is licensed under
+  the MPL-2.0. You can obtain a copy of the license at: https://opensource.org/licenses/MPL-2.0
+
+  The MPL-2.0 allows you to use, modify, and distribute this file under certain conditions.
+  The source code may be modified and distributed, provided that you retain the same license
+  and include a copy of this notice when redistributing the code.
+
+  This project was created by Pooya Eimandar.
+
+  For more information on the terms of this license, please refer to the official MPL-2.0
+  documentation.
+
+  SPDX-License-Identifier: MPL-2.0
+*/
 
 #ifdef SIB_BUILD_BENCH
 

@@ -36,6 +36,5 @@ target_link_directories(sib_bench
 target_link_libraries(sib_bench
   PRIVATE
     folly
-    $<$<BOOL:${SIB_DB_FDB}>:${FDB_C_LIBRARY}> 
     ${PROJECT_NAME}
 )

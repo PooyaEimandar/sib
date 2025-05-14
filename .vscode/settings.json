@@ -93,6 +93,9 @@
     "hash_map": "cpp",
     "hash_set": "cpp",
     "__config": "cpp",
-    "iterator": "cpp"
+    "iterator": "cpp",
+    "codecvt": "cpp",
+    "csetjmp": "cpp",
+    "latch": "cpp"
   }
 }
