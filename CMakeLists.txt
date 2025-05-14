@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.28...4.0)
 
 project(sib
-  VERSION 4.0.0
+  VERSION 1.0.0
   DESCRIPTION "A high-performance and cross-platform C++ modules optimized for streaming and rendering."
 )
 
@@ -18,12 +18,12 @@ endif()
 # set C/CXX standards
 option(SIB_BUILD_BENCH "Build benchmarks" ON)
 option(SIB_BUILD_TEST "Build tests" ON)
-option(SIB_NET_PROXYGEN "Enable HTTP3/2/1.1 server based on Facebook's Proxygen" OFF)
+option(SIB_NET_HTTP "Enable HTTP3/2/1.1 server based on Facebook's Proxygen" ON)
 option(SIB_NET_TCP "Enable TCP networking" OFF)
 option(SIB_NET_UDP "Enable UDP networking" OFF)
 option(SIB_DB_FDB "Enable FoundationDB" ON)
 
-set(FOLLY_VERSION "v2025.04.28.00" CACHE STRING "set the folly version")
+set(FOLLY_VERSION "v2025.05.12.00" CACHE STRING "set the folly version")
 set(C_STANDARD 17 CACHE STRING "C standard to use")
 set(CXX_STANDARD 20 CACHE STRING "C++ standard to use. Minimum standard is 20")
 set(CMAKE_C_STANDARD ${C_STANDARD})
@@ -73,14 +73,14 @@ foreach (_var ${_vars})
 endforeach()
 
 set(PROXYGEN_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/dep/proxygen)
-set(PROXYGEN_BUILD_DIR ${PROXYGEN_ROOT}/_build)
-set(PROXYGEN_DEPS ${PROXYGEN_BUILD_DIR}/deps)
+set(PROXYGEN_DEPS ${PROXYGEN_ROOT}/proxygen/_build/deps)
 
 # check for dep
-if(NOT (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/dep/proxygen/proxygen/_build/deps"))
+if(NOT (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/dep/proxygen/proxygen/_build/deps") OR 
+   NOT EXISTS "${PROXYGEN_ROOT}/proxygen/_build/proxygen/httpserver/libproxygenhttpserver.a")
     message(STATUS "Running build.sh with build type: ${CMAKE_BUILD_TYPE}...")
     execute_process(
-        COMMAND bash build.sh ${CMAKE_BUILD_TYPE} ${FOLLY_VERSION} ${SIB_NET_PROXYGEN}
+        COMMAND bash build.sh ${CMAKE_BUILD_TYPE} ${FOLLY_VERSION} ${SIB_NET_HTTP}
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/dep
         RESULT_VARIABLE PROXYGEN_SCRIPT_RESULT
     )
@@ -102,16 +102,18 @@ if(SIB_DB_FDB)
     endif()
 endif()
 
-# set cmake module path for dependencies of proxygen
-set(CMAKE_PREFIX_PATH ${PROXYGEN_DEPS};${CMAKE_PREFIX_PATH})
-set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH}
-    "${PROXYGEN_ROOT}/cmake"
-    "${PROXYGEN_ROOT}/build/fbcode_builder/CMake"
-)
+find_package(Boost REQUIRED COMPONENTS filesystem system context program_options)
+if(Boost_FOUND)
+    message(STATUS "Boost version: ${Boost_VERSION}")
+    message(STATUS "Boost include dir: ${Boost_INCLUDE_DIRS}")
+    message(STATUS "Boost libraries: ${Boost_LIBRARIES}")
+    get_filename_component(BOOST_ROOT_HINT "${Boost_INCLUDE_DIRS}" DIRECTORY)
+else()
+    message(FATAL_ERROR "Boost was not found")
+endif()
 
 find_package(Threads REQUIRED)
 find_package(OpenSSL REQUIRED)
-find_package(Boost REQUIRED COMPONENTS filesystem system context program_options)
 
 file(GLOB_RECURSE SYSTEM_DB_FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/sib/database/*.cpp"
@@ -136,7 +138,9 @@ target_include_directories(${PROJECT_NAME}
   PRIVATE
     ${Boost_INCLUDE_DIRS}
     ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}/dep/proxygen/proxygen/_build/deps/include
+    ${PROXYGEN_ROOT}
+    ${PROXYGEN_ROOT}/proxygen/_build/generated
+    ${PROXYGEN_DEPS}/include
     $<$<AND:$<BOOL:${SIB_DB_FDB}>,$<PLATFORM_ID:Darwin>>:/usr/local/include/foundationdb>
     $<$<AND:$<BOOL:${SIB_DB_FDB}>,$<PLATFORM_ID:Linux>>:/usr/include/foundationdb>
     $<$<PLATFORM_ID:Darwin>:/opt/homebrew/Cellar/double-conversion/3.3.1/include>
@@ -168,8 +172,8 @@ elseif(UNIX)
     target_link_libraries(${PROJECT_NAME} PRIVATE unwind iberty)
 endif()
 
-target_link_libraries(${PROJECT_NAME}
-  PRIVATE
+set(LIBS
+    Threads::Threads
     Boost::filesystem
     Boost::system
     Boost::context
@@ -178,14 +182,43 @@ target_link_libraries(${PROJECT_NAME}
     gflags
     folly
     $<$<PLATFORM_ID:Linux>:atomic>
-    $<$<CONFIG:Debug>:glogd>
     $<$<CONFIG:Debug>:fmtd>
-    $<$<CONFIG:Debug>:eventd>
-    $<$<NOT:$<CONFIG:Debug>>:glog>
     $<$<NOT:$<CONFIG:Debug>>:fmt>
+    $<$<CONFIG:Debug>:glogd>
+    $<$<NOT:$<CONFIG:Debug>>:glog>
+    $<$<CONFIG:Debug>:eventd>
     $<$<NOT:$<CONFIG:Debug>>:event>
-    $<$<BOOL:${SIB_DB_FDB}>:${FDB_C_LIBRARY}> 
+    $<$<BOOL:${SIB_DB_FDB}>:${FDB_C_LIBRARY}>
 )
+
+if(SIB_NET_HTTP)
+   list(APPEND LIBS 
+        ${PROXYGEN_ROOT}/proxygen/_build/proxygen/httpclient/samples/curl/libproxygencurl.a
+        ${PROXYGEN_ROOT}/proxygen/_build/proxygen/httpserver/libproxygenhttpserver.a
+        ${PROXYGEN_ROOT}/proxygen/_build/proxygen/httpserver/libproxygenhqloggerhelper.a
+        ${PROXYGEN_ROOT}/proxygen/_build/proxygen/httpserver/libproxygendeviousbaton.a
+        ${PROXYGEN_ROOT}/proxygen/_build/proxygen/lib/libproxygen.a
+        
+        fizz
+        wangle
+        mvfst_transport
+        mvfst_client
+        mvfst_server
+        -lcityhash
+
+        OpenSSL::SSL 
+        OpenSSL::Crypto
+    )
+
+    if(NOT ENABLE_ASAN)
+        list(APPEND LIBS -ljemalloc)
+    else()
+        message(STATUS "ASan enabled: disabling jemalloc to avoid allocator conflicts")
+    endif()
+
+endif()
+
+target_link_libraries(${PROJECT_NAME} PRIVATE ${LIBS})
 
 if (SIB_BUILD_BENCH)
     include(cmake/bench.cmake)

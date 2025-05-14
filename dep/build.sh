@@ -7,22 +7,17 @@
 source ./const.sh
 
 BUILD_FOR_FUZZING=false
-NO_BUILD_TESTS=true
+FUZZING_ENGINE='-fsanitize=fuzzer'
 NO_JEMALLOC=false
 
 PROXYGEN_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 
-if [ -n "$1" ]; then
-  CMAKE_BUILD_TYPE="$1"
-else
-  CMAKE_BUILD_TYPE="Release"
-fi
-
-FOLLY_VERSION=$2
+CMAKE_BUILD_TYPE="${1:-Release}"
+FOLLY_VERSION="$2"
 if [[ "$3" == "ON" ]]; then
-  BUILD_PROXYGEN=TRUE
+  BUILD_PROXYGEN=true
 else
-  BUILD_PROXYGEN=FALSE
+  BUILD_PROXYGEN=false
 fi
 
 install_dependencies_linux() {
@@ -99,13 +94,13 @@ install_dependencies_mac() {
 }
 
 install_dependencies() {
-  echo -e "${COLOR_GREEN}[ INFO ] install dependencies for $PLATFORM ${COLOR_OFF}"
+  ECHO_INFO "install dependencies for $PLATFORM"
   if [ "$PLATFORM" = "Linux" ]; then
     install_dependencies_linux
   elif [ "$PLATFORM" = "Mac" ]; then
     install_dependencies_mac
   else
-    echo -e "${COLOR_RED}[ ERROR ] unsupported platform: $PLATFORM ${COLOR_OFF}"
+    ECHO_ERR "unsupported platform: $PLATFORM"
     exit 1
   fi
 }
@@ -127,7 +122,7 @@ setup_fast_float() {
   FAST_FLOAT_BUILD_DIR=$DEPS_DIR/fast_float/build/
 
   if [ ! -d "$FAST_FLOAT_DIR" ] ; then
-    echo -e "${COLOR_GREEN}[ INFO ] Cloning fast_float repo ${COLOR_OFF}"
+    ECHO_INFO "Cloning fast_float repo"
     git clone https://github.com/fastfloat/fast_float.git "$FAST_FLOAT_DIR" --depth 1
   fi
 
@@ -135,7 +130,7 @@ setup_fast_float() {
   git fetch --tags
   git checkout "v8.0.0"
   
-  echo -e "${COLOR_GREEN}Building fast_float ${COLOR_OFF}"
+  ECHO_INFO "Building fast_float"
   mkdir -p "$FAST_FLOAT_BUILD_DIR"
   cd "$FAST_FLOAT_BUILD_DIR" || exit
 
@@ -145,12 +140,11 @@ setup_fast_float() {
     -DCMAKE_PREFIX_PATH="$DEPS_DIR"            \
     -DCMAKE_INSTALL_PREFIX="$DEPS_DIR"         \
     -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE       \
-    $MAYBE_OVERRIDE_CXX_FLAGS                  \
     ..
   
   ninja -C .
   ninja install
-  echo -e "${COLOR_GREEN}fast_float is installed ${COLOR_OFF}"
+  ECHO_INFO "fast_float is installed"
   cd "$BWD" || exit
 }
 
@@ -160,7 +154,7 @@ setup_glog() {
   GLOG_TAG=$(grep "subdir = " ../../build/fbcode_builder/manifests/glog | cut -d "-" -f 2)
 
   if [ ! -d "$GLOG_DIR" ] ; then
-    echo -e "${COLOR_GREEN}[ INFO ] Cloning glog repo ${COLOR_OFF}"
+    ECHO_INFO "Cloning glog repo"
     git clone https://github.com/google/glog.git "$GLOG_DIR" --depth 1
   fi
 
@@ -168,7 +162,7 @@ setup_glog() {
   git fetch --tags
   git checkout "v${GLOG_TAG}"
   
-  echo -e "${COLOR_GREEN}Building glog ${COLOR_OFF}"
+  ECHO_INFO "Building glog"
   mkdir -p "$GLOG_BUILD_DIR"
   cd "$GLOG_BUILD_DIR" || exit
 
@@ -179,12 +173,11 @@ setup_glog() {
     -DCMAKE_PREFIX_PATH="$DEPS_DIR"            \
     -DCMAKE_INSTALL_PREFIX="$DEPS_DIR"         \
     -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE       \
-    "$MAYBE_OVERRIDE_CXX_FLAGS"                \
     ..
   
   ninja -C .
   ninja install
-  echo -e "${COLOR_GREEN}glog is installed ${COLOR_OFF}"
+  ECHO_INFO "glog is installed"
   cd "$BWD" || exit
 }
 
@@ -193,13 +186,13 @@ setup_fmt() {
   FMT_BUILD_DIR=$DEPS_DIR/fmt/build/
   FMT_TAG=$(grep "subdir = " ../../build/fbcode_builder/manifests/fmt | cut -d "-" -f 2)
   if [ ! -d "$FMT_DIR" ] ; then
-    echo -e "${COLOR_GREEN}[ INFO ] Cloning fmt repo ${COLOR_OFF}"
+    ECHO_INFO "Cloning fmt repo"
     git clone https://github.com/fmtlib/fmt.git  "$FMT_DIR" --depth 1
   fi
   cd "$FMT_DIR"
   git fetch --tags
   git checkout "${FMT_TAG}"
-  echo -e "${COLOR_GREEN}Building fmt ${COLOR_OFF}"
+  ECHO_INFO "Building fmt"
   mkdir -p "$FMT_BUILD_DIR"
   cd "$FMT_BUILD_DIR" || exit
 
@@ -209,13 +202,12 @@ setup_fmt() {
     -DCMAKE_PREFIX_PATH="$DEPS_DIR"            \
     -DCMAKE_INSTALL_PREFIX="$DEPS_DIR"         \
     -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE       \
-    "$MAYBE_OVERRIDE_CXX_FLAGS"                \
     -DFMT_DOC=OFF                              \
     -DFMT_TEST=OFF                             \
     ..
   ninja -C .
   ninja install
-  echo -e "${COLOR_GREEN}fmt is installed ${COLOR_OFF}"
+  ECHO_INFO "fmt is installed"
   cd "$BWD" || exit
 }
 
@@ -224,13 +216,13 @@ setup_googletest() {
   GTEST_BUILD_DIR=$DEPS_DIR/googletest/build/
   GTEST_TAG=$(grep "subdir = " ../../build/fbcode_builder/manifests/googletest | cut -d "-" -f 2,3)
   if [ ! -d "$GTEST_DIR" ] ; then
-    echo -e "${COLOR_GREEN}[ INFO ] Cloning googletest repo ${COLOR_OFF}"
+    ECHO_INFO "Cloning googletest repo"
     git clone https://github.com/google/googletest.git  "$GTEST_DIR" --depth 1
   fi
   cd "$GTEST_DIR"
   git fetch --tags
   git checkout "${GTEST_TAG}"
-  echo -e "${COLOR_GREEN}Building googletest ${COLOR_OFF}"
+  ECHO_INFO "Building googletest"
   mkdir -p "$GTEST_BUILD_DIR"
   cd "$GTEST_BUILD_DIR" || exit
 
@@ -243,7 +235,7 @@ setup_googletest() {
     ..
   ninja -C .
   ninja install
-  echo -e "${COLOR_GREEN}googletest is installed ${COLOR_OFF}"
+  ECHO_INFO "googletest is installed"
   cd "$BWD" || exit
 }
 
@@ -253,19 +245,19 @@ setup_zstd() {
   ZSTD_INSTALL_DIR=$DEPS_DIR
   ZSTD_TAG=$(grep "subdir = " ../../build/fbcode_builder/manifests/zstd | cut -d "-" -f 2 | cut -d "/" -f 1)
   if [ ! -d "$ZSTD_DIR" ] ; then
-    echo -e "${COLOR_GREEN}[ INFO ] Cloning zstd repo ${COLOR_OFF}"
+    ECHO_INFO "Cloning zstd repo"
     git clone https://github.com/facebook/zstd.git "$ZSTD_DIR" --depth 1
   fi
   cd "$ZSTD_DIR"
   git fetch --tags
   git checkout "v${ZSTD_TAG}"
-  echo -e "${COLOR_GREEN}Building Zstd ${COLOR_OFF}"
+  ECHO_INFO "Building Zstd"
   mkdir -p "$ZSTD_BUILD_DIR"
   cd "$ZSTD_BUILD_DIR" || exit
 
   PARALLEL_LEVEL=$JOBS cmake -G Ninja               \
-    -DCMAKE_C_COMPILER=clang                   \
-    -DCMAKE_CXX_COMPILER=clang++               \
+    -DCMAKE_C_COMPILER=clang                        \
+    -DCMAKE_CXX_COMPILER=clang++                    \
     -DCMAKE_POLICY_VERSION_MINIMUM=3.5              \
     -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE            \
     -DCMAKE_PREFIX_PATH="$ZSTD_INSTALL_DIR"         \
@@ -274,7 +266,7 @@ setup_zstd() {
     ..
   ninja -C .
   ninja install
-  echo -e "${COLOR_GREEN}Zstd is installed ${COLOR_OFF}"
+  ECHO_INFO "Zstd is installed"
   cd "$BWD" || exit
 }
 
@@ -284,7 +276,7 @@ setup_folly() {
   FOLLY_BUILD_DIR=$DEPS_DIR/folly/build/
 
   if [ ! -d "$FOLLY_DIR" ] ; then
-    echo -e "${COLOR_GREEN}[ INFO ] Cloning folly repo ${COLOR_OFF}"
+    ECHO_INFO "Cloning folly repo"
     git clone https://github.com/facebook/folly.git "$FOLLY_DIR" 
   fi
   synch_dependency_to_commit "$FOLLY_DIR" "$PROXYGEN_DIR"/proxygen/build/deps/github_hashes/facebook/folly-rev.txt
@@ -296,14 +288,14 @@ setup_folly() {
     dir=/usr/local/opt/openssl
     dir_new=/opt/homebrew/opt/openssl
     if [ -d $dir ]; then
-        echo -e "${COLOR_GREEN}[ INFO ] using $dir openssl ${COLOR_OFF}"
+        ECHO_INFO "using $dir openssl"
         export OPENSSL_ROOT_DIR=$dir
     elif [ -d $dir_new ]; then
-        echo -e "${COLOR_GREEN}[ INFO ] using $dir_new openssl ${COLOR_OFF}"
+        ECHO_INFO "using $dir_new openssl"
         export OPENSSL_ROOT_DIR=$dir_new
     fi
   fi
-  echo -e "${COLOR_GREEN}Building Folly ${COLOR_OFF}"
+  ECHO_INFO "Building Folly"
   mkdir -p "$FOLLY_BUILD_DIR"
   cd "$FOLLY_BUILD_DIR" || exit
   MAYBE_DISABLE_JEMALLOC=""
@@ -333,13 +325,12 @@ setup_folly() {
     "$MAYBE_USE_STATIC_DEPS"                   \
     "$MAYBE_USE_STATIC_BOOST"                  \
     "$MAYBE_BUILD_SHARED_LIBS"                 \
-    "$MAYBE_OVERRIDE_CXX_FLAGS"                \
     $MAYBE_DISABLE_JEMALLOC                    \
     ..
   ninja -C .
   ninja install
 
-  echo -e "${COLOR_GREEN}Folly is installed ${COLOR_OFF}"
+  ECHO_INFO "Folly is installed"
   cd "$BWD" || exit
 }
 
@@ -347,11 +338,11 @@ setup_fizz() {
   FIZZ_DIR=$DEPS_DIR/fizz
   FIZZ_BUILD_DIR=$DEPS_DIR/fizz/build/
   if [ ! -d "$FIZZ_DIR" ] ; then
-    echo -e "${COLOR_GREEN}[ INFO ] Cloning fizz repo ${COLOR_OFF}"
+    ECHO_INFO "Cloning fizz repo"
     git clone https://github.com/facebookincubator/fizz "$FIZZ_DIR"
   fi
   synch_dependency_to_commit "$FIZZ_DIR" "$PROXYGEN_DIR"/proxygen/build/deps/github_hashes/facebookincubator/fizz-rev.txt
-  echo -e "${COLOR_GREEN}Building Fizz ${COLOR_OFF}"
+  ECHO_INFO "Building Fizz"
   mkdir -p "$FIZZ_BUILD_DIR"
   cd "$FIZZ_BUILD_DIR" || exit
 
@@ -375,12 +366,11 @@ setup_fizz() {
     -DBUILD_EXAMPLES=OFF                       \
     "$MAYBE_USE_STATIC_DEPS"                   \
     "$MAYBE_BUILD_SHARED_LIBS"                 \
-    "$MAYBE_OVERRIDE_CXX_FLAGS"                \
     "$MAYBE_USE_SODIUM_STATIC_LIBS"            \
     "$FIZZ_DIR/fizz"
   ninja -C .
   ninja install
-  echo -e "${COLOR_GREEN}Fizz is installed ${COLOR_OFF}"
+  ECHO_INFO "Fizz is installed"
   cd "$BWD" || exit
 }
 
@@ -388,11 +378,11 @@ setup_wangle() {
   WANGLE_DIR=$DEPS_DIR/wangle
   WANGLE_BUILD_DIR=$DEPS_DIR/wangle/build/
   if [ ! -d "$WANGLE_DIR" ] ; then
-    echo -e "${COLOR_GREEN}[ INFO ] Cloning wangle repo ${COLOR_OFF}"
+    ECHO_INFO "Cloning wangle repo"
     git clone https://github.com/facebook/wangle "$WANGLE_DIR"
   fi
   synch_dependency_to_commit "$WANGLE_DIR" "$PROXYGEN_DIR"/proxygen/build/deps/github_hashes/facebook/wangle-rev.txt
-  echo -e "${COLOR_GREEN}Building Wangle ${COLOR_OFF}"
+  ECHO_INFO "Building Wangle"
   mkdir -p "$WANGLE_BUILD_DIR"
   cd "$WANGLE_BUILD_DIR" || exit
 
@@ -413,11 +403,10 @@ setup_wangle() {
     -DBUILD_TESTS=OFF                          \
     "$MAYBE_USE_STATIC_DEPS"                   \
     "$MAYBE_BUILD_SHARED_LIBS"                 \
-    "$MAYBE_OVERRIDE_CXX_FLAGS"                \
     "$WANGLE_DIR/wangle"
   ninja -C .
   ninja install
-  echo -e "${COLOR_GREEN}Wangle is installed ${COLOR_OFF}"
+  ECHO_INFO "Wangle is installed"
   cd "$BWD" || exit
 }
 
@@ -425,11 +414,11 @@ setup_mvfst() {
   MVFST_DIR=$DEPS_DIR/mvfst
   MVFST_BUILD_DIR=$DEPS_DIR/mvfst/build/
   if [ ! -d "$MVFST_DIR" ] ; then
-    echo -e "${COLOR_GREEN}[ INFO ] Cloning mvfst repo ${COLOR_OFF}"
+    ECHO_INFO "Cloning mvfst repo"
     git clone https://github.com/facebook/mvfst "$MVFST_DIR"
   fi
   synch_dependency_to_commit "$MVFST_DIR" "$PROXYGEN_DIR"/proxygen/build/deps/github_hashes/facebook/mvfst-rev.txt
-  echo -e "${COLOR_GREEN}Building Mvfst ${COLOR_OFF}"
+  ECHO_INFO "Building Mvfst"
   mkdir -p "$MVFST_BUILD_DIR"
   cd "$MVFST_BUILD_DIR" || exit
 
@@ -449,11 +438,10 @@ setup_mvfst() {
     -DBUILD_TESTS=OFF                          \
     "$MAYBE_USE_STATIC_DEPS"                   \
     "$MAYBE_BUILD_SHARED_LIBS"                 \
-    "$MAYBE_OVERRIDE_CXX_FLAGS"                \
     "$MVFST_DIR"
   ninja -C .
   ninja install
-  echo -e "${COLOR_GREEN}Mvfst is installed ${COLOR_OFF}"
+  ECHO_INFO "Mvfst is installed"
   cd "$BWD" || exit
 }
 
@@ -462,7 +450,7 @@ setup_libevent() {
   LIBEVENT_BUILD_DIR=$DEPS_DIR/libevent/build/
   
   if [ ! -d "$LIBEVENT_DIR" ] ; then
-    echo -e "${COLOR_GREEN}[ INFO ] Cloning libevent repo ${COLOR_OFF}"
+    ECHO_INFO "Cloning libevent repo"
     git clone https://github.com/libevent/libevent.git "$LIBEVENT_DIR"
   fi
 
@@ -470,7 +458,7 @@ setup_libevent() {
   git fetch --tags
   git checkout "master"
 
-  echo -e "${COLOR_GREEN}Building libevent ${COLOR_OFF}"
+  ECHO_INFO "Building libevent"
   mkdir -p "$LIBEVENT_BUILD_DIR"
   cd "$LIBEVENT_BUILD_DIR" || exit
 
@@ -488,14 +476,14 @@ setup_libevent() {
   ninja -C .
   ninja install
 
-  echo -e "${COLOR_GREEN}libevent is installed ${COLOR_OFF}"
+  ECHO_INFO "libevent is installed"
   cd "$BWD" || exit
 }
 
 
 detect_platform
 if [[ "$PLATFORM" == UNKNOWN* ]]; then
-  echo -e "${COLOR_RED}[ ERROR ] Unsupported platform: $PLATFORM ${COLOR_OFF}"
+  ECHO_ERR "Unsupported platform: $PLATFORM"
   exit 1
 fi
 
@@ -511,19 +499,14 @@ install_dependencies
 
 # check proxygen folder exists
 if [ ! -d "proxygen" ]; then
-    echo "${COLOR_GREEN}[ INFO ] clone proxygen ${COLOR_OFF}"
+    ECHO_INFO "cloning Proxygen"
     git clone https://github.com/facebook/proxygen.git --depth 1 --branch $FOLLY_VERSION
     cd proxygen/proxygen
 else
-    echo "${COLOR_GREEN}[ INFO ] update proxygen ${COLOR_OFF}"
+    ECHO_INFO "updating Proxygen"
     cd proxygen
     git pull
     cd proxygen
-fi
-
-MAYBE_OVERRIDE_CXX_FLAGS=""
-if [ -n "$COMPILER_FLAGS" ] ; then
-  MAYBE_OVERRIDE_CXX_FLAGS="-DCMAKE_CXX_FLAGS=$COMPILER_FLAGS"
 fi
 
 BUILD_DIR=_build
@@ -533,7 +516,7 @@ set -e nounset
 trap 'cd $PROXYGEN_DIR' EXIT
 cd $BUILD_DIR || exit
 BWD=$(pwd)
-echo -e "${COLOR_GREEN}Building in $BWD ${COLOR_OFF}"
+ECHO_INFO "Building Proxygen in $BWD"
 DEPS_DIR=$BWD/deps
 mkdir -p "$DEPS_DIR"
 
@@ -550,32 +533,29 @@ if [ "$PLATFORM" = "Mac" ]; then
 fi
 
 if $BUILD_PROXYGEN; then
-  echo -e "${COLOR_GREEN}Building dependencies of Proxygen.${COLOR_OFF}"
+  ECHO_INFO "Building dependencies of Proxygen"
 
   setup_fast_float
   setup_glog
   setup_fmt
   setup_googletest
   setup_zstd
+  setup_libevent
   setup_folly
   setup_fizz
   setup_wangle
   setup_mvfst
 
-  echo -e "${COLOR_GREEN}Building Proxygen.${COLOR_OFF}"
+  ECHO_INFO "Building Proxygen"
 
   MAYBE_BUILD_FUZZERS=""
-  MAYBE_USE_STATIC_DEPS=""
   MAYBE_LIB_FUZZING_ENGINE=""
+  MAYBE_USE_STATIC_DEPS=""
   MAYBE_BUILD_SHARED_LIBS=""
-  MAYBE_BUILD_TESTS="-DBUILD_TESTS=ON"
-  if [ "$NO_BUILD_TESTS" == true ] ; then
-    MAYBE_BUILD_TESTS="-DBUILD_TESTS=OFF"
-  fi
   if [ "$BUILD_FOR_FUZZING" == true ] ; then
     MAYBE_BUILD_FUZZERS="-DBUILD_FUZZERS=ON"
+    MAYBE_LIB_FUZZING_ENGINE="-DLIB_FUZZING_ENGINE=$FUZZING_ENGINE"
     MAYBE_USE_STATIC_DEPS="-DUSE_STATIC_DEPS_ON_UNIX=ON"
-    MAYBE_LIB_FUZZING_ENGINE="-DLIB_FUZZING_ENGINE='$LIB_FUZZING_ENGINE'"
     MAYBE_BUILD_SHARED_LIBS="-DBUILD_SHARED_LIBS=OFF"
   fi
 
@@ -585,7 +565,7 @@ if $BUILD_PROXYGEN; then
 
   # Build proxygen with cmake
   cd "$BWD" || exit
-  echo -e "${COLOR_GREEN}Building proxygen in $BWD in $CMAKE_BUILD_TYPE mode ${COLOR_OFF}"
+  ECHO_INFO "Building proxygen in $BWD in $CMAKE_BUILD_TYPE mode"
   PARALLEL_LEVEL=$JOBS cmake -G Ninja          \
     -DCMAKE_C_COMPILER=clang                   \
     -DCMAKE_CXX_COMPILER=clang++               \
@@ -594,19 +574,18 @@ if $BUILD_PROXYGEN; then
     -DCMAKE_INSTALL_PREFIX="$PREFIX"           \
     -DCMAKE_CXX_STANDARD=20                    \
     -DBUILD_SAMPLES=ON                         \
-    "$MAYBE_BUILD_TESTS"                       \
+    -DBUILD_TESTS=ON                           \
     "$MAYBE_BUILD_FUZZERS"                     \
-    "$MAYBE_BUILD_SHARED_LIBS"                 \
-    "$MAYBE_OVERRIDE_CXX_FLAGS"                \
-    "$MAYBE_USE_STATIC_DEPS"                   \
     "$MAYBE_LIB_FUZZING_ENGINE"                \
+    "$MAYBE_USE_STATIC_DEPS"                   \
+    "$MAYBE_BUILD_SHARED_LIBS"                 \
     ../..
 
   ninja -C .
-  echo -e "${COLOR_GREEN}Proxygen built successfully.${COLOR_OFF}"
+  ECHO_INFO "Proxygen built successfully"
 
 else
-  echo -e "${COLOR_GREEN}Building dependencies of Folly.${COLOR_OFF}"
+  ECHO_INFO "Building dependencies of Folly"
 
   setup_fast_float
   setup_glog
@@ -615,5 +594,5 @@ else
   setup_libevent
   setup_folly
 
-  echo -e "${COLOR_GREEN}Folly built successfully.${COLOR_OFF}"
+  ECHO_INFO "Folly built successfully"
 fi
