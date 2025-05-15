@@ -238,7 +238,6 @@ if(SIB_NET_HTTP)
     mvfst::mvfst_transport
     mvfst::mvfst_client
     mvfst::mvfst_server
-    cityhash
   )
 
   if(NOT ENABLE_ASAN)
