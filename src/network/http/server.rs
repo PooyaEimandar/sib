@@ -196,6 +196,8 @@ impl Server {
             idle: self.max_idle_timeout,
             interval: self.tcp_keep_alive_interval,
             count: self.tcp_keep_alive_count,
+            #[cfg(target_os = "linux")]
+            user_timeout: Duration::from_millis(10_000), // 10 seconds
         });
 
         let mut tls_settings =
