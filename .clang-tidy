@@ -1,0 +1,92 @@
+Checks: >
+  bugprone-*,
+  cert-*,
+  clang-analyzer-*,
+  clang-analyzer-security.*,
+  concurrency-*,
+  cppcoreguidelines-*,
+  google-*,
+  hicpp-*,
+  misc-*,
+  modernize-*,
+  performance-*,
+  portability-*,
+  readability-*,
+  -google-readability-function-size,
+  -google-runtime-references,
+  -hicpp-vararg,
+  -cppcoreguidelines-avoid-magic-numbers,
+  -readability-implicit-bool-conversion,
+  -cppcoreguidelines-pro-type-union-access,
+  -cppcoreguidelines-pro-type-vararg,
+  -cppcoreguidelines-no-malloc,
+  -misc-include-cleaner
+
+WarningsAsErrors: "*"
+HeaderFilterRegex: ".*"
+FormatStyle: file
+
+CheckOptions:
+  ## 🧠 Naming: std style
+  - key: readability-identifier-naming.ClassCase
+    value: lower_case # class my_class
+  - key: readability-identifier-naming.FunctionCase
+    value: lower_case # void do_something()
+  - key: readability-identifier-naming.VariableCase
+    value: lower_case # int my_value
+  - key: readability-identifier-naming.ClassMemberCase
+    value: lower_case # int member_variable
+  - key: readability-identifier-naming.ClassMemberSuffix
+    value: "" # (no suffix by default)
+  - key: readability-identifier-naming.PrivateMemberSuffix
+    value: "_" # int member_variable_
+  - key: readability-identifier-naming.MacroDefinitionCase
+    value: UPPER_CASE # #define MY_MACRO
+  - key: readability-identifier-naming.ParameterCase
+    value: lower_case # void foo(int p_some_param)
+  - key: readability-identifier-naming.ParameterPrefix
+    value: "p_" # void foo(int p_some_param)
+  - key: readability-identifier-naming.EnumConstantCase
+    value: UPPER_CASE # enum { VALUE_ONE }
+  - key: readability-identifier-naming.StaticMemberCase
+    value: lower_case # static int s_static_member
+  - key: readability-identifier-naming.StaticMemberPrefix
+    value: "s_" # static int s_static_member
+  - key: readability-identifier-naming.StructCase
+    value: lower_case
+  - key: readability-identifier-naming.EnumCase
+    value: lower_case # enum class my_enum
+  - key: readability-identifier-naming.ConstantCase
+    value: UPPER_CASE # int MAX_BUFFER_SIZE
+
+  ## 🧪 Safer parameter passing
+  - key: performance-unnecessary-value-param.AllowedTypes
+    value: ""
+
+  ## 🔍 Avoid unsafe reinterpret_cast
+  - key: cppcoreguidelines-pro-type-reinterpret-cast.StrictMode
+    value: "true"
+
+  ## 🚫 Null compatibility
+  - key: modernize-use-nullptr.NullMacros
+    value: "NULL"
+
+  ## ✨ Optional trailing return types
+  - key: modernize-use-trailing-return-type.MinLines
+    value: "0"
+
+  ## 🛡️ Public POD class member allowance
+  - key: cppcoreguidelines-non-private-member-variables-in-classes.IgnoreClassesWithAllMemberVariablesBeingPublic
+    value: "1"
+
+  ## ✅ Allow common literals
+  - key: cppcoreguidelines-avoid-magic-numbers.IgnoredValues
+    value: "0,1,2,100,255"
+
+  ## 🔄 Loop conversion performance
+  - key: modernize-loop-convert.MaxCopySize
+    value: "16"
+
+  ## 🧩 Allow unused params when needed
+  - key: misc-unused-parameters.IgnoreUnusedParameters
+    value: "true"
