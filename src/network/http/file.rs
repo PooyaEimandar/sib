@@ -5,7 +5,7 @@ use memmap2::Mmap;
 use mime_guess::{Mime, mime};
 use moka::future::Cache;
 use serde::{Deserialize, Serialize};
-use std::{ops::Range, path::PathBuf, time::SystemTime};
+use std::{fs::Metadata, ops::Range, path::PathBuf, time::SystemTime};
 use tokio::fs;
 
 use crate::{
@@ -18,7 +18,10 @@ use crate::{
 };
 
 const CHUNK_SIZE: usize = 16 * 1024;
-type FileBuffer = Buffer<{ CHUNK_SIZE as usize }>; // 32 KB
+const MIN_BYTES: u64 = 1024;
+
+const MAX_ON_THE_FLY_SIZE: u64 = 32 * 1024;
+type FileBuffer = Buffer<{ MAX_ON_THE_FLY_SIZE as usize }>; // 32 KB
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -72,240 +75,307 @@ pub async fn serve(
     file_cache: FileCache,
 ) -> anyhow::Result<()> {
     let requested_path = PathBuf::from(root).join(path.trim_start_matches('/'));
+    let canonical = match fs::canonicalize(&requested_path).await {
+        Ok(path) => path,
+        Err(_) => {
+            s_error!(
+                "File server failed to canonicalize path: {}",
+                requested_path.display()
+            );
+            return session.send_status_eom(StatusCode::NOT_FOUND).await;
+        }
+    };
 
-    let canonical = fs::canonicalize(&requested_path).await.map_err(|_| {
-        s_error!(
-            "File server failed to canonicalize path: {}",
-            requested_path.display()
-        );
-        // Return the error from send_status_eom directly
-        return anyhow::anyhow!("File not found");
-    })?;
-    // If canonicalization fails, send the status
-    if !canonical.exists() {
-        session.send_status_eom(StatusCode::NOT_FOUND).await?;
-        return Ok(());
-    }
-
-    let static_root = fs::canonicalize(root).await?;
+    let static_root: PathBuf = fs::canonicalize(root).await?;
     if !canonical.starts_with(&static_root) {
         return session.send_status_eom(StatusCode::FORBIDDEN).await;
     }
 
     let meta = fs::metadata(&canonical).await?;
-    let modified = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-    let key = canonical.to_string_lossy().into_owned();
 
-    let file_info = match file_cache.get(&key).await {
-        Some(info) if modified <= info.modified => info,
-        _ => {
-            let etag = format!(
-                "\"{}-{}\"",
-                modified.duration_since(SystemTime::UNIX_EPOCH)?.as_secs(),
-                meta.len()
-            );
-            let mime_type = mime_guess::from_path(&canonical).first_or_octet_stream();
-            let info = FileInfo {
-                etag,
-                mime_type: mime_type.to_string(),
-                path: canonical.clone(),
-                size: meta.len(),
-                modified,
-            };
-            file_cache.insert(key, info.clone()).await;
-            info
-        }
-    };
+    let key = canonical.to_string_lossy().to_string();
+    let mut file_info_opt: Option<FileInfo> = None;
 
-    if session
-        .read_req_header(http::header::IF_NONE_MATCH)
-        .map_or(false, |etag| etag == &file_info.etag)
     {
-        return session.send_status_eom(StatusCode::NOT_MODIFIED).await;
+        if let Some(info) = file_cache.get(&key).await {
+            let modified = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+            if modified <= info.modified {
+                file_info_opt = Some(info.clone());
+            }
+        }
     }
 
+    let file_info = if let Some(info) = file_info_opt {
+        info
+    } else {
+        let modified = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+        let etag = format!(
+            "\"{}-{}\"",
+            modified.duration_since(SystemTime::UNIX_EPOCH)?.as_secs(),
+            meta.len()
+        );
+        let mime_type = mime_guess::from_path(&canonical).first_or_octet_stream();
+        let info = FileInfo {
+            etag,
+            mime_type: mime_type.to_string(),
+            path: canonical.clone(),
+            size: meta.len(),
+            modified,
+        };
+
+        file_cache.insert(key.clone(), info.clone()).await;
+        info
+    };
+
+    if let Some(p_header_val) = session.read_req_header(http::header::IF_NONE_MATCH) {
+        if p_header_val == &file_info.etag {
+            return session.send_status_eom(StatusCode::NOT_MODIFIED).await;
+        }
+    }
+
+    let mime_type: Mime = file_info
+        .mime_type
+        .parse()
+        .unwrap_or(mime::APPLICATION_OCTET_STREAM);
     let encoding = get_encoding(
         session.read_req_header(http::header::ACCEPT_ENCODING),
-        &file_info
-            .mime_type
-            .parse()
-            .unwrap_or(mime::APPLICATION_OCTET_STREAM),
+        &mime_type,
         encoding_order,
     );
 
-    let (file_path, meta_opt) = match try_precompressed(session, &file_info, &encoding).await? {
-        Some(_result) => return Ok(()),
-        None => (file_info.path.clone(), None),
+    let mut meta_opt: Option<Metadata> = None;
+    let mut file_path = file_info.path.clone();
+    if file_info.size > MIN_BYTES {
+        let parent = match file_info.path.parent() {
+            Some(parent) => parent,
+            None => {
+                session.send_status_eom(StatusCode::NOT_FOUND).await?;
+                return Ok(());
+            }
+        };
+        let file_name_osstr = match file_info.path.file_name() {
+            Some(name) => name,
+            None => {
+                session
+                    .send_status_eom(StatusCode::INTERNAL_SERVER_ERROR)
+                    .await?;
+                return Ok(());
+            }
+        };
+
+        let filename = match file_name_osstr.to_str() {
+            Some(name) => name,
+            None => {
+                session
+                    .send_status_eom(StatusCode::INTERNAL_SERVER_ERROR)
+                    .await?;
+                return Ok(());
+            }
+        };
+
+        (file_path, meta_opt) = match encoding {
+            EncodingType::Gzip => {
+                let com_file = parent.join("gz").join(format!("{filename}.gz"));
+                let com_meta_res = fs::metadata(&com_file).await;
+                if let Ok(com_meta) = com_meta_res {
+                    session.append_header(
+                        &http::header::CONTENT_ENCODING,
+                        HeaderValue::from_static("gzip"),
+                    );
+                    (com_file, Some(com_meta))
+                } else if file_info.size <= MAX_ON_THE_FLY_SIZE {
+                    let buffer = get_file_buffer(&file_info.path).await?;
+                    let compressed = compress::encode_gzip(buffer.as_slice()).await?;
+
+                    session.append_headers(&[
+                        (
+                            http::header::CONTENT_ENCODING,
+                            HeaderValue::from_static("gzip"),
+                        ),
+                        (
+                            http::header::CONTENT_LENGTH,
+                            HeaderValue::from_str(&compressed.len().to_string())?,
+                        ),
+                        (
+                            http::header::CONTENT_TYPE,
+                            HeaderValue::from_str(file_info.mime_type.as_ref())?,
+                        ),
+                    ]);
+
+                    session.send_status(StatusCode::OK).await?;
+                    session.send_body(compressed, true).await?;
+                    session.send_eom().await?;
+                    return Ok(());
+                } else {
+                    (file_info.path.clone(), None)
+                }
+            }
+            EncodingType::Br => {
+                let com_file = parent.join("br").join(format!("{filename}.br"));
+                let com_meta_res = fs::metadata(&com_file).await;
+                if let Ok(com_meta) = com_meta_res {
+                    session.append_header(
+                        &http::header::CONTENT_ENCODING,
+                        HeaderValue::from_static("br"),
+                    );
+                    (com_file, Some(com_meta))
+                } else if file_info.size <= MAX_ON_THE_FLY_SIZE {
+                    let buffer = get_file_buffer(&file_info.path).await?;
+                    let compressed =
+                        compress::encode_brotli(buffer.as_slice(), 4096, 9, 18).await?;
+
+                    session.append_headers(&[
+                        (
+                            http::header::CONTENT_ENCODING,
+                            HeaderValue::from_static("br"),
+                        ),
+                        (
+                            http::header::CONTENT_LENGTH,
+                            HeaderValue::from_str(&compressed.len().to_string())?,
+                        ),
+                        (
+                            http::header::CONTENT_TYPE,
+                            HeaderValue::from_str(file_info.mime_type.as_ref())?,
+                        ),
+                    ]);
+
+                    session.send_status(StatusCode::OK).await?;
+                    session.send_body(compressed, true).await?;
+                    session.send_eom().await?;
+                    return Ok(());
+                } else {
+                    (file_info.path.clone(), None)
+                }
+            }
+            EncodingType::Zstd => {
+                let com_file = parent.join("zstd").join(format!("{filename}.zstd"));
+                let com_meta_res = fs::metadata(&com_file).await;
+                if let Ok(com_meta) = com_meta_res {
+                    session.append_header(
+                        &http::header::CONTENT_ENCODING,
+                        HeaderValue::from_static("zstd"),
+                    );
+                    (com_file, Some(com_meta))
+                } else if file_info.size <= MAX_ON_THE_FLY_SIZE {
+                    let buffer = get_file_buffer(&file_info.path).await?;
+                    let compressed = compress::encode_zstd(buffer.as_slice(), 9).await?;
+
+                    session.append_headers(&[
+                        (
+                            http::header::CONTENT_ENCODING,
+                            HeaderValue::from_static("zstd"),
+                        ),
+                        (
+                            http::header::CONTENT_LENGTH,
+                            HeaderValue::from_str(&compressed.len().to_string())?,
+                        ),
+                        (
+                            http::header::CONTENT_TYPE,
+                            HeaderValue::from_str(file_info.mime_type.as_ref())?,
+                        ),
+                    ]);
+
+                    session.send_status(StatusCode::OK).await?;
+                    session.send_body(compressed, true).await?;
+                    session.send_eom().await?;
+                    return Ok(());
+                } else {
+                    (file_info.path.clone(), None)
+                }
+            }
+            EncodingType::None => (file_info.path.clone(), None),
+        };
+    }
+
+    let meta = if let Some(meta) = meta_opt {
+        meta
+    } else {
+        fs::metadata(&file_path).await?
     };
-
-    let meta = meta_opt.unwrap_or(fs::metadata(&file_path).await?);
     let total_size = meta.len();
-
     let mut range: Option<Range<u64>> = None;
+
     if let Some(range_header) = session.read_req_header(http::header::RANGE) {
         if let Ok(range_str) = range_header.to_str() {
-            range = parse_byte_range(range_str, total_size);
+            if let Some(parsed) = parse_byte_range(range_str, total_size) {
+                range = Some(parsed);
+            }
         }
     }
-
-    let headers = vec![
-        (http::header::CONTENT_TYPE, file_info.mime_type.parse()?),
-        (http::header::ETAG, file_info.etag.parse()?),
-        (
-            http::header::LAST_MODIFIED,
-            HttpDate::from(file_info.modified).to_string().parse()?,
-        ),
-        (
-            http::header::CONTENT_DISPOSITION,
-            HeaderValue::from_static("inline"),
-        ),
-    ];
-
-    session.append_headers(&headers);
-
-    let (status, start, end) = match range {
-        Some(r) => {
-            session.append_headers(&[
-                (
-                    http::header::CONTENT_RANGE,
-                    format!("bytes {}-{}/{}", r.start, r.end - 1, total_size).parse()?,
-                ),
-                (
-                    http::header::CONTENT_LENGTH,
-                    HeaderValue::from_str(&(r.end - r.start).to_string())?,
-                ),
-            ]);
-            (StatusCode::PARTIAL_CONTENT, r.start, r.end)
-        }
-        None => {
-            session.append_header(
-                &http::header::CONTENT_LENGTH,
-                HeaderValue::from_str(&total_size.to_string())?,
-            );
-            (StatusCode::OK, 0, total_size)
-        }
-    };
-
-    if session.get_method() == &HTTPMethod::Head {
-        return session.send_status_eom(status).await;
-    }
-
-    let mmap = tokio::task::spawn_blocking({
-        let file_path = file_path.clone();
-        move || {
-            let file = std::fs::File::open(&file_path)?;
-            let mmap = unsafe { Mmap::map(&file)? };
-            Ok::<_, anyhow::Error>(mmap)
-        }
-    })
-    .await??;
-
-    session.send_status(status).await?;
-
-    let mut offset = start as usize;
-    let end = end as usize;
-
-    while offset < end {
-        let chunk_end = (offset + CHUNK_SIZE).min(end);
-        let chunk = Bytes::copy_from_slice(&mmap[offset..chunk_end]);
-        session.send_body(chunk, chunk_end == end).await?;
-        offset = chunk_end;
-
-        if total_size > 1 << 20 && (offset / CHUNK_SIZE) % 64 == 0 {
-            tokio::task::yield_now().await;
-        }
-    }
-
-    session.send_eom().await
-}
-
-type EncoderFn = Box<
-    dyn Fn(Bytes) -> std::pin::Pin<Box<dyn Future<Output = anyhow::Result<Bytes>> + Send>>
-        + Send
-        + Sync,
->;
-
-async fn try_precompressed(
-    session: &mut Session,
-    file_info: &FileInfo,
-    encoding: &EncodingType,
-) -> anyhow::Result<Option<()>> {
-    let parent = file_info
-        .path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("Invalid path"))?;
-    let filename = file_info
-        .path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| anyhow::anyhow!("Invalid UTF-8 filename"))?;
-
-    let (ext, encoder_fn, header_val): (&str, EncoderFn, &str) = match encoding {
-        EncodingType::Gzip => (
-            "gz",
-            Box::new(|d| Box::pin(compress::encode_gzip(d))),
-            "gzip",
-        ),
-        EncodingType::Br => (
-            "br",
-            Box::new(|d| Box::pin(compress::encode_brotli(d, 4096, 9, 18))),
-            "br",
-        ),
-        EncodingType::Zstd => (
-            "zstd",
-            Box::new(|d| Box::pin(compress::encode_zstd(d, 9))),
-            "zstd",
-        ),
-        EncodingType::None => return Ok(None),
-    };
-
-    let com_path = parent.join(ext).join(format!("{filename}.{ext}"));
-
-    if let Ok(_meta) = tokio::fs::metadata(&com_path).await {
-        session.append_header(
-            &http::header::CONTENT_ENCODING,
-            HeaderValue::from_static(header_val),
-        );
-        // let the caller mmap and stream it
-        return Ok(None);
-    }
-
-    if file_info.size > CHUNK_SIZE as u64 {
-        return Ok(None);
-    }
-
-    let buffer = Bytes::copy_from_slice(get_file_buffer(&file_info.path).await?.as_slice());
-    let compressed = encoder_fn(buffer).await?;
 
     session.append_headers(&[
-        (
-            http::header::CONTENT_ENCODING,
-            HeaderValue::from_static(header_val),
-        ),
-        (
-            http::header::CONTENT_LENGTH,
-            HeaderValue::from_str(&compressed.len().to_string())?,
-        ),
         (
             http::header::CONTENT_TYPE,
             HeaderValue::from_str(file_info.mime_type.as_ref())?,
         ),
+        (http::header::ETAG, HeaderValue::from_str(&file_info.etag)?),
         (
             http::header::LAST_MODIFIED,
             HeaderValue::from_str(&HttpDate::from(file_info.modified).to_string())?,
         ),
-        (http::header::ETAG, HeaderValue::from_str(&file_info.etag)?),
         (
             http::header::CONTENT_DISPOSITION,
             HeaderValue::from_static("inline"),
         ),
     ]);
 
-    session.send_status(StatusCode::OK).await?;
-    session.send_body(compressed, true).await?;
-    session.send_eom().await?;
+    let (status, start, end) = if let Some(r) = range {
+        let content_length = r.end - r.start;
+        session.append_headers(&[
+            (
+                http::header::CONTENT_RANGE,
+                HeaderValue::from_str(&format!("bytes {}-{}/{}", r.start, r.end - 1, total_size))?,
+            ),
+            (
+                http::header::CONTENT_LENGTH,
+                HeaderValue::from_str(&content_length.to_string())?,
+            ),
+        ]);
+        (StatusCode::PARTIAL_CONTENT, r.start, r.end)
+    } else {
+        session.append_headers(&[(
+            http::header::CONTENT_LENGTH,
+            HeaderValue::from_str(&total_size.to_string())?,
+        )]);
+        (StatusCode::OK, 0, total_size)
+    };
 
-    Ok(Some(()))
+    if session.get_method() == &HTTPMethod::Head {
+        session.send_status_eom(status).await?;
+        return Ok(());
+    }
+    let mmap = tokio::task::spawn_blocking({
+        let file_path = file_path.clone(); // if needed
+        move || {
+            let std_file = std::fs::File::open(&file_path)?;
+            let mmap = unsafe { Mmap::map(&std_file)? };
+            drop(std_file);
+            anyhow::Ok(mmap)
+        }
+    })
+    .await??;
+
+    session.send_status(status).await?;
+
+    let total_size = mmap.len();
+    let mut offset = start as usize;
+    let end = end as usize;
+
+    while offset < end {
+        let chunk_end = (offset + CHUNK_SIZE).min(end);
+
+        let chunk_bytes = Bytes::copy_from_slice(&mmap[offset..chunk_end]);
+
+        session.send_body(chunk_bytes, chunk_end == end).await?;
+
+        offset = chunk_end;
+
+        if total_size > (1 << 20) && (offset / CHUNK_SIZE) % 64 == 0 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    session.send_eom().await
 }
 
 pub fn load_file_cache(capacity: u64, ttl: Option<std::time::Duration>) -> FileCache {
