@@ -18,7 +18,7 @@ endif()
 # Language standards
 option(SIB_BUILD_BENCH "Build benchmarks" ON)
 option(SIB_BUILD_TEST "Build tests" ON)
-option(SIB_NET_HTTP "Enable HTTP3/2/1.1 server based on Facebook's Proxygen" ON)
+option(SIB_NET_PROXYGEN "Enable HTTP3/2/1.1 server based on Facebook's Proxygen" ON)
 option(SIB_NET_TCP "Enable TCP networking" OFF)
 option(SIB_NET_UDP "Enable UDP networking" OFF)
 option(SIB_DB_FDB "Enable FoundationDB" ON)
@@ -84,7 +84,7 @@ if(NOT EXISTS "${PROXYGEN_DEPS}" OR
    NOT EXISTS "${PROXYGEN_ROOT}/proxygen/_build/proxygen/httpserver/libproxygenhttpserver.a")
   message(STATUS "Running build.sh with build type: ${CMAKE_BUILD_TYPE}...")
   execute_process(
-    COMMAND bash build.sh ${CMAKE_BUILD_TYPE} ${FOLLY_VERSION} ${SIB_NET_HTTP}
+    COMMAND bash build.sh ${CMAKE_BUILD_TYPE} ${FOLLY_VERSION} ${SIB_NET_PROXYGEN}
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/dep
     RESULT_VARIABLE PROXYGEN_SCRIPT_RESULT
   )
@@ -138,7 +138,7 @@ find_package(ZLIB REQUIRED)
 find_package(OpenSSL REQUIRED)
 
 # Collect source files
-if (SIB_NET_HTTP)
+if (SIB_NET_PROXYGEN)
   file(GLOB_RECURSE PROXYGEN_HQ
     ${PROXYGEN_ROOT}/proxygen/httpserver/samples/hq/FizzContext.cpp
     ${PROXYGEN_ROOT}/proxygen/httpserver/samples/hq/HQCommandLine.cpp
@@ -157,7 +157,7 @@ add_library(${PROJECT_NAME}
   ${NETWORK_FILES}
   ${DATABASE_FILES}
   ${SYSTEM_FILES}
-  $<$<BOOL:${SIB_NET_HTTP}>:${PROXYGEN_HQ}>
+  $<$<BOOL:${SIB_NET_PROXYGEN}>:${PROXYGEN_HQ}>
 )
 
 # Compile definitions
@@ -226,7 +226,7 @@ elseif(UNIX)
   list(APPEND LIBS atomic unwind iberty fdb_c)
 endif()
 
-if(SIB_NET_HTTP)
+if(SIB_NET_PROXYGEN)
   list(APPEND LIBS
     ${PROXYGEN_ROOT}/proxygen/_build/proxygen/httpclient/samples/curl/libproxygencurl.a
     ${PROXYGEN_ROOT}/proxygen/_build/proxygen/httpserver/libproxygenhttpserver.a

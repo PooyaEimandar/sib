@@ -16,7 +16,7 @@
   SPDX-License-Identifier: MPL-2.0
 */
 
-// #ifdef SIB_NET_HTTP
+#ifdef SIB_NET_PROXYGEN
 
 #pragma once
 
@@ -55,36 +55,36 @@ struct handler_factory : public proxygen::RequestHandlerFactory {
   handler_fn handler_;
 };
 
-struct h2_server {
-  h2_server(proxygen::HTTPServerOptions&& p_param) : param_(std::move(p_param)) {}
-  ~h2_server() = default;
+struct s_h2_server {
+  s_h2_server(proxygen::HTTPServerOptions&& p_param) : param_(std::move(p_param)) {}
+  ~s_h2_server() = default;
 
-  h2_server(h2_server&&) noexcept = default;
-  auto operator=(h2_server&&) noexcept -> h2_server& = default;
-  h2_server(const h2_server&) = delete;
-  auto operator=(h2_server&) -> h2_server& = delete;
+  s_h2_server(s_h2_server&&) noexcept = default;
+  auto operator=(s_h2_server&&) noexcept -> s_h2_server& = default;
+  s_h2_server(const s_h2_server&) = delete;
+  auto operator=(s_h2_server&) -> s_h2_server& = delete;
 
-  auto set_chain(const std::string_view& p_chain) -> h2_server& {
+  auto set_chain(const std::string_view& p_chain) -> s_h2_server& {
     chain_path_ = p_chain;
     return *this;
   }
 
-  auto set_cert(const std::string_view& p_cert) -> h2_server& {
+  auto set_cert(const std::string_view& p_cert) -> s_h2_server& {
     cert_path_ = p_cert;
     return *this;
   }
 
-  auto set_key(const std::string_view& p_key) -> h2_server& {
+  auto set_key(const std::string_view& p_key) -> s_h2_server& {
     key_path_ = p_key;
     return *this;
   }
 
-  auto set_domains(std::vector<std::string>&& p_domains) -> h2_server& {
+  auto set_domains(std::vector<std::string>&& p_domains) -> s_h2_server& {
     domains_ = std::move(p_domains);
     return *this;
   }
 
-  auto set_ips(std::vector<proxygen::HTTPServer::IPConfig>&& p_ip_configs) -> h2_server& {
+  auto set_ips(std::vector<proxygen::HTTPServer::IPConfig>&& p_ip_configs) -> s_h2_server& {
     ip_configs_ = std::move(p_ip_configs);
     return *this;
   }
@@ -94,7 +94,7 @@ struct h2_server {
       return S_ERROR(std::errc::already_connected, "h2 server is already started");
     }
     if (!p_handler) {
-      return S_ERROR(std::errc::invalid_argument, "invalid handler passed to h2_server::start");
+      return S_ERROR(std::errc::invalid_argument, "invalid handler passed to s_h2_server::start");
     }
 
     // check certs are exists
@@ -152,21 +152,24 @@ struct h2_server {
   std::unique_ptr<proxygen::HTTPServer> server_;
 };
 
-struct h3_server {
-  h3_server(quic::samples::HQToolServerParams&& p_param) : param_(std::move(p_param)) {}
-  ~h3_server() = default;
+struct s_h3_server {
+  s_h3_server(quic::samples::HQToolServerParams&& p_param) : param_(std::move(p_param)) {}
+  ~s_h3_server() = default;
 
-  h3_server(h3_server&&) noexcept = default;
-  auto operator=(h3_server&&) noexcept -> h3_server& = default;
-  h3_server(const h3_server&) = delete;
-  auto operator=(h3_server&) -> h3_server& = delete;
+  s_h3_server(s_h3_server&&) noexcept = default;
+  auto operator=(s_h3_server&&) noexcept -> s_h3_server& = default;
+  s_h3_server(const s_h3_server&) = delete;
+  auto operator=(s_h3_server&) -> s_h3_server& = delete;
+
+ private:
+  friend struct s_proxygen_server;
 
   auto start(handler_fn&& p_handler) -> s_result<int> {
     if (server_) {
       return S_ERROR(std::errc::already_connected, "h3 server is already started");
     }
     if (!p_handler) {
-      return S_ERROR(std::errc::invalid_argument, "null handler passed to h3_server::start");
+      return S_ERROR(std::errc::invalid_argument, "null handler passed to s_h3_server::start");
     }
 
     try {
@@ -216,19 +219,18 @@ struct h3_server {
     }
   }
 
- private:
   std::unique_ptr<folly::Baton<>> baton;
   quic::samples::HQToolServerParams param_{};
   std::unique_ptr<quic::samples::HQServer> server_;
 };
 
-struct s_server : public std::enable_shared_from_this<s_server> {
-  s_server(s_server&&) = default;
-  auto operator=(s_server&&) -> s_server& = default;
-  s_server(const s_server&) = delete;
-  auto operator=(s_server&) -> s_server& = delete;
+struct s_proxygen_server : public std::enable_shared_from_this<s_proxygen_server> {
+  s_proxygen_server(s_proxygen_server&&) = default;
+  auto operator=(s_proxygen_server&&) -> s_proxygen_server& = default;
+  s_proxygen_server(const s_proxygen_server&) = delete;
+  auto operator=(s_proxygen_server&) -> s_proxygen_server& = delete;
 
-  ~s_server() {
+  ~s_proxygen_server() {
     if (h2_) {
       h2_->stop();
     }
@@ -237,16 +239,16 @@ struct s_server : public std::enable_shared_from_this<s_server> {
     }
   }
 
-  static auto make() -> std::shared_ptr<s_server> {
-    return std::shared_ptr<s_server>(new s_server());
+  static auto make() -> std::shared_ptr<s_proxygen_server> {
+    return std::shared_ptr<s_proxygen_server>(new s_proxygen_server());
   }
 
-  auto set_num_threads(uint32_t p_num) -> s_server& {
+  auto set_num_threads(uint32_t p_num) -> s_proxygen_server& {
     num_threads_ = p_num;
     return *this;
   }
 
-  auto set_h2(h2_server&& p_h2) -> s_server& {
+  auto set_h2(s_h2_server&& p_h2) -> s_proxygen_server& {
     if (h2_) {
       h2_->stop();
       h2_.reset();
@@ -255,12 +257,12 @@ struct s_server : public std::enable_shared_from_this<s_server> {
     return *this;
   }
 
-  auto set_h3(quic::samples::HQToolServerParams&& p_param) -> s_server& {
+  auto set_h3(quic::samples::HQToolServerParams&& p_param) -> s_proxygen_server& {
     if (h3_) {
       h3_->stop();
       h3_.reset();
     }
-    h3_ = h3_server(std::move(p_param));
+    h3_ = s_h3_server(std::move(p_param));
     return *this;
   }
 
@@ -296,13 +298,13 @@ struct s_server : public std::enable_shared_from_this<s_server> {
   }
 
  private:
-  s_server() = default;
+  s_proxygen_server() = default;
 
   uint16_t num_threads_ = 0;
-  std::optional<h2_server> h2_;
-  std::optional<h3_server> h3_;
+  std::optional<s_h2_server> h2_;
+  std::optional<s_h3_server> h3_;
 };
 
 } // namespace sib::network::http
 
-// #endif // SIB_NET_HTTP
+#endif // SIB_NET_PROXYGEN
