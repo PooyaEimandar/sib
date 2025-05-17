@@ -16,7 +16,7 @@
   SPDX-License-Identifier: MPL-2.0
 */
 
-#ifdef SIB_NET_PROXYGEN
+// #ifdef SIB_NET_PROXYGEN
 
 #pragma once
 
@@ -39,7 +39,7 @@ namespace sib::network::http {
 using handler_fn = quic::samples::HTTPTransactionHandlerProvider;
 
 struct handler_factory : public proxygen::RequestHandlerFactory {
-  explicit handler_factory(handler_fn p_handler) : handler_(std::move(p_handler)) {}
+  explicit handler_factory(handler_fn&& p_handler) : handler_(std::move(p_handler)) {}
 
   void onServerStart([[maybe_unused]] folly::EventBase* p_evb) noexcept override {}
 
@@ -48,7 +48,13 @@ struct handler_factory : public proxygen::RequestHandlerFactory {
   auto onRequest(
     [[maybe_unused]] proxygen::RequestHandler* p_handler,
     proxygen::HTTPMessage* p_http_req) noexcept -> proxygen::RequestHandler* override {
-    return new proxygen::HTTPTransactionHandlerAdaptor(handler_(p_http_req));
+    try {
+      // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+      return new proxygen::HTTPTransactionHandlerAdaptor(handler_(p_http_req));
+    } catch (const std::exception& p_exc) {
+      XLOG(ERR) << "Failed to create HTTPTransactionHandlerAdaptor because:" << p_exc.what();
+      return nullptr;
+    }
   }
 
  private:
@@ -56,7 +62,7 @@ struct handler_factory : public proxygen::RequestHandlerFactory {
 };
 
 struct s_h2_server {
-  s_h2_server(proxygen::HTTPServerOptions&& p_param) : param_(std::move(p_param)) {}
+  explicit s_h2_server(proxygen::HTTPServerOptions&& p_param) : param_(std::move(p_param)) {}
   ~s_h2_server() = default;
 
   s_h2_server(s_h2_server&&) noexcept = default;
@@ -89,12 +95,11 @@ struct s_h2_server {
     return *this;
   }
 
+ private:
+  friend struct s_proxygen_server;
   auto start(handler_fn&& p_handler) -> s_result<int> {
     if (server_) {
       return S_ERROR(std::errc::already_connected, "h2 server is already started");
-    }
-    if (!p_handler) {
-      return S_ERROR(std::errc::invalid_argument, "invalid handler passed to s_h2_server::start");
     }
 
     // check certs are exists
@@ -119,8 +124,8 @@ struct s_h2_server {
       ssl_config.clientCAFile = cert_path_;
       ssl_config.setCertificate(chain_path_, key_path_, "");
 
-      for (auto& ip : ip_configs_) {
-        ip.sslConfigs.emplace_back(ssl_config);
+      for (auto& ipc : ip_configs_) {
+        ipc.sslConfigs.emplace_back(ssl_config);
       }
 
       server_->bind(ip_configs_);
@@ -142,7 +147,6 @@ struct s_h2_server {
     return S_SUCCESS;
   }
 
- private:
   std::filesystem::path chain_path_;
   std::filesystem::path cert_path_;
   std::filesystem::path key_path_;
@@ -153,7 +157,7 @@ struct s_h2_server {
 };
 
 struct s_h3_server {
-  s_h3_server(quic::samples::HQToolServerParams&& p_param) : param_(std::move(p_param)) {}
+  explicit s_h3_server(quic::samples::HQToolServerParams&& p_param) : param_(std::move(p_param)) {}
   ~s_h3_server() = default;
 
   s_h3_server(s_h3_server&&) noexcept = default;
@@ -167,9 +171,6 @@ struct s_h3_server {
   auto start(handler_fn&& p_handler) -> s_result<int> {
     if (server_) {
       return S_ERROR(std::errc::already_connected, "h3 server is already started");
-    }
-    if (!p_handler) {
-      return S_ERROR(std::errc::invalid_argument, "null handler passed to s_h3_server::start");
     }
 
     try {
@@ -190,15 +191,28 @@ struct s_h3_server {
     return S_SUCCESS;
   }
 
+  auto stop() {
+    if (server_) {
+      server_->rejectNewConnections(true);
+      server_->stop();
+      server_.reset();
+    }
+    if (baton_) {
+      baton_->post();
+      baton_.reset();
+    }
+  }
+
   auto start_forever(handler_fn&& p_handler) -> s_result<int> {
     try {
       auto res = start(std::move(p_handler));
       if (!res) {
         return res;
       }
-      baton = std::make_unique<folly::Baton<>>();
-      baton->wait();
+      baton_ = std::make_unique<folly::Baton<>>();
+      baton_->wait();
     } catch (const std::exception& p_exc) {
+      stop();
       server_.reset();
       return S_ERROR(
         std::errc::operation_canceled,
@@ -207,19 +221,7 @@ struct s_h3_server {
     return S_SUCCESS;
   }
 
-  auto stop() {
-    if (baton) {
-      baton->post();
-      baton.reset();
-    }
-    if (server_) {
-      server_->rejectNewConnections(true);
-      server_->stop();
-      server_.reset();
-    }
-  }
-
-  std::unique_ptr<folly::Baton<>> baton;
+  std::unique_ptr<folly::Baton<>> baton_;
   quic::samples::HQToolServerParams param_{};
   std::unique_ptr<quic::samples::HQServer> server_;
 };
@@ -266,7 +268,10 @@ struct s_proxygen_server : public std::enable_shared_from_this<s_proxygen_server
     return *this;
   }
 
-  auto run_forever(sib::network::http::handler_fn p_handler) -> s_result<int> {
+  auto run_forever(sib::network::http::handler_fn&& p_handler) -> s_result<int> {
+    if (!p_handler) {
+      return S_ERROR(std::errc::operation_canceled, "missing handler for http server.");
+    }
     if (!folly::getUnsafeMutableGlobalCPUExecutor()) {
       if (num_threads_ == 0) {
         num_threads_ = std::thread::hardware_concurrency();
@@ -275,13 +280,14 @@ struct s_proxygen_server : public std::enable_shared_from_this<s_proxygen_server
         num_threads_, std::make_shared<folly::NamedThreadFactory>("StaticDiskIOThread"));
       folly::setUnsafeMutableGlobalCPUExecutor(pool);
     }
-
+    // make sure the handler is shared
     if (h2_ && h3_) {
-      std::thread h2_thread([handler = p_handler, this]() mutable {
-        h2_->start(std::move(handler));
+      auto shared_handler = std::make_shared<handler_fn>(std::move(p_handler));
+      std::thread h2_thread([p_handler = shared_handler, this]() mutable {
+        h2_->start(std::move(*p_handler));
       });
 
-      auto result = h3_->start(std::move(p_handler));
+      auto result = h3_->start(std::move(*shared_handler));
       h2_thread.join();
       return result;
     }
@@ -307,4 +313,4 @@ struct s_proxygen_server : public std::enable_shared_from_this<s_proxygen_server
 
 } // namespace sib::network::http
 
-#endif // SIB_NET_PROXYGEN
+// #endif // SIB_NET_PROXYGEN
