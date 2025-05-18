@@ -16,7 +16,7 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 # Language standards
-option(SIB_BUILD_BENCH "Build benchmarks" ON)
+option(SIB_BUILD_BENCH "Build benchmarks" OFF)
 option(SIB_BUILD_TEST "Build tests" ON)
 option(SIB_NET_PROXYGEN "Enable HTTP3/2/1.1 server based on Facebook's Proxygen" ON)
 option(SIB_NET_TCP "Enable TCP networking" OFF)

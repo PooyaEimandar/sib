@@ -26,35 +26,33 @@
 // NOLINTBEGIN (modernize-use-trailing-return-type)
 
 using s_proxygen_server = sib::network::http::s_proxygen_server;
+using s_h2_server = sib::network::http::s_h2_server;
 
 TEST(SibHttpServerTest, NeitherH2NorH3ReturnsError) {
-  auto server = s_proxygen_server::make();
+  proxygen::HTTPServerOptions opts;
+  opts.threads = 1;
+  opts.shutdownOn = {SIGINT};
 
-  auto result = server->run_forever(
-    [](proxygen::HTTPMessage*) -> proxygen::HTTPTransactionHandler* { return nullptr; });
+  std::vector<proxygen::HTTPServer::IPConfig> ip_configs = {
+    {folly::SocketAddress("127.0.0.1", 8443), proxygen::HTTPServer::Protocol::HTTP2, nullptr}};
+
+  // Configure H2 server
+  s_h2_server h2(std::move(opts));
+  h2.set_domains({"localhost"})
+    .set_chain("")
+    .set_cert("")
+    .set_key("")
+    .set_ips(std::move(ip_configs));
+
+  auto result =
+    s_proxygen_server::make()
+      ->set_num_threads(1)
+      ->set_h2(std::move(h2))
+      ->run_forever([](proxygen::HTTPMessage*) -> proxygen::HTTPTransactionHandler* {
+        return nullptr; // No-op request handler
+      });
+
   EXPECT_TRUE(result.hasError());
 }
-
-// TEST(HttpServerTest, StartsAndRespondsH2) {
-//   proxygen::HTTPServerOptions h2_opt{};
-//   folly::SocketAddress addr("::1", 8080);
-//   auto ip_configs = std::vector<proxygen::HTTPServer::IPConfig>{
-//     {addr, proxygen::HTTPServer::Protocol::HTTP2, nullptr}};
-
-//   auto h2_server = sib::network::http::s_h2_server(std::move(h2_opt));
-
-//   h2_server = std::move(h2_server.set_domains({"localhost"}).set_ips(std::move(ip_configs)));
-
-//   // Setup server
-//   auto result =
-//     s_server::make()
-//       ->set_h2(std::move(h2_server))
-//       .set_num_threads(1)
-//       .run_forever([](proxygen::HTTPMessage*) -> proxygen::HTTPTransactionHandler* {
-//         return nullptr;
-//       });
-
-//   EXPECT_TRUE(result.hasValue());
-// }
 
 // NOLINTEND

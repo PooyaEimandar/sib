@@ -15,6 +15,9 @@ target_include_directories(sib_bench
   PRIVATE
     /usr/local/include
     ${Boost_INCLUDE_DIRS}
+    ${PROXYGEN_ROOT}
+    ${PROXYGEN_ROOT}/proxygen/_build/generated
+    ${PROXYGEN_DEPS}/include
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/dep/proxygen/proxygen/_build/deps/include
     $<$<AND:$<BOOL:${SIB_DB_FDB}>,$<PLATFORM_ID:Darwin>>:/usr/local/include/foundationdb>
@@ -36,5 +39,7 @@ target_link_directories(sib_bench
 target_link_libraries(sib_bench
   PRIVATE
     folly
+    OpenSSL::SSL 
+    OpenSSL::Crypto
     ${PROJECT_NAME}
 )

@@ -267,29 +267,29 @@ struct s_proxygen_server : public std::enable_shared_from_this<s_proxygen_server
     return std::shared_ptr<s_proxygen_server>(new s_proxygen_server());
   }
 
-  auto set_num_threads(uint32_t p_num) -> s_proxygen_server& {
+  auto set_num_threads(uint32_t p_num) -> std::shared_ptr<s_proxygen_server> {
     num_threads_ = p_num;
-    return *this;
+    return shared_from_this();
   }
 
   // NOLINTNEXTLINE(cppcoreguidelines-rvalue-reference-param-not-moved)
-  auto set_h2(s_h2_server&& p_h2) -> s_proxygen_server& {
+  auto set_h2(s_h2_server&& p_h2) -> std::shared_ptr<s_proxygen_server> {
     if (h2_) {
       h2_->stop();
       h2_.reset();
     }
     h2_ = std::move(p_h2);
-    return *this;
+    return shared_from_this();
   }
 
   // NOLINTNEXTLINE(cppcoreguidelines-rvalue-reference-param-not-moved)
-  auto set_h3(quic::samples::HQToolServerParams&& p_param) -> s_proxygen_server& {
+  auto set_h3(quic::samples::HQToolServerParams&& p_param) -> std::shared_ptr<s_proxygen_server> {
     if (h3_) {
       h3_->stop();
       h3_.reset();
     }
     h3_ = s_h3_server(std::move(p_param));
-    return *this;
+    return shared_from_this();
   }
 
   // NOLINTNEXTLINE(cppcoreguidelines-rvalue-reference-param-not-moved)

@@ -22,6 +22,7 @@
 #include <folly/FBString.h>
 #include <folly/Format.h>
 #include <folly/init/Init.h>
+#include <folly/io/IOBuf.h>
 
 #include <sib/system/s_defer.hpp>
 #include <sib/system/s_trace.hpp>

@@ -21,6 +21,7 @@
 #include <sib/sib.hpp>
 
 #include "database.hpp"
+#include "network.hpp"
 #include "system.hpp"
 
 auto main(int p_argc, char** p_argv) -> int {
