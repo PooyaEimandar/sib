@@ -39,6 +39,7 @@ namespace sib::network::http {
 using handler_fn = quic::samples::HTTPTransactionHandlerProvider;
 
 struct handler_factory : public proxygen::RequestHandlerFactory {
+  // NOLINTNEXTLINE(cppcoreguidelines-rvalue-reference-param-not-moved)
   explicit handler_factory(handler_fn&& p_handler) : handler_(std::move(p_handler)) {}
 
   void onServerStart([[maybe_unused]] folly::EventBase* p_evb) noexcept override {}
@@ -62,7 +63,11 @@ struct handler_factory : public proxygen::RequestHandlerFactory {
 };
 
 struct s_h2_server {
+  // NOLINTBEGIN(cppcoreguidelines-rvalue-reference-param-not-moved,
+  // cppcoreguidelines-pro-type-member-init,hicpp-member-init)
   explicit s_h2_server(proxygen::HTTPServerOptions&& p_param) : param_(std::move(p_param)) {}
+  // NOLINTEND
+
   ~s_h2_server() = default;
 
   s_h2_server(s_h2_server&&) noexcept = default;
@@ -85,18 +90,28 @@ struct s_h2_server {
     return *this;
   }
 
+  // NOLINTNEXTLINE(cppcoreguidelines-rvalue-reference-param-not-moved)
   auto set_domains(std::vector<std::string>&& p_domains) -> s_h2_server& {
     domains_ = std::move(p_domains);
     return *this;
   }
 
+  // NOLINTNEXTLINE(cppcoreguidelines-rvalue-reference-param-not-moved)
   auto set_ips(std::vector<proxygen::HTTPServer::IPConfig>&& p_ip_configs) -> s_h2_server& {
     ip_configs_ = std::move(p_ip_configs);
     return *this;
   }
 
+  // NOLINTNEXTLINE(cppcoreguidelines-rvalue-reference-param-not-moved)
+  auto set_alpn_protocols(std::list<std::string>&& p_alpn_protocols) -> s_h2_server& {
+    alpn_protocols_ = std::move(p_alpn_protocols);
+    return *this;
+  }
+
  private:
   friend struct s_proxygen_server;
+
+  // NOLINTNEXTLINE(cppcoreguidelines-rvalue-reference-param-not-moved)
   auto start(handler_fn&& p_handler) -> s_result<int> {
     if (server_) {
       return S_ERROR(std::errc::already_connected, "h2 server is already started");
@@ -120,7 +135,7 @@ struct s_h2_server {
       ssl_config.isDefault = true;
       ssl_config.domains = std::move(domains_);
       ssl_config.clientVerification = folly::SSLContext::VerifyClientCertificate::IF_PRESENTED;
-      ssl_config.setNextProtocols({"h2", "http/1.1"});
+      ssl_config.setNextProtocols(alpn_protocols_);
       ssl_config.clientCAFile = cert_path_;
       ssl_config.setCertificate(chain_path_, key_path_, "");
 
@@ -139,6 +154,7 @@ struct s_h2_server {
     }
   }
 
+  // NOLINTNEXTLINE(readability-convert-member-functions-to-static)
   auto stop() -> s_result<int> {
     if (server_) {
       server_->stop();
@@ -150,13 +166,16 @@ struct s_h2_server {
   std::filesystem::path chain_path_;
   std::filesystem::path cert_path_;
   std::filesystem::path key_path_;
-  std::vector<std::string> domains_;
-  std::vector<proxygen::HTTPServer::IPConfig> ip_configs_;
+  std::vector<std::string> domains_ = {"localhost"};
+  std::list<std::string> alpn_protocols_ = {"h2", "http/1.1"};
+  std::vector<proxygen::HTTPServer::IPConfig> ip_configs_ = {
+    {folly::SocketAddress("::1", 8443), proxygen::HTTPServer::Protocol::HTTP2, nullptr}};
   proxygen::HTTPServerOptions param_{};
   std::unique_ptr<proxygen::HTTPServer> server_;
 };
 
 struct s_h3_server {
+  // NOLINTNEXTLINE(cppcoreguidelines-rvalue-reference-param-not-moved,cppcoreguidelines-pro-type-member-init,hicpp-member-init)
   explicit s_h3_server(quic::samples::HQToolServerParams&& p_param) : param_(std::move(p_param)) {}
   ~s_h3_server() = default;
 
@@ -168,6 +187,7 @@ struct s_h3_server {
  private:
   friend struct s_proxygen_server;
 
+  // NOLINTNEXTLINE(cppcoreguidelines-rvalue-reference-param-not-moved,readability-convert-member-functions-to-static)
   auto start(handler_fn&& p_handler) -> s_result<int> {
     if (server_) {
       return S_ERROR(std::errc::already_connected, "h3 server is already started");
@@ -191,6 +211,7 @@ struct s_h3_server {
     return S_SUCCESS;
   }
 
+  // NOLINTNEXTLINE(readability-convert-member-functions-to-static)
   auto stop() {
     if (server_) {
       server_->rejectNewConnections(true);
@@ -203,6 +224,7 @@ struct s_h3_server {
     }
   }
 
+  // NOLINTNEXTLINE(cppcoreguidelines-rvalue-reference-param-not-moved)
   auto start_forever(handler_fn&& p_handler) -> s_result<int> {
     try {
       auto res = start(std::move(p_handler));
@@ -250,6 +272,7 @@ struct s_proxygen_server : public std::enable_shared_from_this<s_proxygen_server
     return *this;
   }
 
+  // NOLINTNEXTLINE(cppcoreguidelines-rvalue-reference-param-not-moved)
   auto set_h2(s_h2_server&& p_h2) -> s_proxygen_server& {
     if (h2_) {
       h2_->stop();
@@ -259,6 +282,7 @@ struct s_proxygen_server : public std::enable_shared_from_this<s_proxygen_server
     return *this;
   }
 
+  // NOLINTNEXTLINE(cppcoreguidelines-rvalue-reference-param-not-moved)
   auto set_h3(quic::samples::HQToolServerParams&& p_param) -> s_proxygen_server& {
     if (h3_) {
       h3_->stop();
@@ -268,6 +292,7 @@ struct s_proxygen_server : public std::enable_shared_from_this<s_proxygen_server
     return *this;
   }
 
+  // NOLINTNEXTLINE(cppcoreguidelines-rvalue-reference-param-not-moved)
   auto run_forever(sib::network::http::handler_fn&& p_handler) -> s_result<int> {
     if (!p_handler) {
       return S_ERROR(std::errc::operation_canceled, "missing handler for http server.");
@@ -278,7 +303,7 @@ struct s_proxygen_server : public std::enable_shared_from_this<s_proxygen_server
       }
       auto pool = std::make_shared<folly::CPUThreadPoolExecutor>(
         num_threads_, std::make_shared<folly::NamedThreadFactory>("StaticDiskIOThread"));
-      folly::setUnsafeMutableGlobalCPUExecutor(pool);
+      folly::setUnsafeMutableGlobalCPUExecutor(std::static_pointer_cast<folly::Executor>(pool));
     }
     // make sure the handler is shared
     if (h2_ && h3_) {

@@ -27,13 +27,13 @@
 
 using s_proxygen_server = sib::network::http::s_proxygen_server;
 
-// TEST(SibHttpServerTest, NeitherH2NorH3ReturnsError) {
-//   auto server = s_proxygen_server::make();
+TEST(SibHttpServerTest, NeitherH2NorH3ReturnsError) {
+  auto server = s_proxygen_server::make();
 
-//   auto result = server->run_forever(
-//     [](proxygen::HTTPMessage*) -> proxygen::HTTPTransactionHandler* { return nullptr; });
-//   EXPECT_TRUE(result.hasError());
-// }
+  auto result = server->run_forever(
+    [](proxygen::HTTPMessage*) -> proxygen::HTTPTransactionHandler* { return nullptr; });
+  EXPECT_TRUE(result.hasError());
+}
 
 // TEST(HttpServerTest, StartsAndRespondsH2) {
 //   proxygen::HTTPServerOptions h2_opt{};
@@ -43,18 +43,18 @@ using s_proxygen_server = sib::network::http::s_proxygen_server;
 
 //   auto h2_server = sib::network::http::s_h2_server(std::move(h2_opt));
 
-//   // h2_server = std::move(h2_server.set_domains({"localhost"}).set_ips(std::move(ip_configs)));
+//   h2_server = std::move(h2_server.set_domains({"localhost"}).set_ips(std::move(ip_configs)));
 
-//   // // Setup server
-//   // auto result =
-//   //   s_server::make()
-//   //     ->set_h2(std::move(h2_server))
-//   //     .set_num_threads(1)
-//   //     .run_forever([](proxygen::HTTPMessage*) -> proxygen::HTTPTransactionHandler* {
-//   //       return nullptr;
-//   //     });
+//   // Setup server
+//   auto result =
+//     s_server::make()
+//       ->set_h2(std::move(h2_server))
+//       .set_num_threads(1)
+//       .run_forever([](proxygen::HTTPMessage*) -> proxygen::HTTPTransactionHandler* {
+//         return nullptr;
+//       });
 
-//   // EXPECT_TRUE(result.hasValue());
+//   EXPECT_TRUE(result.hasValue());
 // }
 
 // NOLINTEND

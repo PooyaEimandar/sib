@@ -25,15 +25,15 @@ else()
 endif()
 
 if(NOT CLANG_FORMAT_BIN)
-  message(FATAL_ERROR "❌ clang-format not found.")
+  message(FATAL_ERROR "Clang-format not found.")
 endif()
 
 if(NOT CLANG_TIDY_BIN)
-  message(FATAL_ERROR "❌ clang-tidy not found.")
+  message(FATAL_ERROR "Clang-tidy not found.")
 endif()
 
-message(STATUS "✅ clang-format: ${CLANG_FORMAT_BIN}")
-message(STATUS "✅ clang-tidy: ${CLANG_TIDY_BIN}")
+message(STATUS "clang-format: ${CLANG_FORMAT_BIN}")
+message(STATUS "clang-tidy: ${CLANG_TIDY_BIN}")
 
 file(GLOB_RECURSE ALL_SOURCE_FILES CONFIGURE_DEPENDS
   ${CMAKE_SOURCE_DIR}/sib/*.[ch]pp
@@ -62,7 +62,7 @@ file(APPEND ${CLANG_FORMAT_SCRIPT}
 
 add_custom_target(clang-format-check
   COMMAND bash ${CLANG_FORMAT_SCRIPT}
-  COMMENT "✅ Incremental clang-format check"
+  COMMENT "Incremental clang-format check"
 )
 
 # -------------------------------
@@ -71,23 +71,32 @@ add_custom_target(clang-format-check
 set(CLANG_TIDY_STAMP ${CMAKE_BINARY_DIR}/.clang-tidy-stamp)
 set(CLANG_TIDY_SCRIPT ${CMAKE_BINARY_DIR}/check-tidy.sh)
 
+# Collect only files in sib/test and sib/bench
+file(GLOB_RECURSE TEST_AND_BENCH_FILES CONFIGURE_DEPENDS
+  ${CMAKE_SOURCE_DIR}/sib/test/*.[ch]pp
+  ${CMAKE_SOURCE_DIR}/sib/test/*.h
+  ${CMAKE_SOURCE_DIR}/sib/bench/*.[ch]pp
+  ${CMAKE_SOURCE_DIR}/sib/bench/*.h
+)
+
 file(WRITE ${CLANG_TIDY_SCRIPT} "#!/bin/bash\n")
 file(APPEND ${CLANG_TIDY_SCRIPT} "UPDATED=()\n")
-foreach(SRC ${ALL_SOURCE_FILES})
+foreach(SRC ${TEST_AND_BENCH_FILES})
   file(APPEND ${CLANG_TIDY_SCRIPT} "[ \"${SRC}\" -nt \"${CLANG_TIDY_STAMP}\" ] && UPDATED+=(\"${SRC}\")\n")
 endforeach()
 file(APPEND ${CLANG_TIDY_SCRIPT}
 "if [ \${#UPDATED[@]} -ne 0 ]; then\n"
-"  echo \"Running clang-tidy on modified files...\"\n"
-"  \"${CLANG_TIDY_BIN}\" \"\${UPDATED[@]}\" -p \"${CMAKE_BINARY_DIR}\" -header-filter=\"^${CMAKE_SOURCE_DIR}/sib/\" || exit 1\n"
+"  echo \"Running clang-tidy on test/bench files in parallel...\"\n"
+"  printf \"%s\\n\" \"\${UPDATED[@]}\" | \\\n"
+"    xargs -P\$(nproc) -n1 \"${CLANG_TIDY_BIN}\" -p \"${CMAKE_BINARY_DIR}\" -header-filter=\"^${CMAKE_SOURCE_DIR}/sib/(test|bench)/\" || exit 1\n"
 "  touch \"${CLANG_TIDY_STAMP}\"\n"
 "else\n"
-"  echo \"No tidy changes detected.\"\n"
+"  echo \"No tidy changes detected in test/bench.\"\n"
 "fi\n")
 
 add_custom_target(clang-tidy-all
   COMMAND bash ${CLANG_TIDY_SCRIPT}
-  COMMENT "🧠 Incremental clang-tidy check"
+  COMMENT "Parallel clang-tidy for test and bench files"
 )
 
 # -------------------------------
@@ -95,7 +104,7 @@ add_custom_target(clang-tidy-all
 # -------------------------------
 add_custom_target(code-quality-check ALL
   DEPENDS clang-format-check clang-tidy-all
-  COMMENT "🔧 Code quality checks before build"
+  COMMENT "Code quality checks before build"
 )
 
 # -------------------------------
