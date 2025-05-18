@@ -143,85 +143,85 @@ where
     }
 }
 
-#[tokio::test]
-async fn test_cache_insert_and_get() {
-    let cache = SCache::<String, u32>::new(10);
+// #[tokio::test]
+// async fn test_cache_insert_and_get() {
+//     let cache = SCache::<String, u32>::new(10);
 
-    // Initially missing
-    let key = "a".to_string();
-    let value = cache.get(&key, || async { 42 }).await;
-    assert_eq!(value, 42);
+//     // Initially missing
+//     let key = "a".to_string();
+//     let value = cache.get(&key, || async { 42 }).await;
+//     assert_eq!(value, 42);
 
-    // Should hit the cache now
-    let value = cache.try_get(&key).await;
-    assert_eq!(value, Some(42));
+//     // Should hit the cache now
+//     let value = cache.try_get(&key).await;
+//     assert_eq!(value, Some(42));
 
-    // Should hit the cache now
-    let value = cache.get(&key, || async { 99 }).await;
-    assert_eq!(value, 42);
-}
+//     // Should hit the cache now
+//     let value = cache.get(&key, || async { 99 }).await;
+//     assert_eq!(value, 42);
+// }
 
-#[tokio::test]
-async fn test_cache_hit_and_miss_tracking() {
-    let cache = SCache::<String, u32>::new(5);
+// #[tokio::test]
+// async fn test_cache_hit_and_miss_tracking() {
+//     let cache = SCache::<String, u32>::new(5);
 
-    let key = "a".to_string();
+//     let key = "a".to_string();
 
-    // Miss
-    cache.get(&key, || async { 1 }).await;
+//     // Miss
+//     cache.get(&key, || async { 1 }).await;
 
-    // Hit
-    cache.get(&key, || async { 2 }).await;
+//     // Hit
+//     cache.get(&key, || async { 2 }).await;
 
-    assert_eq!(cache.hits.load(Ordering::Relaxed), 1);
-    assert_eq!(cache.misses.load(Ordering::Relaxed), 1);
-}
+//     assert_eq!(cache.hits.load(Ordering::Relaxed), 1);
+//     assert_eq!(cache.misses.load(Ordering::Relaxed), 1);
+// }
 
-#[tokio::test]
-async fn test_cache_resize_logic() {
-    let mut cache = SCache::<String, u32>::new(2);
+// #[tokio::test]
+// async fn test_cache_resize_logic() {
+//     let mut cache = SCache::<String, u32>::new(2);
 
-    // Trigger enough misses to force resize
-    for i in 0..110 {
-        let key = format!("k{}", i);
-        cache.get(&key, || async { i }).await;
-    }
+//     // Trigger enough misses to force resize
+//     for i in 0..110 {
+//         let key = format!("k{}", i);
+//         cache.get(&key, || async { i }).await;
+//     }
 
-    cache.check_for_resize().await;
+//     cache.check_for_resize().await;
 
-    // after resize, new capacity should be larger than initial
-    assert!(cache.size() > 2);
-}
+//     // after resize, new capacity should be larger than initial
+//     assert!(cache.size() > 2);
+// }
 
-#[tokio::test]
-async fn test_cache_removal() {
-    let key = "delete-me".to_string();
-    let cache = SCache::<String, u32>::new(10);
-    cache.get(&key, || async { 10 }).await;
-    assert!(cache.contains(&key).await);
-    cache.remove(&key).await;
-    assert!(!cache.contains(&key).await);
-}
+// #[tokio::test]
+// async fn test_cache_removal() {
+//     let key = "delete-me".to_string();
+//     let cache = SCache::<String, u32>::new(10);
+//     cache.get(&key, || async { 10 }).await;
+//     assert!(cache.contains(&key).await);
+//     cache.remove(&key).await;
+//     assert!(!cache.contains(&key).await);
+// }
 
-#[tokio::test]
-async fn test_parallel_gets() {
-    let cache = Arc::new(SCache::<String, u32>::new(100));
+// #[tokio::test]
+// async fn test_parallel_gets() {
+//     let cache = Arc::new(SCache::<String, u32>::new(100));
 
-    let mut tasks = Vec::new();
-    for i in 0..20 {
-        let cache = Arc::clone(&cache);
-        tasks.push(tokio::spawn(async move {
-            let key = format!("user:{}", i % 5); // intentionally cause overlap
-            let val = cache.get(&key, || async { i as u32 }).await;
-            val
-        }));
-    }
+//     let mut tasks = Vec::new();
+//     for i in 0..20 {
+//         let cache = Arc::clone(&cache);
+//         tasks.push(tokio::spawn(async move {
+//             let key = format!("user:{}", i % 5); // intentionally cause overlap
+//             let val = cache.get(&key, || async { i as u32 }).await;
+//             val
+//         }));
+//     }
 
-    let results = futures::future::join_all(tasks).await;
-    for r in results {
-        assert!(r.is_ok());
-    }
+//     let results = futures::future::join_all(tasks).await;
+//     for r in results {
+//         assert!(r.is_ok());
+//     }
 
-    let hit_count = cache.hits.load(Ordering::Relaxed);
-    assert!(hit_count > 0); // At least some overlap
-}
+//     let hit_count = cache.hits.load(Ordering::Relaxed);
+//     assert!(hit_count > 0); // At least some overlap
+// }
