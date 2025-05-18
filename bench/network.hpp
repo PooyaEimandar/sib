@@ -69,6 +69,16 @@ BENCHMARK(s_proxygen_server_start_stop) {
   proxygen::HTTPServerOptions opts;
   opts.threads = 1;
   opts.shutdownOn = {SIGINT};
+  opts.idleTimeout = std::chrono::milliseconds(5000);
+  opts.enableContentCompression = false;
+  opts.h2cEnabled = false;
+  opts.listenBacklog = 65535;
+  opts.maxConcurrentIncomingStreams = 1000;
+  opts.initialReceiveWindow = 512 * 1024; // 512KB
+  opts.receiveStreamWindowSize = 512 * 1024;
+  opts.receiveSessionWindowSize = 4 * 1024 * 1024; // 4MB per session
+  opts.useZeroCopy = true;
+  opts.enableExHeaders = false;
 
   std::vector<proxygen::HTTPServer::IPConfig> ip_configs = {
     {folly::SocketAddress("127.0.0.1", 8443), proxygen::HTTPServer::Protocol::HTTP2, nullptr}};
