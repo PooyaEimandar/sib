@@ -75,17 +75,17 @@ struct s_h2_server {
   s_h2_server(const s_h2_server&) = delete;
   auto operator=(s_h2_server&) -> s_h2_server& = delete;
 
-  auto set_chain(const std::string_view& p_chain) -> s_h2_server& {
+  auto set_chain(const std::filesystem::path& p_chain) -> s_h2_server& {
     chain_path_ = p_chain;
     return *this;
   }
 
-  auto set_cert(const std::string_view& p_cert) -> s_h2_server& {
+  auto set_cert(const std::filesystem::path& p_cert) -> s_h2_server& {
     cert_path_ = p_cert;
     return *this;
   }
 
-  auto set_key(const std::string_view& p_key) -> s_h2_server& {
+  auto set_key(const std::filesystem::path& p_key) -> s_h2_server& {
     key_path_ = p_key;
     return *this;
   }
@@ -328,6 +328,21 @@ struct s_proxygen_server : public std::enable_shared_from_this<s_proxygen_server
 
     return S_ERROR(std::errc::operation_canceled, "Neither H2 nor H3 enabled.");
   }
+
+  void stop() {
+    if (h2_) {
+      h2_->stop();
+    }
+    if (h3_) {
+      h3_->stop();
+    }
+  }
+
+  [[nodiscard]] auto get_num_threads() const -> uint16_t { return num_threads_; }
+
+  [[nodiscard]] auto get_h2() const -> const s_h2_server* { return h2_ ? &*h2_ : nullptr; }
+
+  [[nodiscard]] auto get_h3() const -> const s_h3_server* { return h3_ ? &*h3_ : nullptr; }
 
  private:
   s_proxygen_server() = default;

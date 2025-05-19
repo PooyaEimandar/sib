@@ -83,20 +83,27 @@ BENCHMARK(s_proxygen_server_start_stop) {
   std::vector<proxygen::HTTPServer::IPConfig> ip_configs = {
     {folly::SocketAddress("0.0.0.0", 8443), proxygen::HTTPServer::Protocol::HTTP2, nullptr}};
 
+  auto cwd = std::filesystem::current_path();
   // Configure H2 server
   s_h2_server h2(std::move(opts));
   h2.set_domains({"localhost"})
-    .set_chain("/home/parallels/sib/dep/proxygen/proxygen/httpserver/tests/certs/ca_cert.pem")
-    .set_cert("/home/parallels/sib/dep/proxygen/proxygen/httpserver/tests/certs/ca_cert.pem")
-    .set_key("/home/parallels/sib/dep/proxygen/proxygen/httpserver/tests/certs/ca_key.pem")
+    .set_chain(cwd / "../dep/proxygen/proxygen/httpserver/tests/certs/ca_cert.pem")
+    .set_cert(cwd / "../dep/proxygen/proxygen/httpserver/tests/certs/ca_cert.pem")
+    .set_key(cwd / "../dep/proxygen/proxygen/httpserver/tests/certs/ca_key.pem")
     .set_ips(std::move(ip_configs));
 
-  auto result =
-    s_proxygen_server::make()
-      ->set_num_threads(1)
-      ->set_h2(std::move(h2))
-      ->run_forever(
-        []([[maybe_unused]] proxygen::HTTPMessage* p_req) -> proxygen::HTTPTransactionHandler* {
-          return new hello_handler();
-        });
+  auto server = s_proxygen_server::make()->set_num_threads(1)->set_h2(std::move(h2));
+
+  std::thread server_thread([server] {
+    server->run_forever(
+      []([[maybe_unused]] proxygen::HTTPMessage* p_req) -> proxygen::HTTPTransactionHandler* {
+        return new hello_handler();
+      });
+  });
+
+  // Wait for server to start and then stop it after 5 seconds
+  constexpr auto sleep_duration = std::chrono::seconds(5);
+  std::this_thread::sleep_for(sleep_duration);
+  server->stop();
+  server_thread.join();
 }
