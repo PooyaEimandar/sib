@@ -81,7 +81,7 @@ BENCHMARK(s_proxygen_server_start_stop) {
   opts.enableExHeaders = false;
 
   std::vector<proxygen::HTTPServer::IPConfig> ip_configs = {
-    {folly::SocketAddress("127.0.0.1", 8443), proxygen::HTTPServer::Protocol::HTTP2, nullptr}};
+    {folly::SocketAddress("0.0.0.0", 8443), proxygen::HTTPServer::Protocol::HTTP2, nullptr}};
 
   // Configure H2 server
   s_h2_server h2(std::move(opts));

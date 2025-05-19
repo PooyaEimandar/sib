@@ -305,6 +305,7 @@ struct s_proxygen_server : public std::enable_shared_from_this<s_proxygen_server
         num_threads_, std::make_shared<folly::NamedThreadFactory>("StaticDiskIOThread"));
       folly::setUnsafeMutableGlobalCPUExecutor(std::static_pointer_cast<folly::Executor>(pool));
     }
+
     // make sure the handler is shared
     if (h2_ && h3_) {
       auto shared_handler = std::make_shared<handler_fn>(std::move(p_handler));
