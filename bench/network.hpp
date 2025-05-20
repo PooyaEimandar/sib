@@ -20,6 +20,7 @@
 
 #include <folly/Benchmark.h>
 
+#include <folly/net/NetworkSocket.h>
 #include <proxygen/lib/http/HTTPMessage.h>
 #include <proxygen/lib/http/session/HTTPTransaction.h>
 
@@ -66,22 +67,60 @@ struct hello_handler : public proxygen::HTTPTransaction::Handler {
 };
 
 BENCHMARK(s_proxygen_server_start_stop) {
+  constexpr auto MAX_BUFFER_SIZE = 4 * 1024 * 1024; // 4MB
+
   proxygen::HTTPServerOptions opts;
-  opts.threads = 1;
+  opts.threads = std::thread::hardware_concurrency();
   opts.shutdownOn = {SIGINT};
-  opts.idleTimeout = std::chrono::milliseconds(5000);
+  opts.idleTimeout = std::chrono::milliseconds(15000);
   opts.enableContentCompression = false;
   opts.h2cEnabled = false;
   opts.listenBacklog = 65535;
   opts.maxConcurrentIncomingStreams = 1000;
   opts.initialReceiveWindow = 512 * 1024; // 512KB
   opts.receiveStreamWindowSize = 512 * 1024;
-  opts.receiveSessionWindowSize = 4 * 1024 * 1024; // 4MB per session
+  opts.receiveSessionWindowSize = MAX_BUFFER_SIZE; // per session
   opts.useZeroCopy = true;
   opts.enableExHeaders = false;
 
+  using ApplyPos = folly::SocketOptionKey::ApplyPos;
+  folly::SocketOptionMap socket_opt{};
+  // Enable SO_REUSEADDR, this is important for the server to be able to restart quickly
+  socket_opt.emplace(
+    folly::SocketOptionKey{SOL_SOCKET, SO_REUSEADDR, ApplyPos::PRE_BIND},
+    folly::SocketOptionValue{1});
+
+  // Disable Nagle (reduce latency)
+  socket_opt.emplace(
+    folly::SocketOptionKey{IPPROTO_TCP, TCP_NODELAY, ApplyPos::PRE_BIND},
+    folly::SocketOptionValue{1});
+  socket_opt.emplace(
+    folly::SocketOptionKey{IPPROTO_TCP, TCP_NODELAY, ApplyPos::POST_BIND},
+    folly::SocketOptionValue{1});
+
+  // Increase socket buffers (avoid drops under load)
+  socket_opt.emplace(
+    folly::SocketOptionKey{SOL_SOCKET, SO_RCVBUF, ApplyPos::PRE_BIND},
+    folly::SocketOptionValue{MAX_BUFFER_SIZE});
+  socket_opt.emplace(
+    folly::SocketOptionKey{SOL_SOCKET, SO_SNDBUF, ApplyPos::PRE_BIND},
+    folly::SocketOptionValue{MAX_BUFFER_SIZE});
+
+// Linux only TCP fast open for reducing handshake overhead
+#ifdef __linux__
+  socket_opt.emplace(
+    folly::SocketOptionKey{SOL_SOCKET, SO_REUSEPORT, ApplyPos::PRE_BIND},
+    folly::SocketOptionValue{1});
+  socketOpts.emplace(
+    folly::SocketOptionKey{IPPROTO_TCP, TCP_FASTOPEN, ApplyPos::PRE_BIND},
+    folly::SocketOptionValue{1000} // Queue length for TFO
+  );
+#endif
+
   std::vector<proxygen::HTTPServer::IPConfig> ip_configs = {
     {folly::SocketAddress("0.0.0.0", 8443), proxygen::HTTPServer::Protocol::HTTP2, nullptr}};
+  ip_configs[0].enableTCPFastOpen = true;
+  ip_configs[0].acceptorSocketOptions = std::move(socket_opt);
 
   auto cwd = std::filesystem::current_path();
   // Configure H2 server

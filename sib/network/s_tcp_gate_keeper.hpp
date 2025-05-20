@@ -32,7 +32,7 @@
 #include <mutex>
 #include <unordered_map>
 
-#include "s_ip_rate_limiter.hpp"
+#include "s_rate_limiter.hpp"
 
 namespace sib::network {
 
@@ -125,7 +125,7 @@ struct s_tcp_gate_keeper : public folly::AsyncServerSocket::AcceptCallback {
     folly::SocketAddress&& p_forward_addr,
     int p_backlog,
     Duration p_timeout,
-    std::shared_ptr<s_ip_rate_limiter<Duration>> p_rate_limiter)
+    std::shared_ptr<s_rate_limiter<Duration>> p_rate_limiter)
     : listen_port_(p_listen_port), forward_addr_(std::move(p_forward_addr)), backlog_(p_backlog),
       timeout_(p_timeout), rate_limiter_(std::move(p_rate_limiter)) {}
 
@@ -180,7 +180,7 @@ struct s_tcp_gate_keeper : public folly::AsyncServerSocket::AcceptCallback {
   uint16_t listen_port_;
   Duration timeout_;
   int backlog_;
-  std::shared_ptr<s_ip_rate_limiter<Duration>> rate_limiter_;
+  std::shared_ptr<s_rate_limiter<Duration>> rate_limiter_;
 };
 
 } // namespace sib::network

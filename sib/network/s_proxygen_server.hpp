@@ -29,14 +29,19 @@
 #include <folly/executors/CPUThreadPoolExecutor.h>
 #include <folly/logging/xlog.h>
 #include <proxygen/httpserver/HTTPServer.h>
+#include <proxygen/httpserver/HTTPServerAcceptor.h>
 #include <proxygen/httpserver/HTTPTransactionHandlerAdaptor.h>
 #include <proxygen/httpserver/RequestHandlerFactory.h>
 #include <proxygen/httpserver/samples/hq/HQCommandLine.h>
 #include <proxygen/httpserver/samples/hq/HQServer.h>
+#include <sib/network/s_rate_limiter.hpp>
 
 namespace sib::network::http {
 
 using handler_fn = quic::samples::HTTPTransactionHandlerProvider;
+
+// Forward declaration
+struct s_proxygen_server;
 
 struct handler_factory : public proxygen::RequestHandlerFactory {
   // NOLINTNEXTLINE(cppcoreguidelines-rvalue-reference-param-not-moved)
@@ -145,6 +150,7 @@ struct s_h2_server {
 
       server_->bind(ip_configs_);
       server_->start();
+
       return S_SUCCESS;
     } catch (const std::exception& p_exc) {
       server_.reset();
@@ -170,7 +176,7 @@ struct s_h2_server {
   std::list<std::string> alpn_protocols_ = {"h2", "http/1.1"};
   std::vector<proxygen::HTTPServer::IPConfig> ip_configs_ = {
     {folly::SocketAddress("::1", 8443), proxygen::HTTPServer::Protocol::HTTP2, nullptr}};
-  proxygen::HTTPServerOptions param_{};
+  proxygen::HTTPServerOptions param_;
   std::unique_ptr<proxygen::HTTPServer> server_;
 };
 

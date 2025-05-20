@@ -29,18 +29,18 @@
 #include <folly/container/F14Map.h>
 
 template <typename Duration>
-struct s_ip_rate_limiter {
+struct s_rate_limiter {
   enum class mode : std::uint8_t { SLIDING_WINDOW, FIXED_WINDOW };
 
-  s_ip_rate_limiter(size_t p_max_conn, Duration&& p_window, mode p_mode)
+  s_rate_limiter(size_t p_max_conn, Duration&& p_window, mode p_mode)
     : max_conn_(static_cast<double>(p_max_conn)), window_(std::move(p_window)), mode_(p_mode) {}
 
-  ~s_ip_rate_limiter() = default;
+  ~s_rate_limiter() = default;
 
-  s_ip_rate_limiter(const s_ip_rate_limiter&) = delete;
-  auto operator=(const s_ip_rate_limiter&) -> s_ip_rate_limiter& = delete;
-  s_ip_rate_limiter(s_ip_rate_limiter&&) = delete;
-  auto operator=(s_ip_rate_limiter&&) -> s_ip_rate_limiter& = delete;
+  s_rate_limiter(const s_rate_limiter&) = delete;
+  auto operator=(const s_rate_limiter&) -> s_rate_limiter& = delete;
+  s_rate_limiter(s_rate_limiter&&) = delete;
+  auto operator=(s_rate_limiter&&) -> s_rate_limiter& = delete;
 
   auto is_limited(const std::string& p_ip) -> bool {
     const auto NOW = std::chrono::steady_clock::now();
