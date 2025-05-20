@@ -111,7 +111,7 @@ BENCHMARK(s_proxygen_server_start_stop) {
   socket_opt.emplace(
     folly::SocketOptionKey{SOL_SOCKET, SO_REUSEPORT, ApplyPos::PRE_BIND},
     folly::SocketOptionValue{1});
-  socketOpts.emplace(
+  socket_opt.emplace(
     folly::SocketOptionKey{IPPROTO_TCP, TCP_FASTOPEN, ApplyPos::PRE_BIND},
     folly::SocketOptionValue{1000} // Queue length for TFO
   );
