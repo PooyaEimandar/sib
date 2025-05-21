@@ -214,7 +214,10 @@ set(LIBS
 )
 
 if(APPLE)
-  find_library(FDB_C_LIBRARY fdb_c PATHS /usr/local/lib REQUIRED)
+  if (SIB_DB_FDB)
+    find_library(FDB_C_LIBRARY fdb_c PATHS /usr/local/lib REQUIRED)
+    list(APPEND LIBS ${FDB_C_LIBRARY})
+  endif()
   find_library(CoreFoundation_Framework CoreFoundation)
   find_library(CoreServices_Framework CoreServices)
   find_library(Security_Framework Security)
@@ -222,11 +225,13 @@ if(APPLE)
     ${CoreFoundation_Framework}
     ${CoreServices_Framework}
     ${Security_Framework}
-    $<$<BOOL:${SIB_DB_FDB}>:${FDB_C_LIBRARY}>
     /opt/homebrew/Cellar/bzip2/1.0.8/lib/libbz2.a
   )
 elseif(UNIX)
-  list(APPEND LIBS atomic unwind iberty fdb_c)
+  if (SIB_DB_FDB)
+    list(APPEND LIBS fdb_c)
+  endif()
+  list(APPEND LIBS atomic unwind iberty)
 endif()
 
 if(SIB_NET_PROXYGEN)
