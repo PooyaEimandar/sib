@@ -16,7 +16,7 @@
   SPDX-License-Identifier: MPL-2.0
 */
 
-#ifdef SIB_NET_PROXYGEN
+// #ifdef SIB_NET_PROXYGEN
 
 #pragma once
 
@@ -67,48 +67,48 @@ struct handler_factory : public proxygen::RequestHandlerFactory {
   handler_fn handler_;
 };
 
-struct s_h2_server {
+struct s_h_server {
   // NOLINTBEGIN(cppcoreguidelines-rvalue-reference-param-not-moved,
   // cppcoreguidelines-pro-type-member-init,hicpp-member-init)
-  explicit s_h2_server(proxygen::HTTPServerOptions&& p_param) : param_(std::move(p_param)) {}
+  explicit s_h_server(proxygen::HTTPServerOptions&& p_param) : param_(std::move(p_param)) {}
   // NOLINTEND
 
-  ~s_h2_server() = default;
+  ~s_h_server() = default;
 
-  s_h2_server(s_h2_server&&) noexcept = default;
-  auto operator=(s_h2_server&&) noexcept -> s_h2_server& = default;
-  s_h2_server(const s_h2_server&) = delete;
-  auto operator=(s_h2_server&) -> s_h2_server& = delete;
+  s_h_server(s_h_server&&) noexcept = default;
+  auto operator=(s_h_server&&) noexcept -> s_h_server& = default;
+  s_h_server(const s_h_server&) = delete;
+  auto operator=(s_h_server&) -> s_h_server& = delete;
 
-  auto set_chain(const std::filesystem::path& p_chain) -> s_h2_server& {
+  auto set_chain(const std::filesystem::path& p_chain) -> s_h_server& {
     chain_path_ = p_chain;
     return *this;
   }
 
-  auto set_cert(const std::filesystem::path& p_cert) -> s_h2_server& {
+  auto set_cert(const std::filesystem::path& p_cert) -> s_h_server& {
     cert_path_ = p_cert;
     return *this;
   }
 
-  auto set_key(const std::filesystem::path& p_key) -> s_h2_server& {
+  auto set_key(const std::filesystem::path& p_key) -> s_h_server& {
     key_path_ = p_key;
     return *this;
   }
 
   // NOLINTNEXTLINE(cppcoreguidelines-rvalue-reference-param-not-moved)
-  auto set_domains(std::vector<std::string>&& p_domains) -> s_h2_server& {
+  auto set_domains(std::vector<std::string>&& p_domains) -> s_h_server& {
     domains_ = std::move(p_domains);
     return *this;
   }
 
   // NOLINTNEXTLINE(cppcoreguidelines-rvalue-reference-param-not-moved)
-  auto set_ips(std::vector<proxygen::HTTPServer::IPConfig>&& p_ip_configs) -> s_h2_server& {
+  auto set_ips(std::vector<proxygen::HTTPServer::IPConfig>&& p_ip_configs) -> s_h_server& {
     ip_configs_ = std::move(p_ip_configs);
     return *this;
   }
 
   // NOLINTNEXTLINE(cppcoreguidelines-rvalue-reference-param-not-moved)
-  auto set_alpn_protocols(std::list<std::string>&& p_alpn_protocols) -> s_h2_server& {
+  auto set_alpn_protocols(std::list<std::string>&& p_alpn_protocols) -> s_h_server& {
     alpn_protocols_ = std::move(p_alpn_protocols);
     return *this;
   }
@@ -119,10 +119,10 @@ struct s_h2_server {
   // NOLINTNEXTLINE(cppcoreguidelines-rvalue-reference-param-not-moved)
   auto start(handler_fn&& p_handler) -> s_result<int> {
     if (server_) {
-      return S_ERROR(std::errc::already_connected, "h2 server is already started");
+      return S_ERROR(std::errc::already_connected, "h server is already started");
     }
 
-    // enable TLS
+    // check TLS
     if (
       std::filesystem::exists(chain_path_) && std::filesystem::exists(cert_path_) &&
       std::filesystem::exists(key_path_)) {
@@ -154,7 +154,7 @@ struct s_h2_server {
       server_.reset();
       return S_ERROR(
         std::errc::operation_canceled,
-        folly::sformat("failed to start h2 server: {}", p_exc.what()));
+        folly::sformat("failed to start h server: {}", p_exc.what()));
     }
   }
 
@@ -259,8 +259,8 @@ struct s_proxygen_server : public std::enable_shared_from_this<s_proxygen_server
   auto operator=(s_proxygen_server&) -> s_proxygen_server& = delete;
 
   ~s_proxygen_server() {
-    if (h2_) {
-      h2_->stop();
+    if (h_) {
+      h_->stop();
     }
     if (h3_) {
       h3_->stop();
@@ -277,12 +277,12 @@ struct s_proxygen_server : public std::enable_shared_from_this<s_proxygen_server
   }
 
   // NOLINTNEXTLINE(cppcoreguidelines-rvalue-reference-param-not-moved)
-  auto set_h2(s_h2_server&& p_h2) -> std::shared_ptr<s_proxygen_server> {
-    if (h2_) {
-      h2_->stop();
-      h2_.reset();
+  auto set_h(s_h_server&& p_h) -> std::shared_ptr<s_proxygen_server> {
+    if (h_) {
+      h_->stop();
+      h_.reset();
     }
-    h2_ = std::move(p_h2);
+    h_ = std::move(p_h);
     return shared_from_this();
   }
 
@@ -311,31 +311,31 @@ struct s_proxygen_server : public std::enable_shared_from_this<s_proxygen_server
     }
 
     // make sure the handler is shared
-    if (h2_ && h3_) {
+    if (h_ && h3_) {
       auto shared_handler = std::make_shared<handler_fn>(std::move(p_handler));
-      std::thread h2_thread([p_handler = shared_handler, this]() mutable {
-        h2_->start(std::move(*p_handler));
+      std::thread h_thread([p_handler = shared_handler, this]() mutable {
+        h_->start(std::move(*p_handler));
       });
 
       auto result = h3_->start(std::move(*shared_handler));
-      h2_thread.join();
+      h_thread.join();
       return result;
     }
 
-    if (h2_) {
-      return h2_->start(std::move(p_handler));
+    if (h_) {
+      return h_->start(std::move(p_handler));
     }
 
     if (h3_) {
       return h3_->start_forever(std::move(p_handler));
     }
 
-    return S_ERROR(std::errc::operation_canceled, "Neither H2 nor H3 enabled.");
+    return S_ERROR(std::errc::operation_canceled, "Neither H nor H3 enabled.");
   }
 
   void stop() {
-    if (h2_) {
-      h2_->stop();
+    if (h_) {
+      h_->stop();
     }
     if (h3_) {
       h3_->stop();
@@ -344,7 +344,7 @@ struct s_proxygen_server : public std::enable_shared_from_this<s_proxygen_server
 
   [[nodiscard]] auto get_num_threads() const -> uint16_t { return num_threads_; }
 
-  [[nodiscard]] auto get_h2() const -> const s_h2_server* { return h2_ ? &*h2_ : nullptr; }
+  [[nodiscard]] auto get_h() const -> const s_h_server* { return h_ ? &*h_ : nullptr; }
 
   [[nodiscard]] auto get_h3() const -> const s_h3_server* { return h3_ ? &*h3_ : nullptr; }
 
@@ -352,10 +352,10 @@ struct s_proxygen_server : public std::enable_shared_from_this<s_proxygen_server
   s_proxygen_server() = default;
 
   uint16_t num_threads_ = 0;
-  std::optional<s_h2_server> h2_;
+  std::optional<s_h_server> h_;
   std::optional<s_h3_server> h3_;
 };
 
 } // namespace sib::network::http
 
-#endif // SIB_NET_PROXYGEN
+// #endif // SIB_NET_PROXYGEN

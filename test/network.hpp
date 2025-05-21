@@ -29,7 +29,7 @@
 // NOLINTBEGIN (modernize-use-trailing-return-type)
 
 using s_proxygen_server = sib::network::http::s_proxygen_server;
-using s_h2_server = sib::network::http::s_h2_server;
+using s_h_server = sib::network::http::s_h_server;
 
 TEST(SibHttpServerTest, NeitherH2NorH3ReturnsError) {
   proxygen::HTTPServerOptions opts;
@@ -40,8 +40,8 @@ TEST(SibHttpServerTest, NeitherH2NorH3ReturnsError) {
     {folly::SocketAddress("127.0.0.1", 8443), proxygen::HTTPServer::Protocol::HTTP2, nullptr}};
 
   // Configure H2 server
-  s_h2_server h2(std::move(opts));
-  h2.set_domains({"localhost"})
+  s_h_server h(std::move(opts));
+  h.set_domains({"localhost"})
     .set_chain("")
     .set_cert("")
     .set_key("")
@@ -50,7 +50,7 @@ TEST(SibHttpServerTest, NeitherH2NorH3ReturnsError) {
   auto result =
     s_proxygen_server::make()
       ->set_num_threads(1)
-      ->set_h2(std::move(h2))
+      ->set_h(std::move(h))
       ->run_forever([](proxygen::HTTPMessage*) -> proxygen::HTTPTransactionHandler* {
         return nullptr; // No-op request handler
       });
