@@ -576,8 +576,6 @@ if $BUILD_PROXYGEN; then
   ECHO_INFO "Building proxygen in $BWD in $CMAKE_BUILD_TYPE mode"
   PARALLEL_LEVEL=$JOBS cmake -G Ninja          \
     -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE       \
-    -DCMAKE_C_COMPILER_LAUNCHER=ccache         \
-    -DCMAKE_CXX_COMPILER_LAUNCHER=ccache       \
     -DCMAKE_PREFIX_PATH="$DEPS_DIR"            \
     -DCMAKE_INSTALL_PREFIX="$PREFIX"           \
     -DCMAKE_CXX_STANDARD=20                    \

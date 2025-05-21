@@ -4,4 +4,4 @@ A high-performance, secure, and cross-platform modules optimized for efficiency,
 
 ## Build
 
-```cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build -- -j$(nproc)```
+`cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build`
