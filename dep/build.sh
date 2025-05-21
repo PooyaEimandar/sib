@@ -25,9 +25,8 @@ install_dependencies_linux() {
     git \
     cmake \
     m4 \
-    g++ \
-    gcc-12 \
-    g++-12 \
+    gcc-13 \
+    g++-13 \
     clang-format \
     clang-tidy \
     ninja-build \
