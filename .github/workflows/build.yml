@@ -38,8 +38,8 @@ jobs:
       - name: Install Dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ninja-build cmake clang ccache
+          apt-get update
+          apt-get install -y ninja-build cmake clang ccache
 
       # - name: Install Dependencies (macOS)
       #   if: runner.os == 'macOS'
@@ -131,8 +131,8 @@ jobs:
 
   #     - name: Install CCache (Android job)
   #       run: |
-  #         sudo apt-get update
-  #         sudo apt-get install -y ccache
+  #         apt-get update
+  #         apt-get install -y ccache
 
   #     - name: Configure Android CMake for ${{ matrix.abi }}
   #       run: |
