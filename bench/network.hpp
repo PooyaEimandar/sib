@@ -16,6 +16,8 @@
   SPDX-License-Identifier: MPL-2.0
 */
 
+#ifdef SIB_NET_PROXYGEN
+
 #pragma once
 
 #include <folly/Benchmark.h>
@@ -146,3 +148,5 @@ BENCHMARK(s_proxygen_server_start_stop) {
   server->stop();
   server_thread.join();
 }
+
+#endif // SIB_NET_PROXYGEN

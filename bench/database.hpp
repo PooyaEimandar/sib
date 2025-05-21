@@ -18,14 +18,16 @@
 
 #pragma once
 
+#include <iostream>
+
 #include <folly/Benchmark.h>
 #include <folly/coro/BlockingWait.h>
 #include <folly/io/async/ScopedEventBaseThread.h>
 
+#ifdef SIB_DB_FDB
+
 #include <sib/database/s_fdb_pool.hpp>
 #include <sib/system/s_trace.hpp>
-
-#include <iostream>
 
 using namespace sib::db;
 using namespace std::chrono_literals;
@@ -67,3 +69,5 @@ BENCHMARK(fdb_pool_acquire_release_bench) {
   }
   s_fdb_pool::release(*res);
 }
+
+#endif // SIB_DB_FDB

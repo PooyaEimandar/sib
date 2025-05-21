@@ -20,8 +20,11 @@
 
 #include <gtest/gtest.h>
 
-#include <sib/network/s_proxygen_server.hpp>
 #include <sib/sib.hpp>
+
+#ifdef SIB_NET_PROXYGEN
+
+#include <sib/network/s_proxygen_server.hpp>
 
 // NOLINTBEGIN (modernize-use-trailing-return-type)
 
@@ -56,3 +59,5 @@ TEST(SibHttpServerTest, NeitherH2NorH3ReturnsError) {
 }
 
 // NOLINTEND
+
+#endif // SIB_NET_PROXYGEN

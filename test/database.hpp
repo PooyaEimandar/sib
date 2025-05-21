@@ -23,6 +23,9 @@
 
 #include <chrono>
 #include <gtest/gtest.h>
+
+#ifdef SIB_DB_FBD
+
 #include <sib/database/s_fdb_pool.hpp>
 
 using namespace sib::db;
@@ -63,3 +66,5 @@ TEST(SibFDBPool, FoundationDB) {
   EXPECT_EQ(init_result.hasValue() && init_result.value() == 0, true)
     << "Failed to shutdown FDB pool";
 }
+
+#endif // SIB_DB_FDB
