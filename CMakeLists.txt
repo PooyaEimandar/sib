@@ -15,14 +15,15 @@ if(NOT CMAKE_BUILD_TYPE)
   message(STATUS "CMAKE_BUILD_TYPE not set. Defaulting to Debug.")
 endif()
 
-# Language standards
-option(SIB_BUILD_BENCH "Build benchmarks" ON)
-option(SIB_BUILD_TEST "Build tests" ON)
+# SIB options
+option(SIB_TECHEMPOWER "Build TechEmpower benchmark" ON)
+option(SIB_BUILD_BENCH "Build benchmarks" OFF)
+option(SIB_BUILD_TEST "Build tests" OFF)
 option(SIB_NET_PROXYGEN "Enable HTTP3/2/1.1 server based on Facebook's Proxygen" ON)
 option(SIB_NET_GATEKEEPER "Enable TCP and UDP Gatekeepers" OFF)
 option(SIB_NET_TCP "Enable TCP networking" OFF)
 option(SIB_NET_UDP "Enable UDP networking" OFF)
-option(SIB_DB_FDB "Enable FoundationDB" ON)
+option(SIB_DB_FDB "Enable FoundationDB" OFF)
 
 set(FOLLY_VERSION "v2025.05.12.00" CACHE STRING "set the folly version")
 set(C_STANDARD 17 CACHE STRING "C standard to use")
@@ -257,6 +258,10 @@ endif()
 
 if(SIB_BUILD_BENCH)
   include(cmake/bench.cmake)
+endif()
+
+if(SIB_TECHEMPOWER)
+  include(cmake/techempower.cmake)
 endif()
 
 if(CMAKE_EXPORT_COMPILE_COMMANDS)

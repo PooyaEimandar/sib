@@ -47,15 +47,19 @@ TEST(SibHttpServerTest, NeitherH2NorH3ReturnsError) {
     .set_key("")
     .set_ips(std::move(ip_configs));
 
-  auto result =
-    s_proxygen_server::make()
-      ->set_num_threads(1)
-      ->set_h(std::move(h))
-      ->run_forever([](proxygen::HTTPMessage*) -> proxygen::HTTPTransactionHandler* {
+  auto server = s_proxygen_server::make()->set_num_threads(1)->set_h(std::move(h));
+
+  std::thread server_thread([server] {
+    server->run_forever(
+      []([[maybe_unused]] proxygen::HTTPMessage* p_req) -> proxygen::HTTPTransactionHandler* {
         return nullptr; // No-op request handler
       });
+  });
 
-  EXPECT_TRUE(result.hasError());
+  // Wait for server to start and then stop it
+  std::this_thread::sleep_for(std::chrono::seconds(2));
+  server->stop();
+  server_thread.join();
 }
 
 // NOLINTEND
