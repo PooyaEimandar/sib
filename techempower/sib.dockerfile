@@ -37,13 +37,16 @@ RUN apt-get update && apt-get install -y \
     libsodium-dev \
     libdouble-conversion-dev \
     python3-venv \
-    libsecret-1-dev
+    libsecret-1-dev \
+    ccache
 
 # Set compiler environment
 ENV CC=gcc
 ENV CXX=g++
 ENV AR=gcc-ar
 ENV RANLIB=gcc-ranlib
+ENV CMAKE_C_COMPILER_LAUNCHER=ccache
+ENV CMAKE_CXX_COMPILER_LAUNCHER=ccache
 
 # Clone SIB repository with submodules
 WORKDIR /sib
@@ -57,7 +60,7 @@ RUN cmake -B build -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
     -DSIB_TECHEMPOWER=ON \
     -DSIB_NET_PROXYGEN=ON \
- && cmake --build build
+ && cmake --build build 
 
 EXPOSE 8080
 
