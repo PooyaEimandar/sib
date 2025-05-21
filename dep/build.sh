@@ -21,7 +21,7 @@ else
 fi
 
 install_dependencies_linux() {
-  apt install -yq \
+  sudo apt install -yq \
     git \
     cmake \
     m4 \

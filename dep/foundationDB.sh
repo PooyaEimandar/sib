@@ -20,11 +20,11 @@ install_fdb_macos() {
 
     # Install FoundationDB package
     echo "Installing FoundationDB package..."
-    installer -pkg $FDB_PACKAGE -target /
+    sudo installer -pkg $FDB_PACKAGE -target /
 
     # Clean up downloaded package
     echo "Cleaning up..."
-    rm $FDB_PACKAGE
+    sudo rm $FDB_PACKAGE
 
     # Verify installation
     echo "Verifying FoundationDB installation..."
@@ -54,7 +54,7 @@ install_fdb_linux() {
     if [[ "$ARCH" == "x86_64" ]]; then
         # Install dependencies
         echo "Installing dependencies..."
-        apt install -y curl gdebi-core liblzma5
+        sudo apt install -y curl gdebi-core liblzma5
 
         # Download FoundationDB packages
         echo "Downloading FoundationDB client from $FDB_BASE_URL/$FDB_PACKAGE"
@@ -64,16 +64,16 @@ install_fdb_linux() {
 
         # Install FoundationDB packages
         echo "Installing FoundationDB packages..."
-        gdebi -n ${FDB_PACKAGE}
-        gdebi -n ${FDB_SERVER_PACKAGE}
+        sudo gdebi -n ${FDB_PACKAGE}
+        sudo gdebi -n ${FDB_SERVER_PACKAGE}
 
         # Clean up downloaded packages
         echo "Cleaning up..."
-        rm ${FDB_PACKAGE} ${FDB_SERVER_PACKAGE}
+        sudo rm ${FDB_PACKAGE} ${FDB_SERVER_PACKAGE}
     else
         # Install dependencies
         echo "Installing dependencies..."
-        apt install -y curl p7zip-full cpio
+        sudo apt install -y curl p7zip-full cpio
 
         # Download FoundationDB pkg for arm64
         echo "Downloading FoundationDB package from $FDB_BASE_URL/$FDB_PACKAGE"
@@ -112,14 +112,14 @@ install_fdb_linux() {
         cp -rf fdb_server_payload/usr/local/etc/foundationdb /etc/
 
         # Ensure proper permissions
-        chmod +x /usr/local/bin/fdbcli /usr/local/bin/fdbserver
-        rm -rf fdb_pkg FoundationDB-${FDB_VERSION}_arm64.pkg
+        sudo chmod +x /usr/local/bin/fdbcli /usr/local/bin/fdbserver
+        sudo rm -rf fdb_pkg FoundationDB-${FDB_VERSION}_arm64.pkg
     fi
 
     # Configure and start FoundationDB
     echo "Configuring FoundationDB..."
-    systemctl enable foundationdb
-    systemctl start foundationdb
+    sudo systemctl enable foundationdb
+    sudo systemctl start foundationdb
 
     # Verify installation
     echo "Verifying FoundationDB installation..."
