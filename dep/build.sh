@@ -499,6 +499,10 @@ if [ -z "$JOBS" ]; then
   fi
 fi
 
+if [ "$JOBS" -gt 1 ]; then 
+  JOBS=$((JOBS - 1)); 
+fi;
+
 install_dependencies
 
 # check proxygen folder exists

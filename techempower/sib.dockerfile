@@ -1,4 +1,4 @@
-FROM ubuntu:24.04
+FROM debian:bookworm
 
 # Install dependencies
 RUN apt-get update && apt-get install -y \
@@ -36,10 +36,9 @@ RUN apt-get update && apt-get install -y \
     binutils-dev \
     libsodium-dev \
     libdouble-conversion-dev \
-    python3-venv  \
+    python3-venv \
     libsecret-1-dev \
-    ccache \
- && rm -rf /var/lib/apt/lists/*
+    ccache
 
 # Set compiler environment
 ENV CC=gcc
@@ -61,7 +60,7 @@ RUN cmake -B build -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
     -DSIB_TECHEMPOWER=ON \
     -DSIB_NET_PROXYGEN=ON \
- && cmake --build build -- -j$(nproc)
+ && cmake --build build
 
 EXPOSE 8080
 
