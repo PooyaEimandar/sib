@@ -1,4 +1,4 @@
-FROM debian:bookworm
+FROM ubuntu:24.04
 
 # Install dependencies
 RUN apt-get update && apt-get install -y \
@@ -36,7 +36,7 @@ RUN apt-get update && apt-get install -y \
     binutils-dev \
     libsodium-dev \
     libdouble-conversion-dev \
-    python3-venv \
+    python3-venv  \
     libsecret-1-dev \
     ccache \
  && rm -rf /var/lib/apt/lists/*
