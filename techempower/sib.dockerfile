@@ -37,16 +37,13 @@ RUN apt-get update && apt-get install -y \
     libsodium-dev \
     libdouble-conversion-dev \
     python3-venv \
-    libsecret-1-dev \
-    ccache
+    libsecret-1-dev
 
 # Set compiler environment
 ENV CC=gcc
 ENV CXX=g++
 ENV AR=gcc-ar
 ENV RANLIB=gcc-ranlib
-ENV CMAKE_C_COMPILER_LAUNCHER=ccache
-ENV CMAKE_CXX_COMPILER_LAUNCHER=ccache
 
 # Clone SIB repository with submodules
 WORKDIR /sib

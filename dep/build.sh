@@ -57,8 +57,7 @@ install_dependencies_linux() {
     libsodium-dev \
     libdouble-conversion-dev \
     python3-venv  \
-    libsecret-1-dev \
-    ccache
+    libsecret-1-dev
 }
 
 install_dependencies_mac() {
@@ -77,8 +76,7 @@ install_dependencies_mac() {
     snappy                   \
     xz                       \
     openssl                  \
-    libsodium                \
-    ccache
+    libsodium                
 
   brew link                 \
     cmake                   \
@@ -93,8 +91,7 @@ install_dependencies_mac() {
     snappy                  \
     openssl                 \
     xz                      \
-    libsodium               \
-    ccache
+    libsodium               
 }
 
 install_dependencies() {
@@ -142,8 +139,6 @@ setup_fast_float() {
     -DCMAKE_PREFIX_PATH="$DEPS_DIR"            \
     -DCMAKE_INSTALL_PREFIX="$DEPS_DIR"         \
     -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE       \
-    -DCMAKE_C_COMPILER_LAUNCHER=ccache         \
-    -DCMAKE_CXX_COMPILER_LAUNCHER=ccache       \
     ..
   
   ninja -C .
@@ -175,8 +170,6 @@ setup_glog() {
     -DCMAKE_PREFIX_PATH="$DEPS_DIR"            \
     -DCMAKE_INSTALL_PREFIX="$DEPS_DIR"         \
     -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE       \
-    -DCMAKE_C_COMPILER_LAUNCHER=ccache         \
-    -DCMAKE_CXX_COMPILER_LAUNCHER=ccache       \
     ..
   
   ninja -C .
@@ -204,8 +197,6 @@ setup_fmt() {
     -DCMAKE_PREFIX_PATH="$DEPS_DIR"            \
     -DCMAKE_INSTALL_PREFIX="$DEPS_DIR"         \
     -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE       \
-    -DCMAKE_C_COMPILER_LAUNCHER=ccache         \
-    -DCMAKE_CXX_COMPILER_LAUNCHER=ccache       \
     -DFMT_DOC=OFF                              \
     -DFMT_TEST=OFF                             \
     ..
@@ -234,8 +225,6 @@ setup_googletest() {
     -DCMAKE_PREFIX_PATH="$DEPS_DIR"            \
     -DCMAKE_INSTALL_PREFIX="$DEPS_DIR"         \
     -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE       \
-    -DCMAKE_C_COMPILER_LAUNCHER=ccache         \
-    -DCMAKE_CXX_COMPILER_LAUNCHER=ccache       \
     ..
   ninja -C .
   ninja install
@@ -261,8 +250,6 @@ setup_zstd() {
 
   PARALLEL_LEVEL=$JOBS cmake -G Ninja               \
     -DCMAKE_POLICY_VERSION_MINIMUM=3.5              \
-    -DCMAKE_C_COMPILER_LAUNCHER=ccache              \
-    -DCMAKE_CXX_COMPILER_LAUNCHER=ccache            \
     -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE            \
     -DCMAKE_PREFIX_PATH="$ZSTD_INSTALL_DIR"         \
     -DCMAKE_INSTALL_PREFIX="$ZSTD_INSTALL_DIR"      \
@@ -322,8 +309,6 @@ setup_folly() {
     -DCMAKE_PREFIX_PATH="$DEPS_DIR"            \
     -DCMAKE_INSTALL_PREFIX="$DEPS_DIR"         \
     -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE       \
-    -DCMAKE_C_COMPILER_LAUNCHER=ccache         \
-    -DCMAKE_CXX_COMPILER_LAUNCHER=ccache       \
     -DBUILD_TESTS=OFF                          \
     -DCMAKE_CXX_STANDARD=20                    \
     "$MAYBE_USE_STATIC_DEPS"                   \
@@ -364,8 +349,6 @@ setup_fizz() {
     -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE       \
     -DCMAKE_PREFIX_PATH="$DEPS_DIR"            \
     -DCMAKE_INSTALL_PREFIX="$DEPS_DIR"         \
-    -DCMAKE_C_COMPILER_LAUNCHER=ccache         \
-    -DCMAKE_CXX_COMPILER_LAUNCHER=ccache       \
     -DBUILD_TESTS=OFF                          \
     -DBUILD_EXAMPLES=OFF                       \
     "$MAYBE_USE_STATIC_DEPS"                   \
@@ -402,8 +385,6 @@ setup_wangle() {
     -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE       \
     -DCMAKE_PREFIX_PATH="$DEPS_DIR"            \
     -DCMAKE_INSTALL_PREFIX="$DEPS_DIR"         \
-    -DCMAKE_C_COMPILER_LAUNCHER=ccache         \
-    -DCMAKE_CXX_COMPILER_LAUNCHER=ccache       \
     -DBUILD_TESTS=OFF                          \
     "$MAYBE_USE_STATIC_DEPS"                   \
     "$MAYBE_BUILD_SHARED_LIBS"                 \
@@ -437,8 +418,6 @@ setup_mvfst() {
     -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE       \
     -DCMAKE_PREFIX_PATH="$DEPS_DIR"            \
     -DCMAKE_INSTALL_PREFIX="$DEPS_DIR"         \
-    -DCMAKE_C_COMPILER_LAUNCHER=ccache         \
-    -DCMAKE_CXX_COMPILER_LAUNCHER=ccache       \
     -DBUILD_TESTS=OFF                          \
     "$MAYBE_USE_STATIC_DEPS"                   \
     "$MAYBE_BUILD_SHARED_LIBS"                 \
@@ -468,8 +447,6 @@ setup_libevent() {
 
   PARALLEL_LEVEL=$JOBS cmake -G Ninja          \
     -DCMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE       \
-    -DCMAKE_C_COMPILER_LAUNCHER=ccache         \
-    -DCMAKE_CXX_COMPILER_LAUNCHER=ccache       \
     -DCMAKE_INSTALL_PREFIX="$DEPS_DIR"         \
     -DEVENT__DISABLE_TESTS=ON                  \
     -DEVENT__DISABLE_BENCHMARK=ON              \
