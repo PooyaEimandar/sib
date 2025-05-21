@@ -16,7 +16,7 @@
   SPDX-License-Identifier: MPL-2.0
 */
 
-// #ifdef SIB_NET_GATEKEEPER
+#ifdef SIB_NET_GATEKEEPER
 
 #pragma once
 
@@ -185,4 +185,4 @@ struct s_tcp_gate_keeper : public folly::AsyncServerSocket::AcceptCallback {
 
 } // namespace sib::network
 
-// #endif // SIB_NET_GATEKEEPER
+#endif // SIB_NET_GATEKEEPER

@@ -16,7 +16,7 @@
   SPDX-License-Identifier: MPL-2.0
 */
 
-// #ifdef SIB_NET_GATEKEEPER
+#if defined(SIB_NET_GATEKEEPER) || defined(SIB_NET_PROXYGEN)
 
 #pragma once
 
@@ -85,4 +85,4 @@ struct s_rate_limiter {
   folly::F14FastMap<std::string, std::pair<std::chrono::steady_clock::time_point, double>> map_;
 };
 
-// #endif // SIB_NET_GATEKEEPER
+#endif // SIB_NET_GATEKEEPER || SIB_NET_PROXYGEN

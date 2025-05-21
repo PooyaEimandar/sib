@@ -16,7 +16,7 @@
   SPDX-License-Identifier: MPL-2.0
 */
 
-// #ifdef SIB_NET_PROXYGEN
+#ifdef SIB_NET_PROXYGEN
 
 #pragma once
 
@@ -122,19 +122,10 @@ struct s_h2_server {
       return S_ERROR(std::errc::already_connected, "h2 server is already started");
     }
 
-    // check certs are exists
+    // enable TLS
     if (
-      !std::filesystem::exists(chain_path_) || !std::filesystem::exists(cert_path_) ||
-      !std::filesystem::exists(key_path_)) {
-      return S_ERROR(std::errc::no_such_file_or_directory, "missing certificate files.");
-    }
-
-    try {
-      // setup handler factory
-      param_.handlerFactories =
-        proxygen::RequestHandlerChain().addThen<handler_factory>(std::move(p_handler)).build();
-      server_ = std::make_unique<proxygen::HTTPServer>(std::move(param_));
-
+      std::filesystem::exists(chain_path_) && std::filesystem::exists(cert_path_) &&
+      std::filesystem::exists(key_path_)) {
       // initialize ssl config
       wangle::SSLContextConfig ssl_config;
       ssl_config.isDefault = true;
@@ -147,6 +138,13 @@ struct s_h2_server {
       for (auto& ipc : ip_configs_) {
         ipc.sslConfigs.emplace_back(ssl_config);
       }
+    }
+
+    try {
+      // setup handler factory
+      param_.handlerFactories =
+        proxygen::RequestHandlerChain().addThen<handler_factory>(std::move(p_handler)).build();
+      server_ = std::make_unique<proxygen::HTTPServer>(std::move(param_));
 
       server_->bind(ip_configs_);
       server_->start();
@@ -360,4 +358,4 @@ struct s_proxygen_server : public std::enable_shared_from_this<s_proxygen_server
 
 } // namespace sib::network::http
 
-// #endif // SIB_NET_PROXYGEN
+#endif // SIB_NET_PROXYGEN

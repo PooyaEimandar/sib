@@ -39,13 +39,12 @@ struct hello_handler : public proxygen::HTTPTransaction::Handler {
       response.setStatusCode(200);
       response.setStatusMessage("OK");
       response.setIsChunked(false);
-      response.setWantsKeepalive(false);
+      response.setWantsKeepalive(true);
       response.setHTTPVersion(1, 1);
 
       auto& headers = response.getHeaders();
       headers.add(proxygen::HTTPHeaderCode::HTTP_HEADER_CONTENT_TYPE, "text/plain");
       headers.add(proxygen::HTTPHeaderCode::HTTP_HEADER_CONTENT_LENGTH, len);
-      headers.add(proxygen::HTTPHeaderCode::HTTP_HEADER_CONNECTION, "close");
 
       _txn->sendHeaders(response);
 
@@ -67,10 +66,11 @@ struct hello_handler : public proxygen::HTTPTransaction::Handler {
 };
 
 BENCHMARK(s_proxygen_server_start_stop) {
+  const auto num_threads = std::thread::hardware_concurrency();
   constexpr auto MAX_BUFFER_SIZE = 4 * 1024 * 1024; // 4MB
 
   proxygen::HTTPServerOptions opts;
-  opts.threads = std::thread::hardware_concurrency();
+  opts.threads = num_threads;
   opts.shutdownOn = {SIGINT};
   opts.idleTimeout = std::chrono::milliseconds(15000);
   opts.enableContentCompression = false;
@@ -131,7 +131,7 @@ BENCHMARK(s_proxygen_server_start_stop) {
     .set_key(cwd / "../dep/proxygen/proxygen/httpserver/tests/certs/ca_key.pem")
     .set_ips(std::move(ip_configs));
 
-  auto server = s_proxygen_server::make()->set_num_threads(1)->set_h2(std::move(h2));
+  auto server = s_proxygen_server::make()->set_num_threads(num_threads)->set_h2(std::move(h2));
 
   std::thread server_thread([server] {
     server->run_forever(
