@@ -1,12 +1,12 @@
-FROM ubuntu:24.04
+FROM debian:bookworm
 
 # Install dependencies
 RUN apt-get update && apt-get install -y \
     git \
     cmake \
     m4 \
-    gcc-13 \
-    g++-13 \
+    gcc \
+    g++ \
     clang-format \
     clang-tidy \
     ninja-build \
@@ -36,16 +36,16 @@ RUN apt-get update && apt-get install -y \
     binutils-dev \
     libsodium-dev \
     libdouble-conversion-dev \
-    python3-venv  \
+    python3-venv \
     libsecret-1-dev \
     ccache \
  && rm -rf /var/lib/apt/lists/*
 
 # Set compiler environment
-ENV CC=gcc-13
-ENV CXX=g++-13
-ENV AR=gcc-ar-13
-ENV RANLIB=gcc-ranlib-13
+ENV CC=gcc
+ENV CXX=g++
+ENV AR=gcc-ar
+ENV RANLIB=gcc-ranlib
 ENV CMAKE_C_COMPILER_LAUNCHER=ccache
 ENV CMAKE_CXX_COMPILER_LAUNCHER=ccache
 
