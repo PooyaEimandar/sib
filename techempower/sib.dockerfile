@@ -62,6 +62,6 @@ RUN cmake -B build -G Ninja \
     -DSIB_NET_PROXYGEN=ON \
  && cmake --build build 
 
+# Run the sib server 
 EXPOSE 8080
-
 CMD ["./build/sib_techempower"]
