@@ -111,6 +111,22 @@ auto make_response_headers(folly::StringPiece p_content_type, folly::StringPiece
   return response;
 }
 
+// Safely constructed thread_local handlers
+static const proxygen::HTTPMessage k_json_headers =
+  make_response_headers("application/json", k_json_payload_size);
+static const proxygen::HTTPMessage k_plain_headers =
+  make_response_headers("text/plain", k_plain_payload_size);
+
+static handler& get_handler_json() {
+  thread_local handler json(k_json_headers, k_json_buf);
+  return json;
+}
+
+static handler& get_handler_text() {
+  thread_local handler text(k_plain_headers, k_plain_buf);
+  return text;
+}
+
 int main(int p_argc, char** p_argv) {
   std::span<char*> argv_span(p_argv, p_argc);
   assert(sib::init(p_argc, argv_span).hasValue());
@@ -142,15 +158,7 @@ int main(int p_argc, char** p_argv) {
   auto server = s_proxygen_server::make()->set_num_threads(num_threads)->set_h(std::move(h));
 
   server->run_forever([](proxygen::HTTPMessage* p_req) -> proxygen::HTTPTransactionHandler* {
-    static thread_local auto json_headers =
-      make_response_headers("application/json", k_json_payload_size);
-    static thread_local auto plain_headers =
-      make_response_headers("text/plain", k_plain_payload_size);
-
-    static thread_local handler json(json_headers, k_json_buf);
-    static thread_local handler text(plain_headers, k_plain_buf);
-
-    return p_req->getPath() == "/json" ? &json : &text;
+    return p_req->getPath() == "/json" ? &get_handler_json() : &get_handler_text();
   });
 
   return 0;
