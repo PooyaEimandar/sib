@@ -11,39 +11,25 @@ using namespace sib::network::http;
 
 constexpr auto MAX_BUFFER_SIZE = 4 * 1024 * 1024; // 4MB
 constexpr auto* SERVER_NAME = "SIB";
-constexpr std::string_view kJsonPayload{R"({"message":"Hello, World!"})"};
-constexpr std::string_view kPlainPayload{"Hello, World!"};
 
-// Pre-wrap constant payloads
-static const auto kJsonBuf =
-  folly::IOBuf::wrapBufferAsValue(kJsonPayload.data(), kJsonPayload.size());
-static const auto kPlainBuf =
-  folly::IOBuf::wrapBufferAsValue(kPlainPayload.data(), kPlainPayload.size());
+// constexpr
+constexpr std::string_view k_json_payload{R"({"message":"Hello, World!"})"};
+constexpr std::string_view k_plain_payload{"Hello, World!"};
+constexpr auto k_json_payload_size = "27";
+constexpr auto k_plain_payload_size = "13";
+static const auto k_json_buf =
+  folly::IOBuf::wrapBufferAsValue(k_json_payload.data(), k_json_payload.size());
+static const auto k_plain_buf =
+  folly::IOBuf::wrapBufferAsValue(k_plain_payload.data(), k_plain_payload.size());
 
-class simple_handler : public proxygen::HTTPTransaction::Handler {
- public:
-  explicit simple_handler(std::string_view contentType, const folly::IOBuf& buffer)
-    : contentType_(contentType), buffer_(buffer) {}
+struct handler : public proxygen::HTTPTransaction::Handler {
+  explicit handler(const proxygen::HTTPMessage& p_headers, const folly::IOBuf& p_buffer)
+    : headers_(p_headers), buffer_(p_buffer) {}
 
-  void onHeadersComplete(std::unique_ptr<proxygen::HTTPMessage> headers) noexcept override {
-    if (headers->getMethod() != proxygen::HTTPMethod::GET)
-      return;
-
-    proxygen::HTTPMessage response;
-    response.setStatusCode(200);
-    response.setStatusMessage("OK");
-    response.setIsChunked(false);
-    response.setWantsKeepalive(false);
-
-    auto& h = response.getHeaders();
-    h.add(proxygen::HTTPHeaderCode::HTTP_HEADER_SERVER, SERVER_NAME);
-    h.add(proxygen::HTTPHeaderCode::HTTP_HEADER_CONTENT_TYPE, contentType_);
-    h.add(
-      proxygen::HTTPHeaderCode::HTTP_HEADER_CONTENT_LENGTH,
-      std::to_string(buffer_.computeChainDataLength()));
-
-    txn_->sendHeaders(response);
-    txn_->sendBody(buffer_.clone());
+  void onHeadersComplete(
+    [[maybe_unused]] std::unique_ptr<proxygen::HTTPMessage> p_req) noexcept override {
+    txn_->sendHeaders(headers_);
+    txn_->sendBody(buffer_.cloneOne());
     txn_->sendEOM();
   }
 
@@ -53,13 +39,13 @@ class simple_handler : public proxygen::HTTPTransaction::Handler {
   void onError(const proxygen::HTTPException&) noexcept override {}
   void onEgressPaused() noexcept override {}
   void onEgressResumed() noexcept override {}
-  void setTransaction(proxygen::HTTPTransaction* txn) noexcept override { txn_ = txn; }
+  void setTransaction(proxygen::HTTPTransaction* p_txn) noexcept override { txn_ = p_txn; }
   void detachTransaction() noexcept override { txn_ = nullptr; }
   void onEOM() noexcept override {}
 
  private:
   proxygen::HTTPTransaction* txn_{nullptr};
-  std::string_view contentType_;
+  const proxygen::HTTPMessage& headers_;
   const folly::IOBuf& buffer_;
 };
 
@@ -109,9 +95,25 @@ auto create_socket_opt() -> folly::SocketOptionMap {
   return socket_opt;
 }
 
-int main(int argc, char* argv[]) {
-  std::span<char*> argv_span(argv, argc);
-  assert(sib::init(argc, argv_span).hasValue());
+auto make_response_headers(folly::StringPiece p_content_type, folly::StringPiece p_len)
+  -> proxygen::HTTPMessage {
+  proxygen::HTTPMessage response;
+  response.setStatusCode(200);
+  response.setStatusMessage("OK");
+  response.setIsChunked(false);
+  response.setWantsKeepalive(false);
+
+  auto& h = response.getHeaders();
+  h.add(proxygen::HTTPHeaderCode::HTTP_HEADER_SERVER, SERVER_NAME);
+  h.add(proxygen::HTTPHeaderCode::HTTP_HEADER_CONTENT_TYPE, p_content_type);
+  h.add(proxygen::HTTPHeaderCode::HTTP_HEADER_CONTENT_LENGTH, p_len);
+
+  return response;
+}
+
+int main(int p_argc, char** p_argv) {
+  std::span<char*> argv_span(p_argv, p_argc);
+  assert(sib::init(p_argc, argv_span).hasValue());
 
   const auto num_threads = std::thread::hardware_concurrency();
 
@@ -139,10 +141,16 @@ int main(int argc, char* argv[]) {
 
   auto server = s_proxygen_server::make()->set_num_threads(num_threads)->set_h(std::move(h));
 
-  server->run_forever([](proxygen::HTTPMessage* req) -> proxygen::HTTPTransactionHandler* {
-    static thread_local simple_handler json("application/json", kJsonBuf);
-    static thread_local simple_handler text("text/plain", kPlainBuf);
-    return req->getPath() == "/json" ? &json : &text;
+  server->run_forever([](proxygen::HTTPMessage* p_req) -> proxygen::HTTPTransactionHandler* {
+    static thread_local auto json_headers =
+      make_response_headers("application/json", k_json_payload_size);
+    static thread_local auto plain_headers =
+      make_response_headers("text/plain", k_plain_payload_size);
+
+    static thread_local handler json(json_headers, k_json_buf);
+    static thread_local handler text(plain_headers, k_plain_buf);
+
+    return p_req->getPath() == "/json" ? &json : &text;
   });
 
   return 0;
