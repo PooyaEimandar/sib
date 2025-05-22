@@ -14,17 +14,28 @@ constexpr auto* SERVER_NAME = "SIB";
 
 struct json_handler : public proxygen::HTTPTransaction::Handler {
   void onHeadersComplete(std::unique_ptr<proxygen::HTTPMessage> p_headers) noexcept override {
-    static const char kHttpJson[] =
-      "HTTP/1.1 200 OK\r\n"
-      "Content-Type: application/json\r\n"
-      "Content-Length: 27\r\n"
-      "Server: SIB\r\n"
-      "\r\n"
-      "{\"message\":\"Hello, World!\"}";
-    static const size_t kHttpJsonLen = sizeof(kHttpJson) - 1;
-    static const auto kBuf = folly::IOBuf::wrapBuffer(kHttpJson, kHttpJsonLen);
-    _txn->sendBody(kBuf->clone());
-    _txn->sendEOM();
+    if (p_headers->getMethod() == proxygen::HTTPMethod::GET) {
+      static constexpr auto* content_type = "application/json";
+      static constexpr auto* content_length = "27";
+      static constexpr std::string_view kJsonPayload{R"({"message":"Hello, World!"})"};
+
+      proxygen::HTTPMessage response;
+      response.setStatusCode(200);
+      response.setStatusMessage("OK");
+      response.setIsChunked(false);
+      response.setWantsKeepalive(false);
+
+      auto& headers = response.getHeaders();
+      headers.add(proxygen::HTTPHeaderCode::HTTP_HEADER_SERVER, SERVER_NAME);
+      headers.add(proxygen::HTTPHeaderCode::HTTP_HEADER_CONTENT_TYPE, content_type);
+      headers.add(proxygen::HTTPHeaderCode::HTTP_HEADER_CONTENT_LENGTH, content_length);
+
+      _txn->sendHeaders(response);
+      static const auto kJsonBuf =
+        folly::IOBuf::wrapBufferAsValue(kJsonPayload.data(), kJsonPayload.size());
+      _txn->sendBody(kJsonBuf.clone());
+      _txn->sendEOM();
+    }
   }
 
   void onBody(std::unique_ptr<folly::IOBuf>) noexcept override {}
@@ -41,17 +52,28 @@ struct json_handler : public proxygen::HTTPTransaction::Handler {
 
 struct plain_text_handler : public proxygen::HTTPTransaction::Handler {
   void onHeadersComplete(std::unique_ptr<proxygen::HTTPMessage> p_headers) noexcept override {
-    static const char kText[] =
-      "HTTP/1.1 200 OK\r\n"
-      "Content-Type: text/plain\r\n"
-      "Content-Length: 13\r\n"
-      "Server: SIB\r\n"
-      "\r\n"
-      "Hello, World!";
-    static const size_t kTextLen = sizeof(kText) - 1;
-    static const auto kBuf = folly::IOBuf::wrapBuffer(kText, kTextLen);
-    _txn->sendBody(kBuf->clone());
-    _txn->sendEOM();
+    if (p_headers->getMethod() == proxygen::HTTPMethod::GET) {
+      static constexpr auto* content_type = "text/plain";
+      static constexpr auto* content_length = "13";
+      static constexpr std::string_view kPlainPayload{"Hello, World!"};
+
+      proxygen::HTTPMessage response;
+      response.setStatusCode(200);
+      response.setStatusMessage("OK");
+      response.setIsChunked(false);
+      response.setWantsKeepalive(false);
+
+      auto& headers = response.getHeaders();
+      headers.add(proxygen::HTTPHeaderCode::HTTP_HEADER_SERVER, SERVER_NAME);
+      headers.add(proxygen::HTTPHeaderCode::HTTP_HEADER_CONTENT_TYPE, content_type);
+      headers.add(proxygen::HTTPHeaderCode::HTTP_HEADER_CONTENT_LENGTH, content_length);
+
+      _txn->sendHeaders(response);
+      static const auto kPlainBuf =
+        folly::IOBuf::wrapBufferAsValue(kPlainPayload.data(), kPlainPayload.size());
+      _txn->sendBody(kPlainBuf.clone());
+      _txn->sendEOM();
+    }
   }
 
   void onBody(std::unique_ptr<folly::IOBuf>) noexcept override {}
