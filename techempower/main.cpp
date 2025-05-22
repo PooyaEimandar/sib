@@ -111,26 +111,12 @@ auto make_response_headers(folly::StringPiece p_content_type, folly::StringPiece
   return response;
 }
 
-static const proxygen::HTTPMessage& get_json_headers() {
-  static folly::Indestructible<proxygen::HTTPMessage> hdr(
-    make_response_headers("application/json", k_json_payload_size));
-  return *hdr;
-}
-
-static const proxygen::HTTPMessage& get_plain_headers() {
-  static folly::Indestructible<proxygen::HTTPMessage> hdr(
-    make_response_headers("text/plain", k_plain_payload_size));
-  return *hdr;
-}
-
 int main(int p_argc, char** p_argv) {
   std::span<char*> argv_span(p_argv, p_argc);
-  assert(sib::init(p_argc, argv_span).hasValue());
-
-  const auto num_threads = std::thread::hardware_concurrency();
+  sib::init(p_argc, argv_span);
 
   proxygen::HTTPServerOptions opts;
-  opts.threads = num_threads;
+  opts.threads = 0;
   opts.shutdownOn = {SIGINT};
   opts.idleTimeout = std::chrono::milliseconds(15000);
   opts.enableContentCompression = false;
@@ -151,19 +137,19 @@ int main(int p_argc, char** p_argv) {
   s_h_server h(std::move(opts));
   h.set_domains({"localhost"}).set_alpn_protocols({"http/1.1"}).set_ips(std::move(ip_configs));
 
-  auto server = s_proxygen_server::make()->set_num_threads(num_threads)->set_h(std::move(h));
+  auto server = s_proxygen_server::make()->set_h(std::move(h));
 
-  static folly::ThreadLocalPtr<handler> json_handler, text_handler;
   server->run_forever([](proxygen::HTTPMessage* p_req) -> proxygen::HTTPTransactionHandler* {
+    thread_local static auto json_headers =
+      make_response_headers("application/json", k_json_payload_size);
+    thread_local static auto text_headers =
+      make_response_headers("text/plain", k_plain_payload_size);
+    thread_local static handler json_handler(json_headers, k_json_buf);
+    thread_local static handler text_handler(text_headers, k_plain_buf);
+
     if (p_req->getPath() == "/json") {
-      if (!json_handler.get()) {
-        json_handler.reset(new handler(get_json_headers(), k_json_buf));
-      }
-      return json_handler.get();
+      return &json_handler;
     }
-    if (!text_handler.get()) {
-      text_handler.reset(new handler(get_plain_headers(), k_plain_buf));
-    }
-    return text_handler.get();
+    return &text_handler;
   });
 }
