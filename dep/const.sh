@@ -8,11 +8,11 @@ readonly COLOR_RED="\033[0;31m"
 readonly COLOR_GREEN="\033[0;32m"
 readonly COLOR_OFF="\033[0m"
 
-ECHO_INFO() {
+INFO() {
     echo -e "${COLOR_GREEN}[INFO] $*${COLOR_OFF}"
 }
 
-ECHO_ERR() {
+ERR() {
     echo -e "${COLOR_RED}[ERROR] $*${COLOR_OFF}" >&2
 }
 
@@ -32,5 +32,5 @@ detect_platform() {
     esac
 }
 detect_platform
-ECHO_INFO "Detected platform: ${PLATFORM}"
-ECHO_INFO "Detected architecture: ${ARCH}"
+INFO "Detected platform: ${PLATFORM}"
+INFO "Detected architecture: ${ARCH}"
