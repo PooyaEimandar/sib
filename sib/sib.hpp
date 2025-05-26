@@ -70,7 +70,7 @@ int main(int argc, char** argv) {
                             std::unique_ptr<http::reply> p_rep)
                         -> future<std::unique_ptr<http::reply>> {
                             p_rep->set_status(http::reply::status_type::ok);
-                            p_rep->write_body("text/plain", "Hello Wrold!\n");
+                            p_rep->write_body("text/plain", "Hello, World!");
                             return make_ready_future<std::unique_ptr<http::reply>>(std::move(p_rep));
                         },
                         "text"
