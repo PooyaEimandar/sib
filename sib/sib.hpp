@@ -18,82 +18,70 @@
 
 #pragma once
 
-#include <folly/Expected.h>
-#include <folly/FBString.h>
-#include <folly/Format.h>
-#include <folly/init/Init.h>
-#include <folly/io/IOBuf.h>
+// #include <seastar/core/app-template.hh>
 
-#include <sib/system/s_defer.hpp>
-#include <sib/system/s_trace.hpp>
+// #include <seastar/core/coroutine.hh>
+// #include <iostream>
 
-#include <span>
+// seastar::future<int> read() {
+//     co_return 42;
+// }
 
-#if defined(_WIN32) || defined(_WIN64)
-#ifdef SIB_EXPORTS
-#define SIB_API __declspec(dllexport)
-#else
-#define SIB_API __declspec(dllimport)
-#endif
-#else
-#define SIB_API __attribute__((visibility("default")))
-#endif
+// seastar::future<int> start() {
+//     using namespace std::chrono_literals;
+//     auto n = co_await read();     
+//     co_await seastar::sleep(1s);  
+//     co_return n;                  
+// }
 
-constexpr auto S_SUCCESS = 0;
+// int main(int argc, char** argv) {
+//     seastar::app_template app;
+//     return app.run(argc, argv, [] () -> seastar::future<> {
+//         std::cout << "Running on " << seastar::smp::count << " cores\n";
+//         int result = co_await start();
+//         std::cout << "Result: " << result << "\n";
+//         co_return;
+//     });
+// }
 
-// NOLINTBEGIN (readability-identifier-naming, cppcoreguidelines-macro-usage)
-#define S_ERROR(p_code, p_msg) \
-  folly::makeUnexpected(sib::system::s_trace(p_code, p_msg, __FILE__, __LINE__))
+#include <seastar/core/app-template.hh>
+#include <seastar/http/httpd.hh>
+#include <seastar/http/function_handlers.hh>
+#include <seastar/core/sleep.hh>
+#include <seastar/core/reactor.hh>
+#include <iostream>
 
-#define TRY_M(p_expr, p_msg)                                                           \
-  ({                                                                                   \
-    auto res = (p_expr);                                                               \
-    if (res.hasError()) {                                                              \
-      res.merge(sib::system::s_trace(res.last_err_code(), p_msg, __FILE__, __LINE__)); \
-      return folly::makeUnexpected(res.error());                                       \
-    }                                                                                  \
-    std::move(res).value();                                                            \
-  })
+using namespace seastar;
+using namespace seastar::httpd;
 
-#define TRY_A(p_expr)                            \
-  ({                                             \
-    auto res = (p_expr);                         \
-    if (res.hasError())                          \
-      return folly::makeUnexpected(res.error()); \
-    std::move(res).value();                      \
-  })
+int main(int argc, char** argv) {
+    app_template app;
+    auto server = std::make_shared<http_server_control>();
 
-#define TRY(p_expr)      \
-  ({                     \
-    auto res = (p_expr); \
-    if (res.hasError())  \
-      return;            \
-  })
+    return app.run(argc, argv, [server] () -> future<> {
+        constexpr auto port = 8080;
+        constexpr auto server_name = "Sib HTTP Server";
 
-#define CONCAT_IMPL(x, y) x##y
-#define CONCAT(x, y) CONCAT_IMPL(x, y)
-#define S_DEFER auto CONCAT(_defer_, __LINE__) = sib::system::defer_ini
-// NOLINTEND
-
-namespace sib {
-
-template <typename T>
-using s_result = folly::Expected<T, system::s_trace>;
-
-[[nodiscard]] SIB_API inline auto init(int p_argc, std::span<char*> p_argv)
-  -> s_result<folly::Unit> {
-  if (p_argc <= 0 || p_argv.data() == nullptr) {
-    return S_ERROR(std::errc::invalid_argument, "missing p_argc or p_argv");
-  }
-
-  auto* ptr = p_argv.data();
-  try {
-    std::ignore = folly::Init(&p_argc, &ptr, false);
-  } catch (const std::exception& p_exc) {
-    return S_ERROR(
-      std::errc::operation_canceled,
-      folly::sformat("folly::Init failed: because: {}", p_exc.what()));
-  }
-  return folly::unit;
+        return server->start(server_name).then([server] {
+            return server->set_routes([] (routes& p_routes) {
+                p_routes.add(operation_type::GET, url("/hello"),
+                    new function_handler(
+                        [] (std::unique_ptr<http::request> p_req,
+                            std::unique_ptr<http::reply> p_rep)
+                        -> future<std::unique_ptr<http::reply>> {
+                            p_rep->set_status(http::reply::status_type::ok);
+                            p_rep->write_body("text/plain", "Hello Wrold!\n");
+                            return make_ready_future<std::unique_ptr<http::reply>>(std::move(p_rep));
+                        },
+                        "text"
+                    )
+                );
+            });
+        }).then([server, port] {
+            return server->listen(socket_address{ipv4_addr{port}});
+        }).then([port]() -> future<> {
+            std::cout << "Seastar HTTP server listening on port " << port << " ...\n";
+            return sleep_abortable(std::chrono::hours(24)); 
+        });
+    });
 }
-} // namespace sib
