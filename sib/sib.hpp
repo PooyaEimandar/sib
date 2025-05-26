@@ -64,7 +64,7 @@ int main(int argc, char** argv) {
 
         return server->start(server_name).then([server] {
             return server->set_routes([] (routes& p_routes) {
-                p_routes.add(operation_type::GET, url("/hello"),
+                p_routes.add(operation_type::GET, url("/plaintext"),
                     new function_handler(
                         [] (std::unique_ptr<http::request> p_req,
                             std::unique_ptr<http::reply> p_rep)
