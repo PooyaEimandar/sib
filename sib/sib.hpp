@@ -69,11 +69,8 @@ int main(int argc, char** argv) {
                         [] (std::unique_ptr<http::request> p_req,
                             std::unique_ptr<http::reply> p_rep)
                         -> future<std::unique_ptr<http::reply>> {
-                            constexpr auto status = http::reply::status_type::ok;
-                            constexpr auto content_type = "text/plain";
-                            constexpr auto content = "Hello, World!";
-                            p_rep->set_status(status);
-                            p_rep->write_body(content_type, content);
+                            p_rep->set_status(http::reply::status_type::ok);
+                            p_rep->write_body("text/plain", "Hello, World!");
                             return make_ready_future<std::unique_ptr<http::reply>>(std::move(p_rep));
                         },
                         "text"
