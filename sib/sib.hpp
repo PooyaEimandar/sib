@@ -64,13 +64,16 @@ int main(int argc, char** argv) {
 
         return server->start(server_name).then([server] {
             return server->set_routes([] (routes& p_routes) {
-                p_routes.add(operation_type::GET, url("/plaintext"),
+                p_routes.add(operation_type::GET, url("/hello"),
                     new function_handler(
                         [] (std::unique_ptr<http::request> p_req,
                             std::unique_ptr<http::reply> p_rep)
                         -> future<std::unique_ptr<http::reply>> {
-                            p_rep->set_status(http::reply::status_type::ok);
-                            p_rep->write_body("text/plain", "Hello, World!");
+                            constexpr auto status = http::reply::status_type::ok;
+                            constexpr auto content_type = "text/plain";
+                            constexpr auto content = "Hello, World!";
+                            p_rep->set_status(status);
+                            p_rep->write_body(content_type, content);
                             return make_ready_future<std::unique_ptr<http::reply>>(std::move(p_rep));
                         },
                         "text"
@@ -81,10 +84,6 @@ int main(int argc, char** argv) {
             return server->listen(socket_address{ipv4_addr{port}});
         }).then([port]() -> future<> {
             std::cout << "Seastar HTTP server listening on port " << port << " ...\n";
-            // return seastar::keep_doing([] {
-            //   using namespace std::chrono_literals;
-            //   return seastar::sleep(1s);
-            // });
             return sleep_abortable(std::chrono::hours(24)); 
         });
     });
