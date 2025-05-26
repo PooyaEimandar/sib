@@ -166,9 +166,9 @@ target_link_libraries(${PROJECT_NAME} PRIVATE ${LIBS})
 #   include(cmake/bench.cmake)
 # endif()
 
-if(SIB_TECHEMPOWER)
-  include(cmake/techempower.cmake)
-endif()
+#if(SIB_TECHEMPOWER)
+#  include(cmake/techempower.cmake)
+#endif()
 
 # if(CMAKE_EXPORT_COMPILE_COMMANDS)
 #   include(cmake/clang.cmake)
