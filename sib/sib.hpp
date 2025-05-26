@@ -81,7 +81,11 @@ int main(int argc, char** argv) {
             return server->listen(socket_address{ipv4_addr{port}});
         }).then([port]() -> future<> {
             std::cout << "Seastar HTTP server listening on port " << port << " ...\n";
-            return sleep_abortable(std::chrono::hours(24)); 
+            return seastar::keep_doing([] {
+              using namespace std::chrono_literals;
+              return seastar::sleep(1s);
+            });
+            //return sleep_abortable(std::chrono::hours(24)); 
         });
     });
 }
