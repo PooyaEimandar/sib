@@ -18,32 +18,6 @@
 
 #pragma once
 
-// #include <seastar/core/app-template.hh>
-
-// #include <seastar/core/coroutine.hh>
-// #include <iostream>
-
-// seastar::future<int> read() {
-//     co_return 42;
-// }
-
-// seastar::future<int> start() {
-//     using namespace std::chrono_literals;
-//     auto n = co_await read();     
-//     co_await seastar::sleep(1s);  
-//     co_return n;                  
-// }
-
-// int main(int argc, char** argv) {
-//     seastar::app_template app;
-//     return app.run(argc, argv, [] () -> seastar::future<> {
-//         std::cout << "Running on " << seastar::smp::count << " cores\n";
-//         int result = co_await start();
-//         std::cout << "Result: " << result << "\n";
-//         co_return;
-//     });
-// }
-
 #include <seastar/core/app-template.hh>
 #include <seastar/http/httpd.hh>
 #include <seastar/http/function_handlers.hh>
@@ -53,6 +27,15 @@
 
 using namespace seastar;
 using namespace seastar::httpd;
+
+static auto make_date_header() -> seastar::sstring {
+    auto now = std::chrono::system_clock::now();
+    auto now_c = std::chrono::system_clock::to_time_t(now);
+    std::tm tm_gmt = *std::gmtime(&now_c); // thread-safe on Linux
+    std::ostringstream oss;
+    oss << std::put_time(&tm_gmt, "%a, %d %b %Y %H:%M:%S GMT");
+    return sstring(oss.str());
+}
 
 int main(int argc, char** argv) {
     app_template app;
@@ -69,11 +52,17 @@ int main(int argc, char** argv) {
                         [] (std::unique_ptr<http::request> p_req,
                             std::unique_ptr<http::reply> p_rep)
                         -> future<std::unique_ptr<http::reply>> {
+                            p_rep->_headers.clear();
                             constexpr auto STATUS = http::reply::status_type::ok;
+                            constexpr auto SERVER_NAME = "Server";
+                            constexpr auto SERVER_NAME_VAL = "SIB";
+                            constexpr auto DATE = "Date";
                             constexpr auto CONTENT_TYPE = "text/plain";
                             constexpr auto CONTENT_TYPE_VAL = "Hello, World!";
                           
                             p_rep->set_status(STATUS);
+                            p_rep->add_header(SERVER_NAME, SERVER_NAME_VAL);
+                            p_rep->add_header(DATE, make_date_header());
                             p_rep->write_body(CONTENT_TYPE, CONTENT_TYPE_VAL);
                             return make_ready_future<std::unique_ptr<http::reply>>(std::move(p_rep));
                         },
