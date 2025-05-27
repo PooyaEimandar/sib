@@ -26,7 +26,7 @@ fi
 
 if [ ! -d "seastar" ]; then
   INFO "Cloning seastar repository..."
-  git clone --depth 1 https://github.com/scylladb/seastar.git #--recursive
+  git clone --depth 1 https://github.com/scylladb/seastar.git --recursive
 else
   INFO "Updating seastar repository..."
   cd seastar || exit 1
