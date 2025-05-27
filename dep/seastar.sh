@@ -37,7 +37,7 @@ fi
 
 cd seastar || exit 1
 ./install-dependencies.sh || exit 1 
-apt install libdpdk-dev || exit 1
+apt install libdpdk-dev -y || exit 1
 ./configure.py --mode=$BUILD_TYPE --enable-dpdk --prefix="_cooking/installed"
 ninja -C build/$BUILD_TYPE -j "$JOBS" || exit 1
 ninja -C build/$BUILD_TYPE install
