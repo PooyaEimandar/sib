@@ -119,6 +119,3 @@ rustflags = [
     "-C",
     "link-args=-Wl,-rpath,/usr/local/lib",
 ]
-
-[target.x86_64-unknown-linux-gnu]
-env = { CFLAGS = "-Wno-error=date-time" }
