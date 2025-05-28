@@ -1,4 +1,4 @@
-name: Sib - Cross-Platform Build CI
+name: Build and Test
 
 on:
   push:
@@ -6,197 +6,110 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  build:
-    name: ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
+  zig-cross:
+    name: Linux-${{ matrix.target }}
+    runs-on: ubuntu-latest
     strategy:
       matrix:
-        os: [ubuntu-latest]
-        # os: [ubuntu-latest, windows-latest, macos-latest]
-        include:
-          - os: ubuntu-latest
-            cmake_compiler_options: >
-              -DCMAKE_C_COMPILER=clang
-              -DCMAKE_CXX_COMPILER=clang++
-              -DCMAKE_BUILD_TYPE=Release
-          # - os: windows-latest
-          #   cmake_compiler_options: >
-          #     -DCMAKE_C_COMPILER=clang-cl
-          #     -DCMAKE_CXX_COMPILER=clang-cl
-          #     -DCMAKE_BUILD_TYPE=Release
-          # - os: macos-latest
-          #   cmake_compiler_options: >
-          #     -DCMAKE_C_COMPILER=clang
-          #     -DCMAKE_CXX_COMPILER=clang++
-          #     -DCMAKE_BUILD_TYPE=Release
+        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install Dependencies (Linux)
-        if: runner.os == 'Linux'
+      - name: Install Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Install Zig and cargo-zigbuild
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ninja-build cmake clang ccache
+          curl -L https://ziglang.org/builds/zig-linux-x86_64-0.15.0-dev.382+6a7ca4b8b.tar.xz | tar -xJ
+          ZIG_DIR=$(find . -maxdepth 1 -type d -name "zig-linux-x86_64*" | head -n 1)
+          echo "$PWD/$ZIG_DIR" >> $GITHUB_PATH
+          cargo install cargo-zigbuild
 
-      # - name: Install Dependencies (macOS)
-      #   if: runner.os == 'macOS'
-      #   run: |
-      #     brew install ninja cmake llvm ccache
+      - name: Confirm Zig version
+        run: zig version
 
-      # - name: Install Dependencies (Windows)
-      #   if: runner.os == 'Windows'
-      #   run: |
-      #     choco install ninja cmake llvm ccache
+      - name: Build with cargo-zigbuild
+        run: cargo zigbuild --release --target=${{ matrix.target }}
 
-      - name: Setup CCache
-        shell: bash
-        run: |
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            echo "CCACHE_DIR=C:/Users/runneradmin/.ccache" >> $GITHUB_ENV
-          else
-            echo "CCACHE_DIR=$HOME/.ccache" >> $GITHUB_ENV
-          fi
-          echo "CCACHE_COMPRESS=1" >> $GITHUB_ENV
-          echo "CCACHE_MAXSIZE=500M" >> $GITHUB_ENV
+      - name: Run tests (only on native linux)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: cargo test --release
 
-      - name: Restore CCache
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.CCACHE_DIR }}
-          key: ${{ runner.os }}-ccache-${{ github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-ccache-
+  windows:
+    name: Windows-x86_64-pc-windows-msvc
+    runs-on: windows-latest
 
-      - name: Configure CMake
-        shell: bash
-        run: |
-          mkdir build
-          cd build
+    steps:
+      - uses: actions/checkout@v4
 
-          if [ "${RUNNER_OS}" = "Linux" ]; then
-            EXTRA_OPTS="-DSIB_BUILD_BENCH=ON -DSIB_BUILD_TEST=ON -DSIB_NET_PROXYGEN=ON -DSIB_DB_FDB=ON"
-          else
-            EXTRA_OPTS=""
-          fi
+      - name: Set up Rust
+        run: rustup default stable
 
-          cmake .. -G Ninja \
-            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-            ${EXTRA_OPTS} \
-            ${{ matrix.cmake_compiler_options }}
+      - name: Add Windows target
+        run: rustup target add x86_64-pc-windows-msvc
 
       - name: Build
-        shell: bash
-        run: |
-          cd build
-          if [ "$(uname)" == "Darwin" ]; then
-            CORES=$(sysctl -n hw.ncpu)
-          else
-            CORES=$(nproc)
-          fi
-          ninja -j$CORES
+        run: cargo build --release
 
-      - name: Run Tests
-        shell: bash
-        run: |
-          cd build
-          echo "Running sib_test"
-          ./sib_test
+      - name: Test
+        run: cargo test --release
 
-      - name: Run Benchmarks
-        shell: bash
-        run: |
-          cd build
-          echo "Running sib_bench"
-          ./sib_bench
+  macos:
+    name: macOS-arm64
+    runs-on: macos-14
 
-  # android:
-  #   name: android
-  #   runs-on: ubuntu-latest
-  #   strategy:
-  #     matrix:
-  #       abi: [armeabi-v7a, arm64-v8a, x86, x86_64]
+    steps:
+      - uses: actions/checkout@v4
 
-  #   steps:
-  #     - name: Checkout
-  #       uses: actions/checkout@v4
+      - name: Build
+        run: cargo build --release
 
-  #     - name: Install Android NDK
-  #       uses: nttld/setup-ndk@v1
-  #       with:
-  #         ndk-version: r26d
+      - name: Test
+        run: cargo test --release
 
-  #     - name: Install CCache (Android job)
-  #       run: |
-  #         sudo apt-get update
-  #         sudo apt-get install -y ccache
+  ios:
+    name: iOS-arm64
+    runs-on: macos-14
 
-  #     - name: Configure Android CMake for ${{ matrix.abi }}
-  #       run: |
-  #         mkdir build-android-${{ matrix.abi }} && cd build-android-${{ matrix.abi }}
-  #         cmake .. -G Ninja \
-  #           -DCMAKE_SYSTEM_NAME=Android \
-  #           -DCMAKE_ANDROID_NDK=$ANDROID_NDK_ROOT \
-  #           -DCMAKE_ANDROID_ARCH_ABI=${{ matrix.abi }} \
-  #           -DCMAKE_ANDROID_STL_TYPE=c++_static \
-  #           -DCMAKE_ANDROID_NDK_TOOLCHAIN_VERSION=clang \
-  #           -DCMAKE_CXX_SCAN_FOR_MODULES=OFF \
-  #           -DCMAKE_C_COMPILER_LAUNCHER=ccache \
-  #           -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-  #           -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-  #           -DSIB_NET_PROXYGEN=ON \
-  #           -DCMAKE_BUILD_TYPE=Release
+    steps:
+      - uses: actions/checkout@v4
 
-  #     - name: Build Android ${{ matrix.abi }}
-  #       run: |
-  #         cd build-android-${{ matrix.abi }}
-  #         ninja -j$(nproc)
+      - name: Add iOS target
+        run: rustup target add aarch64-apple-ios
 
-  # ios:
-  #   name: iOS
-  #   runs-on: macos-latest
-  #   steps:
-  #     - name: Checkout
-  #       uses: actions/checkout@v4
+      - name: Install cargo-lipo
+        run: cargo install cargo-lipo
 
-  #     - name: Install CCache (macOS)
-  #       run: |
-  #         brew install ccache
+      - name: Build staticlib for iOS
+        run: cargo lipo --release --targets=aarch64-apple-ios
 
-  #     - name: Setup CCache
-  #       run: |
-  #         echo "CCACHE_COMPRESS=1" >> $GITHUB_ENV
-  #         echo "CCACHE_MAXSIZE=500M" >> $GITHUB_ENV
-  #         echo "CCACHE_DIR=$HOME/.ccache" >> $GITHUB_ENV
+  android:
+    name: Android NDK-${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          [armv7-linux-androideabi, aarch64-linux-android, x86_64-linux-android]
 
-  #     - name: Restore CCache
-  #       uses: actions/cache@v4
-  #       with:
-  #         path: ${{ env.CCACHE_DIR }}
-  #         key: ios-ccache-${{ github.sha }}
-  #         restore-keys: |
-  #           ios-ccache-
+    steps:
+      - uses: actions/checkout@v4
 
-  #     - name: Configure iOS Build
-  #       run: |
-  #         mkdir build-ios
-  #         cd build-ios
-  #         cmake .. -G Ninja \
-  #           -DCMAKE_SYSTEM_NAME=iOS \
-  #           -DCMAKE_OSX_ARCHITECTURES=arm64 \
-  #           -DCMAKE_OSX_SYSROOT=$(xcrun --sdk iphoneos --show-sdk-path) \
-  #           -DCMAKE_C_COMPILER=clang \
-  #           -DCMAKE_CXX_COMPILER=clang++ \
-  #           -DCMAKE_C_COMPILER_LAUNCHER=ccache \
-  #           -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-  #           -DCMAKE_CXX_SCAN_FOR_MODULES=OFF \
-  #           -DCMAKE_BUILD_TYPE=Release
+      - name: Add Android target
+        run: rustup target add ${{ matrix.target }}
 
-  #     - name: Build iOS
-  #       run: |
-  #         cd build-ios
-  #         CORES=$(sysctl -n hw.ncpu)
-  #         ninja -j$CORES
+      - name: Install NDK + cargo-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r25b
+          add-to-path: true
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk
+
+      - name: Build
+        run: cargo ndk -t ${{ matrix.target }} -o ./target build --release
