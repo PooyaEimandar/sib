@@ -169,7 +169,7 @@ fn each_connection_loop<T: HttpService>(stream: &mut TcpStream, mut service: T) 
         let read_cnt = stream.read(read_buf)?;
         if read_cnt == 0 {
             //connection was closed
-            return err(io::Error::new(io::ErrorKind::BrokenPipe, "closed"));
+            return Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed"));
         }
         unsafe { req_buf.advance_mut(read_cnt) };
 
