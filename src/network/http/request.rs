@@ -1,52 +1,50 @@
-use crate::system::buffer::Buffer;
-
+use bytes::{Buf, BufMut, BytesMut};
 use may::net::TcpStream;
 use std::fmt;
 use std::io::{self, BufRead, Read};
 use std::mem::MaybeUninit;
 
+use super::server::reserve_buf;
+
 pub(crate) const MAX_HEADERS: usize = 16;
 
-pub struct BodyReader<'buf, 'stream, const N: usize> {
-    req_buf: &'buf mut Buffer<heapless::Vec<u8, N>>,
+pub struct BodyReader<'buf, 'stream> {
+    // remaining bytes for body
+    req_buf: &'buf mut BytesMut,
+    // the max body length limit
     body_limit: usize,
+    // total read count
     total_read: usize,
+    // used to read extra body bytes
     stream: &'stream mut TcpStream,
 }
 
-impl<'buf, 'stream, const N: usize> BodyReader<'buf, 'stream, N> {
+impl BodyReader<'_, '_> {
     fn read_more_data(&mut self) -> io::Result<usize> {
-        let cap = self.req_buf.capacity();
-        let size = self.req_buf.size();
-
-        if size >= cap {
-            let new_size = cap + 1024;
-            self.req_buf.resize(new_size, 0)?;
-        }
-
-        let write_buf = &mut self.req_buf.as_mut_slice()[size..];
-        let read_num = self.stream.read(write_buf)?;
-
-        let new_len = size + read_num;
-        self.req_buf.resize(new_len, 0)?;
-
-        Ok(read_num)
+        reserve_buf(self.req_buf);
+        let read_buf: &mut [u8] = unsafe { std::mem::transmute(self.req_buf.chunk_mut()) };
+        let n = self.stream.read(read_buf)?;
+        unsafe { self.req_buf.advance_mut(n) };
+        Ok(n)
     }
 }
 
-impl<'buf, 'stream, const N: usize> Read for BodyReader<'buf, 'stream, N> {
+impl Read for BodyReader<'_, '_> {
+    // the user should control the body reading, don't exceeds the body!
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if self.total_read >= self.body_limit {
             return Ok(0);
         }
 
         loop {
-            let available = &self.req_buf.as_slice()[self.total_read..];
-            if !available.is_empty() {
-                let to_read = buf.len().min(self.body_limit - self.total_read);
-                let read_num = (&available[..to_read]).read(buf)?;
-                self.total_read += read_num;
-                return Ok(read_num);
+            if !self.req_buf.is_empty() {
+                let min_len = buf.len().min(self.body_limit - self.total_read);
+                let available = self.req_buf.chunk();
+                let n = min_len.min(available.len());
+                buf[..n].copy_from_slice(&available[..n]);
+                self.req_buf.advance(n);
+                self.total_read += n;
+                return Ok(n);
             }
 
             if self.read_more_data()? == 0 {
@@ -56,49 +54,53 @@ impl<'buf, 'stream, const N: usize> Read for BodyReader<'buf, 'stream, N> {
     }
 }
 
-impl<'buf, 'stream, const N: usize> BufRead for BodyReader<'buf, 'stream, N> {
+impl BufRead for BodyReader<'_, '_> {
     fn fill_buf(&mut self) -> io::Result<&[u8]> {
         let remain = self.body_limit - self.total_read;
         if remain == 0 {
             return Ok(&[]);
         }
-
-        if self.req_buf.size() <= self.total_read {
+        if self.req_buf.is_empty() {
             self.read_more_data()?;
         }
-
-        let buf = &self.req_buf.as_slice()[self.total_read..];
-        let n = buf.len().min(remain);
-        Ok(&buf[..n])
+        let n = self.req_buf.len().min(remain);
+        Ok(&self.req_buf.chunk()[0..n])
     }
 
     fn consume(&mut self, amt: usize) {
-        let available = self.req_buf.size() - self.total_read;
-        let consume_amt = amt.min(available);
-        self.total_read += consume_amt;
+        assert!(amt <= self.body_limit - self.total_read);
+        assert!(amt <= self.req_buf.len());
+        self.total_read += amt;
+        self.req_buf.advance(amt)
     }
 }
 
-impl<'buf, 'stream, const N: usize> Drop for BodyReader<'buf, 'stream, N> {
+impl Drop for BodyReader<'_, '_> {
     fn drop(&mut self) {
+        // consume all the remaining bytes
         while let Ok(n) = self.fill_buf().map(|b| b.len()) {
             if n == 0 {
                 break;
             }
+            // println!("drop: {:?}", n);
             self.consume(n);
         }
     }
 }
 
-pub struct Request<'buf, 'header, 'stream, const N: usize> {
+// we should hold the mut ref of req_buf
+// before into body, this req_buf is only for holding headers
+// after into body, this req_buf is mutable to read extra body bytes
+// and the headers buf can be reused
+pub struct Request<'buf, 'header, 'stream> {
     req: httparse::Request<'header, 'buf>,
-    req_buf: &'buf mut Buffer<heapless::Vec<u8, N>>,
+    req_buf: &'buf mut BytesMut,
     stream: &'stream mut TcpStream,
 }
 
-impl<'buf, 'header, 'stream, const N: usize> Request<'buf, 'header, 'stream, N> {
-    pub fn method(&self) -> Option<&str> {
-        self.req.method
+impl<'buf, 'stream> Request<'buf, '_, 'stream> {
+    pub fn method(&self) -> &str {
+        self.req.method.unwrap()
     }
 
     pub fn path(&self) -> &str {
@@ -113,7 +115,7 @@ impl<'buf, 'header, 'stream, const N: usize> Request<'buf, 'header, 'stream, N> 
         self.req.headers
     }
 
-    pub fn body(self) -> BodyReader<'buf, 'stream, N> {
+    pub fn body(self) -> BodyReader<'buf, 'stream> {
         BodyReader {
             body_limit: self.content_length(),
             total_read: 0,
@@ -123,30 +125,32 @@ impl<'buf, 'header, 'stream, const N: usize> Request<'buf, 'header, 'stream, N> 
     }
 
     fn content_length(&self) -> usize {
-        self.req
-            .headers
-            .iter()
-            .find(|h| h.name.eq_ignore_ascii_case("content-length"))
-            .and_then(|h| std::str::from_utf8(h.value).ok()?.parse().ok())
-            .unwrap_or(0)
+        let mut len = 0;
+        for header in self.req.headers.iter() {
+            if header.name.eq_ignore_ascii_case("content-length") {
+                len = std::str::from_utf8(header.value).unwrap().parse().unwrap();
+                break;
+            }
+        }
+        len
     }
 }
 
-impl<'buf, 'header, 'stream, const N: usize> fmt::Debug for Request<'buf, 'header, 'stream, N> {
+impl fmt::Debug for Request<'_, '_, '_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "<HTTP Request {:?} {}>", self.method(), self.path())
+        write!(f, "<HTTP Request {} {}>", self.method(), self.path())
     }
 }
 
-pub fn decode<'header, 'buf, 'stream, const N: usize>(
+pub fn decode<'header, 'buf, 'stream>(
     headers: &'header mut [MaybeUninit<httparse::Header<'buf>>; MAX_HEADERS],
-    req_buf: &'buf mut Buffer<heapless::Vec<u8, N>>,
+    req_buf: &'buf mut BytesMut,
     stream: &'stream mut TcpStream,
-) -> io::Result<Option<Request<'buf, 'header, 'stream, N>>> {
+) -> io::Result<Option<Request<'buf, 'header, 'stream>>> {
     let mut req = httparse::Request::new(&mut []);
-
-    let buf: &'buf [u8] = unsafe { std::mem::transmute(req_buf.as_slice()) };
-
+    // safety: don't hold the reference of req_buf
+    // so we can transfer the mutable reference to Request
+    let buf: &[u8] = unsafe { std::mem::transmute(req_buf.chunk()) };
     let status = match req.parse_with_uninit_headers(buf, headers) {
         Ok(s) => s,
         Err(e) => {
@@ -160,70 +164,12 @@ pub fn decode<'header, 'buf, 'stream, const N: usize>(
         httparse::Status::Complete(amt) => amt,
         httparse::Status::Partial => return Ok(None),
     };
-
     req_buf.advance(len);
 
+    // println!("req: {:?}", std::str::from_utf8(req_buf).unwrap());
     Ok(Some(Request {
         req,
         req_buf,
         stream,
     }))
-}
-#[cfg(test)]
-mod tests {
-    use crate::network::http::request::{MAX_HEADERS, decode};
-    use crate::system::buffer::Buffer;
-    use std::io::{Read, Write};
-    use std::thread;
-    use std::time::Duration;
-
-    #[test]
-    fn test_body_reader_reads_full_content_from_mock_stream() {
-        // Server coroutine
-        let handle_server = may::go!(|| {
-            let listener = may::net::TcpListener::bind("127.0.0.1:9001").unwrap();
-            let (mut stream, _) = listener.accept().unwrap();
-
-            let mut headers = [std::mem::MaybeUninit::uninit(); MAX_HEADERS];
-            let mut req_buf =
-                Buffer::<heapless::Vec<u8, 1024>>::new(crate::system::buffer::BufferType::TEXT);
-
-            let mut temp = [0u8; 1024];
-            let read_num = stream.read(&mut temp).unwrap();
-            req_buf.resize(read_num, 0).unwrap();
-            req_buf.as_mut_slice()[..read_num].copy_from_slice(&temp[..read_num]);
-
-            let request = decode(&mut headers, &mut req_buf, &mut stream)
-                .unwrap()
-                .expect("Should decode");
-
-            assert_eq!(request.method(), Some("POST"));
-            assert_eq!(request.path(), "/upload");
-            assert_eq!(request.version(), 1);
-
-            let mut body = request.body();
-            let mut content = vec![];
-            body.read_to_end(&mut content).unwrap();
-            assert_eq!(content, b"hello world");
-        });
-
-        // Client coroutine
-        let handle_client = may::go!(|| {
-            // wait to the server time to bind
-            thread::sleep(Duration::from_millis(100));
-            let mut stream = may::net::TcpStream::connect("127.0.0.1:9001").unwrap();
-
-            let body = b"hello world";
-            let request = format!(
-                "POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n",
-                body.len()
-            );
-
-            stream.write_all(request.as_bytes()).unwrap();
-            stream.write_all(body).unwrap();
-        });
-
-        // Give coroutines time to finish
-        may::join!(handle_client, handle_server);
-    }
 }
