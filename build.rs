@@ -12,10 +12,4 @@ fn main() {
         now.second()
     );
     println!("cargo:rustc-env=SIB_BUILD_VERSION={}", version);
-
-    if let Ok(target_os) = std::env::var("CARGO_CFG_TARGET_OS") {
-        if target_os == "linux" {
-            println!("cargo:rustc-env=CFLAGS=-Wno-error=date-time");
-        }
-    }
 }
