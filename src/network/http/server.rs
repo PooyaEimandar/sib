@@ -1,5 +1,5 @@
-use super::request::Request;
-use super::response::Response;
+use super::request::{self, Request};
+use super::response::{self, Response};
 use std::io::{self, Read, Write};
 use std::mem::MaybeUninit;
 use std::net::ToSocketAddrs;
@@ -119,10 +119,6 @@ pub(crate) fn reserve_buf(buf: &mut BytesMut) {
 
 #[cfg(unix)]
 fn each_connection_loop<T: HttpService>(stream: &mut TcpStream, mut service: T) -> io::Result<()> {
-    use crate::network::http::response;
-
-    use super::request;
-
     let mut req_buf = BytesMut::with_capacity(BUF_LEN);
     let mut rsp_buf = BytesMut::with_capacity(BUF_LEN);
     let mut body_buf = BytesMut::with_capacity(MAX_BODY_LEN);
