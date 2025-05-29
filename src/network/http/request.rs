@@ -4,8 +4,6 @@ use std::fmt;
 use std::io::{self, BufRead, Read};
 use std::mem::MaybeUninit;
 
-use super::server::reserve_buf;
-
 pub(crate) const MAX_HEADERS: usize = 16;
 
 pub struct BodyReader<'buf, 'stream> {
@@ -21,16 +19,22 @@ pub struct BodyReader<'buf, 'stream> {
 
 impl BodyReader<'_, '_> {
     fn read_more_data(&mut self) -> io::Result<usize> {
-        reserve_buf(self.req_buf);
+        if self.req_buf.remaining_mut() < 1024 {
+            self.req_buf.reserve(4096);
+        }
+
         let read_buf: &mut [u8] = unsafe { std::mem::transmute(self.req_buf.chunk_mut()) };
-        let n = self.stream.read(read_buf)?;
+
+        // Construct IoSliceMut from the buffer chunk
+        let mut slices = [io::IoSliceMut::new(read_buf)];
+        let n = self.stream.read_vectored(&mut slices)?;
+
         unsafe { self.req_buf.advance_mut(n) };
         Ok(n)
     }
 }
 
 impl Read for BodyReader<'_, '_> {
-    // the user should control the body reading, don't exceeds the body!
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if self.total_read >= self.body_limit {
             return Ok(0);
@@ -88,10 +92,6 @@ impl Drop for BodyReader<'_, '_> {
     }
 }
 
-// we should hold the mut ref of req_buf
-// before into body, this req_buf is only for holding headers
-// after into body, this req_buf is mutable to read extra body bytes
-// and the headers buf can be reused
 pub struct Request<'buf, 'header, 'stream> {
     req: httparse::Request<'header, 'buf>,
     req_buf: &'buf mut BytesMut,
@@ -148,8 +148,7 @@ pub fn decode<'header, 'buf, 'stream>(
     stream: &'stream mut TcpStream,
 ) -> io::Result<Option<Request<'buf, 'header, 'stream>>> {
     let mut req = httparse::Request::new(&mut []);
-    // safety: don't hold the reference of req_buf
-    // so we can transfer the mutable reference to Request
+
     let buf: &[u8] = unsafe { std::mem::transmute(req_buf.chunk()) };
     let status = match req.parse_with_uninit_headers(buf, headers) {
         Ok(s) => s,
