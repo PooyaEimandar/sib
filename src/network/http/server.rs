@@ -12,10 +12,12 @@ use may::io::WaitIo;
 use may::net::{TcpListener, TcpStream};
 use may::{coroutine, go};
 
+const MIN_BUF_LEN: usize = 1024;
 const MAX_BODY_LEN: usize = 4096;
 const BUF_LEN: usize = MAX_BODY_LEN * 8;
 
-macro_rules! t_c {
+// move or continue
+macro_rules! mc {
     ($e: expr) => {
         match $e {
             Ok(val) => val,
@@ -48,17 +50,17 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
                 #[cfg(windows)]
                 use std::os::windows::io::AsRawSocket;
                 for stream in listener.incoming() {
-                    let mut stream = t_c!(stream);
+                    let mut stream = mc!(stream);
                     #[cfg(unix)]
                     let id = stream.as_raw_fd() as usize;
                     #[cfg(windows)]
                     let id = stream.as_raw_socket() as usize;
-                    t_c!(stream.set_nodelay(true));
+                    mc!(stream.set_nodelay(true));
                     let service = self.new_service(id);
                     let builder = may::coroutine::Builder::new().id(id);
                     go!(
                         builder,
-                        move || if let Err(_e) = each_connection_loop(&mut stream, service) {
+                        move || if let Err(_e) = serve(&mut stream, service) {
                             //s_error!("service err = {e:?}");
                             stream.shutdown(std::net::Shutdown::Both).ok();
                         }
@@ -72,7 +74,7 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
 
 #[cfg(unix)]
 #[inline]
-fn nonblock_read(stream: &mut impl Read, req_buf: &mut BytesMut) -> io::Result<bool> {
+fn read(stream: &mut impl Read, req_buf: &mut BytesMut) -> io::Result<bool> {
     reserve_buf(req_buf);
     let read_buf: &mut [u8] = unsafe { std::mem::transmute(req_buf.chunk_mut()) };
     let len = read_buf.len();
@@ -93,7 +95,7 @@ fn nonblock_read(stream: &mut impl Read, req_buf: &mut BytesMut) -> io::Result<b
 
 #[cfg(unix)]
 #[inline]
-fn nonblock_write(stream: &mut impl Write, rsp_buf: &mut BytesMut) -> io::Result<usize> {
+fn write(stream: &mut impl Write, rsp_buf: &mut BytesMut) -> io::Result<usize> {
     let write_buf = rsp_buf.chunk();
     let len = write_buf.len();
     let mut write_cnt = 0;
@@ -112,19 +114,19 @@ fn nonblock_write(stream: &mut impl Write, rsp_buf: &mut BytesMut) -> io::Result
 #[inline]
 pub(crate) fn reserve_buf(buf: &mut BytesMut) {
     let rem = buf.capacity() - buf.len();
-    if rem < 1024 {
+    if rem < MIN_BUF_LEN {
         buf.reserve(BUF_LEN - rem);
     }
 }
 
 #[cfg(unix)]
-fn each_connection_loop<T: HttpService>(stream: &mut TcpStream, mut service: T) -> io::Result<()> {
+fn serve<T: HttpService>(stream: &mut TcpStream, mut service: T) -> io::Result<()> {
     let mut req_buf = BytesMut::with_capacity(BUF_LEN);
     let mut rsp_buf = BytesMut::with_capacity(BUF_LEN);
     let mut body_buf = BytesMut::with_capacity(MAX_BODY_LEN);
 
     loop {
-        let read_blocked = nonblock_read(stream.inner_mut(), &mut req_buf)?;
+        let read_blocked = read(stream.inner_mut(), &mut req_buf)?;
 
         // prepare the requests, we should make sure the request is fully read
         loop {
@@ -145,7 +147,7 @@ fn each_connection_loop<T: HttpService>(stream: &mut TcpStream, mut service: T) 
         }
 
         // write out the responses
-        nonblock_write(stream.inner_mut(), &mut rsp_buf)?;
+        write(stream.inner_mut(), &mut rsp_buf)?;
 
         if read_blocked {
             stream.wait_io();
@@ -154,7 +156,7 @@ fn each_connection_loop<T: HttpService>(stream: &mut TcpStream, mut service: T) 
 }
 
 #[cfg(not(unix))]
-fn each_connection_loop<T: HttpService>(stream: &mut TcpStream, mut service: T) -> io::Result<()> {
+fn serve<T: HttpService>(stream: &mut TcpStream, mut service: T) -> io::Result<()> {
     let mut req_buf = BytesMut::with_capacity(BUF_LEN);
     let mut rsp_buf = BytesMut::with_capacity(BUF_LEN);
     let mut body_buf = BytesMut::with_capacity(BUF_LEN);
