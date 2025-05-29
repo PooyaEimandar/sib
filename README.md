@@ -26,6 +26,6 @@ A high-performance, secure, and cross-platform modules optimized for efficiency,
 
 Sib's HTTP 1.1 uses:
 
-- [`may`](https://github.com/Xudong-Huang/may_minihttp) for coroutine scheduling.
+- [`may`](https://github.com/Xudong-Huang/may) for coroutine scheduling.
 - [`bytes`](https://github.com/tokio-rs/bytes) for zero-copy HTTP parser.
 - [`mimalloc`](https://github.com/microsoft/mimalloc) a compact general purpose allocator with excellent performance.
