@@ -11,7 +11,7 @@ A high-performance, secure, and cross-platform modules optimized for efficiency,
 - 🧠 12-core CPU
 - 🧮 32 GB RAM
 - 🐳 Docker container
-- ⚙️ `target-cpu=native`
+- ⚙️ `target-cpu=native` on Apple Macbook Pro M2 Max 2023
 
 | Concurrency | Requests/sec  | Latency (avg) | Transfer/sec |
 | ----------- | ------------- | ------------- | ------------ |

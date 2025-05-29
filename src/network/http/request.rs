@@ -4,6 +4,8 @@ use std::fmt;
 use std::io::{self, BufRead, Read};
 use std::mem::MaybeUninit;
 
+use super::server::reserve_buf;
+
 pub(crate) const MAX_HEADERS: usize = 16;
 
 pub struct BodyReader<'buf, 'stream> {
@@ -19,9 +21,7 @@ pub struct BodyReader<'buf, 'stream> {
 
 impl BodyReader<'_, '_> {
     fn read_more_data(&mut self) -> io::Result<usize> {
-        if self.req_buf.remaining_mut() < 1024 {
-            self.req_buf.reserve(4096);
-        }
+        reserve_buf(self.req_buf);
 
         let read_buf: &mut [u8] = unsafe { std::mem::transmute(self.req_buf.chunk_mut()) };
 
