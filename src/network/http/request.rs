@@ -22,8 +22,11 @@ pub struct BodyReader<'buf, 'stream> {
 impl BodyReader<'_, '_> {
     fn read_more_data(&mut self) -> io::Result<usize> {
         reserve_buf(self.req_buf);
-        let read_buf: &mut [u8] = unsafe { std::mem::transmute(self.req_buf.chunk_mut()) };
-        let n = self.stream.read(read_buf)?;
+        let chunk_mut = self.req_buf.chunk_mut();
+        let mut_slice =
+            unsafe { std::slice::from_raw_parts_mut(chunk_mut.as_mut_ptr(), chunk_mut.len()) };
+        let mut slices = [io::IoSliceMut::new(mut_slice)];
+        let n = self.stream.read_vectored(&mut slices)?;
         unsafe { self.req_buf.advance_mut(n) };
         Ok(n)
     }
