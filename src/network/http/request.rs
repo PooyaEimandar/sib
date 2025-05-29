@@ -152,7 +152,7 @@ pub fn decode<'header, 'buf, 'stream>(
         Ok(s) => s,
         Err(e) => {
             let msg = format!("failed to parse http request: {e:?}");
-            eprintln!("{msg}");
+            //s_error!("{msg}");
             return Err(io::Error::other(msg));
         }
     };

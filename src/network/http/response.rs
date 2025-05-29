@@ -1,19 +1,13 @@
 use super::{date::append_date, request::MAX_HEADERS};
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use std::io;
 
 pub struct Response<'a> {
     headers: [&'static str; MAX_HEADERS],
     headers_len: usize,
     status_message: StatusMessage,
-    body: Body,
+    body: bytes::Bytes,
     rsp_buf: &'a mut BytesMut,
-}
-
-pub enum Body {
-    Str(&'static str),
-    Bytes(bytes::Bytes),
-    Dummy,
 }
 
 struct StatusMessage {
@@ -28,7 +22,7 @@ impl<'a> Response<'a> {
         Response {
             headers,
             headers_len: 0,
-            body: Body::Dummy,
+            body: Bytes::new(),
             status_message: StatusMessage {
                 code: 200,
                 msg: "Ok",
@@ -45,58 +39,41 @@ impl<'a> Response<'a> {
 
     #[inline]
     pub fn header(&mut self, header: &'static str) -> &mut Self {
-        self.headers[self.headers_len] = header;
-        self.headers_len += 1;
+        if self.headers_len < self.headers.len() {
+            self.headers[self.headers_len] = header;
+            self.headers_len += 1;
+        } else {
+            //s_error!("Too many headers");
+        }
         self
     }
 
     #[inline]
-    pub fn body_static(&mut self, s: &'static str) {
-        self.body = Body::Str(s);
-    }
-
-    #[inline]
     pub fn body(&mut self, bytes: bytes::Bytes) {
-        self.body = Body::Bytes(bytes);
+        self.body = bytes;
     }
 
     #[inline]
     pub fn body_mut(&mut self) -> &mut BytesMut {
-        match self.body {
-            Body::Dummy => {}
-            Body::Str(s) => {
-                self.rsp_buf.extend_from_slice(s.as_bytes());
-                self.body = Body::Dummy;
-            }
-            Body::Bytes(ref b) => {
-                self.rsp_buf.extend_from_slice(b);
-                self.body = Body::Dummy;
-            }
-        }
+        self.rsp_buf.extend_from_slice(&self.body);
         self.rsp_buf
     }
 
     #[inline]
     fn body_len(&self) -> usize {
-        match self.body {
-            Body::Dummy => self.rsp_buf.len(),
-            Body::Str(s) => s.len(),
-            Body::Bytes(ref b) => b.len(),
-        }
+        self.body.len()
     }
 
     #[inline]
     fn get_body(&mut self) -> &[u8] {
-        match self.body {
-            Body::Dummy => self.rsp_buf.as_ref(),
-            Body::Str(s) => s.as_bytes(),
-            Body::Bytes(ref b) => b,
-        }
+        self.rsp_buf.extend_from_slice(&self.body);
+        &self.rsp_buf
     }
 }
 
 impl Drop for Response<'_> {
     fn drop(&mut self) {
+        let _ = self.body_mut();
         self.rsp_buf.clear();
     }
 }
