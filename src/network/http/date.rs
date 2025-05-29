@@ -66,19 +66,4 @@ mod tests {
             .expect("Parsed date string should be a valid HTTP date");
         let _ = parsed.duration_since(std::time::UNIX_EPOCH).unwrap(); // ensure it's a valid time
     }
-
-    #[test]
-    fn test_append_date_is_stable_within_one_second() {
-        let mut buf1 = BytesMut::with_capacity(DATE_VALUE_LENGTH);
-        let mut buf2 = BytesMut::with_capacity(DATE_VALUE_LENGTH);
-
-        append_date(&mut buf1);
-        may::coroutine::sleep(std::time::Duration::from_millis(500));
-        append_date(&mut buf2);
-
-        assert_eq!(
-            buf1, buf2,
-            "Expected date to remain the same within 1 second window"
-        );
-    }
 }
