@@ -4,6 +4,8 @@ use std::fmt;
 use std::io::{self, BufRead, Read};
 use std::mem::MaybeUninit;
 
+use super::server::reserve_buf;
+
 pub(crate) const MAX_HEADERS: usize = 16;
 
 pub struct BodyReader<'buf, 'stream> {
