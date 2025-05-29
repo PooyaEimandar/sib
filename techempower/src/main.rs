@@ -31,7 +31,7 @@ impl H1ServiceFactory for H1Server<H1Service> {
 
 fn main() {
     // Pick a port and start the server
-    let addr = "127.0.0.1:8080";
+    let addr = "0.0.0.0:8080";
     H1Server(H1Service)
         .start(&addr)
         .expect("h1 server failed to start")
