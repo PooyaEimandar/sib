@@ -1,10 +1,9 @@
 use super::session::{self, Session};
+use bytes::{BufMut, BytesMut};
 use std::io::{self, Read};
 use std::mem::MaybeUninit;
 use std::net::ToSocketAddrs;
 
-#[cfg(unix)]
-use bytes::{BufMut, BytesMut};
 #[cfg(unix)]
 use may::io::WaitIo;
 use may::net::{TcpListener, TcpStream};
@@ -133,7 +132,7 @@ fn serve<T: HttpService>(stream: &mut TcpStream, mut service: T) -> io::Result<(
             let mut headers = [MaybeUninit::uninit(); session::MAX_HEADERS];
             let mut sess =
                 match session::new_session(stream, &mut headers, &mut req_buf, &mut rsp_buf)? {
-                    Some(req) => req,
+                    Some(sess) => sess,
                     None => break,
                 };
 
@@ -155,9 +154,10 @@ fn serve<T: HttpService>(stream: &mut TcpStream, mut service: T) -> io::Result<(
 
 #[cfg(not(unix))]
 fn serve<T: HttpService>(stream: &mut TcpStream, mut service: T) -> io::Result<()> {
+    use std::io::Write;
+
     let mut req_buf = BytesMut::with_capacity(BUF_LEN);
     let mut rsp_buf = BytesMut::with_capacity(BUF_LEN);
-    let mut body_buf = BytesMut::with_capacity(BUF_LEN);
     loop {
         // read the socket for requests
         reserve_buf(&mut req_buf);
@@ -173,23 +173,23 @@ fn serve<T: HttpService>(stream: &mut TcpStream, mut service: T) -> io::Result<(
         if read_cnt > 0 {
             loop {
                 let mut headers = [MaybeUninit::uninit(); session::MAX_HEADERS];
-                let req = match session::decode(&mut headers, &mut req_buf, stream)? {
-                    Some(req) => req,
-                    None => break,
-                };
-                let mut rsp = Response::new(&mut body_buf);
-                match service.call(req, &mut rsp) {
-                    Ok(()) => response::encode(rsp, &mut rsp_buf),
-                    Err(e) => {
-                        //s_error!("service err = {:?}", e);
-                        response::encode_error(e, &mut rsp_buf);
+                let mut sess =
+                    match session::new_session(stream, &mut headers, &mut req_buf, &mut rsp_buf)? {
+                        Some(sess) => sess,
+                        None => break,
+                    };
+
+                if let Err(e) = service.call(&mut sess) {
+                    if e.kind() == std::io::ErrorKind::ConnectionAborted {
+                        // abort the connection immediately
+                        return Err(e);
                     }
                 }
             }
         }
 
         // send the result back to client
-        stream.write_all(&rsp_buf)?;
+        stream.write(&rsp_buf)?;
     }
 }
 
