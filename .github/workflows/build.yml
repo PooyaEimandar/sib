@@ -33,10 +33,16 @@ jobs:
       - name: Confirm Zig version
         run: zig version
 
+      - name: Run Clippy (only on native)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          rustup component add clippy
+          cargo clippy --all-targets --all-features -- -D warnings
+
       - name: Build with cargo-zigbuild
         run: cargo zigbuild --release --target=${{ matrix.target }}
 
-      - name: Run tests (only on native linux)
+      - name: Run Tests (only on native)
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: cargo test --release
 
@@ -48,10 +54,13 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Set up Rust
-        run: rustup default stable
+        run: |
+          rustup default stable
+          rustup component add clippy
+          rustup target add x86_64-pc-windows-msvc
 
-      - name: Add Windows target
-        run: rustup target add x86_64-pc-windows-msvc
+      - name: Run Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Build
         run: cargo build --release
@@ -65,6 +74,14 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        run: |
+          rustup default stable
+          rustup component add clippy
+
+      - name: Run Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Build
         run: cargo build --release
@@ -111,5 +128,5 @@ jobs:
       - name: Install cargo-ndk
         run: cargo install cargo-ndk
 
-      - name: Build
+      - name: Build for Android
         run: cargo ndk -t ${{ matrix.target }} -o ./target build --release
