@@ -1,7 +1,7 @@
+use bytes::Bytes;
 use sib::network::http::{
-    request::Request,
-    response::Response,
     server::{H1ServiceFactory, HttpService},
+    session::Session,
 };
 use std::fs;
 
@@ -13,11 +13,15 @@ struct H1Server<T>(pub T);
 struct H1Service;
 
 impl HttpService for H1Service {
-    fn call(&mut self, _req: Request, rsp: &mut Response) -> std::io::Result<()> {
-        const HELLO_WORLD: &str = "Hello, World!";
-        rsp.status_code(200, "OK")
-            .header("Content-Type: text/plain")
-            .body(HELLO_WORLD.as_bytes().into());
+    fn call(&mut self, session: &mut Session) -> std::io::Result<()> {
+        const BODY: Bytes = Bytes::from_static(b"Hello, World!");
+        let sent = session
+            .status_code(200, "OK")
+            .header("Content-Type", "text/plain")?
+            .header("Content-Length", "13")?
+            .body(&BODY)
+            .send()?;
+        println!("Sent {} bytes", sent);
         Ok(())
     }
 }
@@ -25,7 +29,7 @@ impl HttpService for H1Service {
 impl H1ServiceFactory for H1Server<H1Service> {
     type Service = H1Service;
 
-    fn new_service(&self, _id: usize) -> H1Service {
+    fn service(&self, _id: usize) -> H1Service {
         H1Service
     }
 }
