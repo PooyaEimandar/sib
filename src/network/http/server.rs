@@ -1,11 +1,11 @@
-use super::request::{self, Request};
-use super::response::{self, Response};
-use std::io::{self, Read, Write};
+#![allow(dead_code)]
+
+use super::session::{self, Session};
+use std::io::{self, Read};
 use std::mem::MaybeUninit;
 use std::net::ToSocketAddrs;
 
 #[cfg(unix)]
-use bytes::Buf;
 use bytes::{BufMut, BytesMut};
 #[cfg(unix)]
 use may::io::WaitIo;
@@ -14,7 +14,7 @@ use may::{coroutine, go};
 
 const MIN_BUF_LEN: usize = 1024;
 const MAX_BODY_LEN: usize = 4096;
-const BUF_LEN: usize = MAX_BODY_LEN * 8;
+pub const BUF_LEN: usize = MAX_BODY_LEN * 8;
 
 // move or continue
 macro_rules! mc {
@@ -30,7 +30,7 @@ macro_rules! mc {
 }
 
 pub trait HttpService {
-    fn call(&mut self, req: Request, rsp: &mut Response) -> io::Result<()>;
+    fn call(&mut self, req: &mut Session) -> io::Result<()>;
 }
 
 pub trait H1ServiceFactory: Send + Sized + 'static {
@@ -93,24 +93,6 @@ fn read(stream: &mut impl Read, req_buf: &mut BytesMut) -> io::Result<bool> {
     Ok(read_cnt < len)
 }
 
-#[cfg(unix)]
-#[inline]
-fn write(stream: &mut impl Write, rsp_buf: &mut BytesMut) -> io::Result<usize> {
-    let write_buf = rsp_buf.chunk();
-    let len = write_buf.len();
-    let mut write_cnt = 0;
-    while write_cnt < len {
-        match stream.write(unsafe { write_buf.get_unchecked(write_cnt..) }) {
-            Ok(0) => return Err(io::Error::new(io::ErrorKind::BrokenPipe, "write closed")),
-            Ok(n) => write_cnt += n,
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-            Err(e) => return Err(e),
-        }
-    }
-    rsp_buf.advance(write_cnt);
-    Ok(write_cnt)
-}
-
 #[inline]
 pub(crate) fn reserve_buf(buf: &mut BytesMut) {
     let rem = buf.capacity() - buf.len();
@@ -122,32 +104,26 @@ pub(crate) fn reserve_buf(buf: &mut BytesMut) {
 #[cfg(unix)]
 fn serve<T: HttpService>(stream: &mut TcpStream, mut service: T) -> io::Result<()> {
     let mut req_buf = BytesMut::with_capacity(BUF_LEN);
-    let mut rsp_buf = BytesMut::with_capacity(BUF_LEN);
-    let mut body_buf = BytesMut::with_capacity(MAX_BODY_LEN);
+    //let mut body_buf = BytesMut::with_capacity(MAX_BODY_LEN);
 
     loop {
         let read_blocked = read(stream.inner_mut(), &mut req_buf)?;
 
         // prepare the requests, we should make sure the request is fully read
         loop {
-            let mut headers = [MaybeUninit::uninit(); request::MAX_HEADERS];
-            let req = match request::decode(&mut headers, &mut req_buf, stream)? {
+            let mut headers = [MaybeUninit::uninit(); session::MAX_HEADERS];
+            let mut sess = match session::new_session(&mut headers, &mut req_buf, stream)? {
                 Some(req) => req,
                 None => break,
             };
-            reserve_buf(&mut rsp_buf);
-            let mut rsp = Response::new(&mut body_buf);
-            match service.call(req, &mut rsp) {
-                Ok(()) => response::encode(rsp, &mut rsp_buf),
-                Err(e) => {
-                    //s_error!("service err = {e:?}");
-                    response::encode_error(e, &mut rsp_buf);
+
+            if let Err(e) = service.call(&mut sess) {
+                if e.kind() == std::io::ErrorKind::ConnectionAborted {
+                    // abort the connection immediately
+                    return Err(e);
                 }
             }
         }
-
-        // write out the responses
-        write(stream.inner_mut(), &mut rsp_buf)?;
 
         if read_blocked {
             stream.wait_io();
@@ -174,8 +150,8 @@ fn serve<T: HttpService>(stream: &mut TcpStream, mut service: T) -> io::Result<(
         // prepare the requests
         if read_cnt > 0 {
             loop {
-                let mut headers = [MaybeUninit::uninit(); request::MAX_HEADERS];
-                let req = match request::decode(&mut headers, &mut req_buf, stream)? {
+                let mut headers = [MaybeUninit::uninit(); session::MAX_HEADERS];
+                let req = match session::decode(&mut headers, &mut req_buf, stream)? {
                     Some(req) => req,
                     None => break,
                 };
@@ -197,14 +173,15 @@ fn serve<T: HttpService>(stream: &mut TcpStream, mut service: T) -> io::Result<(
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Read, Write};
-    use std::net::TcpStream as StdTcpStream;
-    use std::time::Duration;
+    use std::{
+        io::{Read, Write},
+        net::TcpStream,
+        time::Duration,
+    };
 
     use crate::network::http::{
-        request::Request,
-        response::Response,
         server::{H1ServiceFactory, HttpService},
+        session::Session,
     };
 
     struct H1Server<T>(pub T);
@@ -212,11 +189,21 @@ mod tests {
     struct EchoService;
 
     impl HttpService for EchoService {
-        fn call(&mut self, req: Request, rsp: &mut Response) -> std::io::Result<()> {
-            let body = bytes::Bytes::from(format!("Echo: {} {}", req.method(), req.path()));
-            rsp.status_code(200, "OK")
-                .header("Content-Type: text/plain")
-                .body(body);
+        fn call(&mut self, session: &mut Session) -> std::io::Result<()> {
+            let body = bytes::Bytes::from(format!(
+                "Echo: {:?} {:?}",
+                session.req_method(),
+                session.req_path()
+            ));
+            let mut body_len = itoa::Buffer::new();
+            let body_len_str = body_len.format(body.len());
+            let sent = session
+                .status_code(200, "OK")
+                .header("Content-Type", "text/plain")?
+                .header("Content-Length", body_len_str)?
+                .body(&body)
+                .send()?;
+            println!("Sent {} bytes", sent);
             Ok(())
         }
     }
@@ -252,7 +239,7 @@ mod tests {
             may::coroutine::sleep(Duration::from_millis(100));
 
             // Client sends HTTP request
-            let mut stream = StdTcpStream::connect(&addr).expect("connect");
+            let mut stream = TcpStream::connect(&addr).expect("connect");
             stream
                 .write_all(b"GET /test HTTP/1.1\r\nHost: localhost\r\n\r\n")
                 .unwrap();
@@ -261,7 +248,7 @@ mod tests {
             let n = stream.read(&mut buf).unwrap();
             let response = std::str::from_utf8(&buf[..n]).unwrap();
 
-            assert!(response.contains("HTTP/1.1 200 Ok"));
+            assert!(response.contains("/test"));
             print!("Response: {}", response);
         });
 

@@ -1,862 +1,179 @@
-// use anyhow::bail;
-// use base64::Engine;
-// use bytes::{Buf, BufMut, Bytes, BytesMut};
-// use futures::SinkExt;
-// use http::{HeaderMap, HeaderName, HeaderValue};
-// use sha2::{Digest, Sha256};
-// use std::{
-//     collections::HashMap,
-//     path::{Path, PathBuf},
-//     str::FromStr,
-//     sync::Arc,
-//     time::Duration,
-// };
-// use tokio_quiche::{
-//     buf_factory::BufFactory,
-//     http3::{
-//         H3AuditStats,
-//         driver::{InboundFrameStream, OutboundFrame, OutboundFrameSender},
-//     },
-//     quiche::h3::{self, NameValue},
-// };
+#![allow(dead_code)]
 
-// use crate::s_error;
+use super::reader::Reader;
+use super::server::{BUF_LEN, reserve_buf};
+use bytes::{Buf, BytesMut};
+use may::net::TcpStream;
+use std::io::{self};
+use std::mem::MaybeUninit;
 
-// const MAX_PATH_LENGTH: usize = 1024;
-// const MAX_BODY_SIZE: usize = 10 * 1024 * 1024; // 10MB limit
-// const MAX_WS_PAYLOAD_SIZE: usize = 64 * 1024 * 1024; // 64MB limit
+pub(crate) const MAX_HEADERS: usize = 16;
 
-// #[derive(Debug, Clone, Copy, PartialEq)]
-// pub enum WsOpCode {
-//     Continuation = 0x0,
-//     Text = 0x1,
-//     Binary = 0x2,
-//     Close = 0x8,
-//     Ping = 0x9,
-//     Pong = 0xA,
-// }
+pub struct Session<'buf, 'header, 'stream> {
+    // request headers
+    req: httparse::Request<'header, 'buf>,
+    // request buffer
+    req_buf: &'buf mut BytesMut,
+    // length of response headers
+    rsp_headers_len: usize,
+    // buffer for response
+    rsp_buf: BytesMut,
+    // stream to read body from
+    stream: &'stream mut TcpStream,
+}
 
-// #[derive(Debug, Clone, Copy)]
-// pub enum WsCloseCode {
-//     Normal = 1000,
-//     GoingAway = 1001,
-//     ProtocolError = 1002,
-//     UnsupportedData = 1003,
-//     InvalidPayloadData = 1007,
-//     PolicyViolation = 1008,
-//     MessageTooBig = 1009,
-//     MandatoryExtension = 1010,
-//     InternalServerError = 1011,
-// }
-
-// impl WsCloseCode {
-//     pub fn as_u16(self) -> u16 {
-//         self as u16
+// impl Drop for Request<'_, '_, '_> {
+//     fn drop(&mut self) {
+//         //let _ = self.body_mut();
+//         self.req_buf.clear();
+//         self.rsp_buf.clear();
 //     }
 // }
 
-// /// Supported HTTPMethod. See the definitions in RFC2616 5.1.1
-// #[derive(Debug, Clone, Copy, PartialEq)]
-// pub enum HTTPMethod {
-//     Get,
-//     Post,
-//     Options,
-//     Delete,
-//     Head,
-//     Connect,
-//     ConnectUdp,
-//     Put,
-//     Trace,
-//     Patch,
-//     Sub,
-//     Pub,
-//     UnSub,
-//     UnDefined,
-// }
-
-// impl std::fmt::Display for HTTPMethod {
-//     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-//         let method_str = match self {
-//             HTTPMethod::Get => "GET",
-//             HTTPMethod::Post => "POST",
-//             HTTPMethod::Options => "OPTIONS",
-//             HTTPMethod::Delete => "DELETE",
-//             HTTPMethod::Head => "HEAD",
-//             HTTPMethod::Connect => "CONNECT",
-//             HTTPMethod::ConnectUdp => "CONNECT-UDP",
-//             HTTPMethod::Put => "PUT",
-//             HTTPMethod::Trace => "TRACE",
-//             HTTPMethod::Patch => "PATCH",
-//             HTTPMethod::Sub => "SUB",
-//             HTTPMethod::Pub => "PUB",
-//             HTTPMethod::UnSub => "UNSUB",
-//             HTTPMethod::UnDefined => "UNDEFINED",
-//         };
-//         write!(f, "{}", method_str)
-//     }
-// }
-
-// impl std::str::FromStr for HTTPMethod {
-//     type Err = ();
-
-//     fn from_str(name: &str) -> Result<Self, Self::Err> {
-//         Ok(match name {
-//             "GET" => HTTPMethod::Get,
-//             "POST" => HTTPMethod::Post,
-//             "OPTIONS" => HTTPMethod::Options,
-//             "DELETE" => HTTPMethod::Delete,
-//             "HEAD" => HTTPMethod::Head,
-//             "CONNECT" => HTTPMethod::Connect,
-//             "CONNECT-UDP" => HTTPMethod::ConnectUdp,
-//             "PUT" => HTTPMethod::Put,
-//             "TRACE" => HTTPMethod::Trace,
-//             "PATCH" => HTTPMethod::Patch,
-//             "SUB" => HTTPMethod::Sub,
-//             "PUB" => HTTPMethod::Pub,
-//             "UNSUB" => HTTPMethod::UnSub,
-//             _ => HTTPMethod::UnDefined,
-//         })
-//     }
-// }
-
-// #[derive(Debug, Clone, Copy, PartialEq)]
-// pub enum ProtocolUpgrade {
-//     None,
-//     WebSocket,
-// }
-
-// pub struct H3Session {
-//     _stream_id: u64,
-//     headers: HeaderMap,
-//     in_frame: InboundFrameStream,
-//     out_frame: OutboundFrameSender,
-//     read_fin: bool,
-//     _h3_audit_stats: Arc<H3AuditStats>,
-// }
-
-// pub struct Session {
-//     method: HTTPMethod,
-//     path: String,
-//     host: String,
-//     queries: HashMap<String, Vec<String>>,
-//     res_headers: http::HeaderMap,
-//     h2: Option<ServerSession>,
-//     h3: Option<H3Session>,
-//     protocol_upgrade: ProtocolUpgrade,
-//     status_was_sent: bool,
-// }
-
-// impl Default for Session {
-//     fn default() -> Self {
-//         static SERVER_VERSION: &str = concat!("Sib/", env!("SIB_BUILD_VERSION"));
-//         let mut res_headers = HeaderMap::new();
-//         res_headers.insert(
-//             http::header::SERVER,
-//             HeaderValue::from_static(SERVER_VERSION),
-//         );
-//         Self {
-//             method: HTTPMethod::UnDefined,
-//             path: "".to_owned(),
-//             host: "".to_owned(),
-//             queries: HashMap::new(),
-//             res_headers,
-//             h2: None,
-//             h3: None,
-//             protocol_upgrade: ProtocolUpgrade::None,
-//             status_was_sent: false,
-//         }
-//     }
-// }
-
-// impl Session {
-//     pub(crate) async fn new_h2(session: ServerSession) -> anyhow::Result<Self> {
-//         let req_summary = session.request_summary();
-//         let mut parts = req_summary.split(", ");
-//         let mut first_part = parts.next().unwrap_or("").split_whitespace();
-//         let method = first_part.next().unwrap_or("");
-//         let mut path = first_part.next().unwrap_or("").to_string();
-
-//         let host = parts
-//             .find(|s| s.starts_with("Host: "))
-//             .map(|s| s.trim_start_matches("Host: ").trim())
-//             .unwrap_or("");
-
-//         let protocol_upgrade = session
-//             .get_header(http::header::UPGRADE)
-//             .map(|v| {
-//                 if v.as_bytes() == b"websocket" {
-//                     ProtocolUpgrade::WebSocket
-//                 } else {
-//                     ProtocolUpgrade::None
-//                 }
-//             })
-//             .unwrap_or(ProtocolUpgrade::None);
-
-//         path = Self::normalize_slashes(&path);
-//         let queries = Self::parse_query_params(&mut path);
-
-//         Ok(Self {
-//             method: HTTPMethod::from_str(method).unwrap_or(HTTPMethod::UnDefined),
-//             path,
-//             host: host.to_string(),
-//             queries,
-//             protocol_upgrade,
-//             h2: Some(session),
-//             ..Default::default()
-//         })
-//     }
-
-//     pub(crate) fn new_h3(
-//         stream_id: u64,
-//         headers: Vec<h3::Header>,
-//         send: OutboundFrameSender,
-//         recv: InboundFrameStream,
-//         read_fin: bool,
-//         h3_audit_stats: Arc<H3AuditStats>,
-//     ) -> Self {
-//         let mut method: String = "".to_owned();
-//         let mut path: String = "".to_owned();
-//         let mut host: String = "".to_owned();
-//         let mut http_headers = HeaderMap::new();
-
-//         for header in headers {
-//             // Extract pseudo-headers
-//             match header.name() {
-//                 b":method" => method = String::from_utf8_lossy(header.value()).to_string(),
-//                 b":path" => path = String::from_utf8_lossy(header.value()).to_string(),
-//                 b"host" => host = String::from_utf8_lossy(header.value()).to_string(),
-//                 b":authority" if host.is_empty() => {
-//                     host = String::from_utf8_lossy(header.value()).to_string();
-//                 }
-//                 _ => {
-//                     // Parse header name safely
-//                     let name = match HeaderName::from_bytes(header.name()) {
-//                         Ok(n) => n,
-//                         Err(_) => {
-//                             continue; // Skip invalid header name
-//                         }
-//                     };
-
-//                     // Parse header value safely
-//                     let value = match HeaderValue::from_bytes(header.value()) {
-//                         Ok(v) => v,
-//                         Err(_) => {
-//                             continue; // Skip invalid header value
-//                         }
-//                     };
-
-//                     http_headers.insert(name, value.clone());
-//                 }
-//             }
-//         }
-
-//         // Normalize path by removing consecutive slashes
-//         path = Self::normalize_slashes(&path);
-//         let queries = Self::parse_query_params(&mut path);
-
-//         Self {
-//             method: HTTPMethod::from_str(&method).unwrap_or(HTTPMethod::UnDefined),
-//             path,
-//             host,
-//             queries,
-//             h3: Some(H3Session {
-//                 _stream_id: stream_id,
-//                 headers: http_headers,
-//                 in_frame: recv,
-//                 out_frame: send,
-//                 read_fin,
-//                 _h3_audit_stats: h3_audit_stats,
-//             }),
-//             ..Default::default()
-//         }
-//     }
-
-//     /// Upgrades the session to a WebSocket connection.
-//     pub async fn upgrade_to_websocket(&mut self) -> anyhow::Result<()> {
-//         if let Some(h2) = &mut self.h2 {
-//             if self.protocol_upgrade == ProtocolUpgrade::WebSocket {
-//                 let key = h2
-//                     .get_header(http::header::SEC_WEBSOCKET_KEY)
-//                     .map(|v| v.as_bytes())
-//                     .unwrap_or_default();
-
-//                 let mut hasher = Sha256::new();
-//                 hasher.update(key);
-//                 hasher.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
-
-//                 let result = hasher.finalize();
-//                 let sec_ws_accept_value = base64::engine::general_purpose::STANDARD.encode(result);
-
-//                 // Perform the WebSocket handshake
-//                 let mut response = ResponseHeader::build(101, None)?;
-//                 response.append_header(http::header::UPGRADE, "websocket")?;
-//                 response.append_header(http::header::CONNECTION, "Upgrade")?;
-//                 response.append_header(http::header::SEC_WEBSOCKET_ACCEPT, sec_ws_accept_value)?;
-//                 h2.write_response_header(Box::new(response)).await?;
-
-//                 self.protocol_upgrade = ProtocolUpgrade::WebSocket;
-
-//                 return Ok(());
-//             }
-//         }
-//         anyhow::bail!("Not a WebSocket upgrade request");
-//     }
-
-//     /// Normalizes a path by removing duplicate `/` and preventing traversal attacks.
-//     fn normalize_slashes(path: &str) -> String {
-//         // Truncate excessively long paths to prevent stack overflow attacks
-//         let truncated = if path.len() > MAX_PATH_LENGTH {
-//             &path[..MAX_PATH_LENGTH]
-//         } else {
-//             path
-//         };
-
-//         let mut normalized = PathBuf::new();
-//         for component in Path::new(truncated).components() {
-//             match component {
-//                 std::path::Component::Normal(c) => {
-//                     if let Some(s) = c.to_str() {
-//                         normalized.push(s); // Append only valid parts
-//                     }
-//                 }
-//                 std::path::Component::RootDir => normalized.push("/"),
-//                 _ => {} // Ignore `..` to prevent directory traversal attacks
-//             }
-//         }
-
-//         normalized.to_string_lossy().into_owned() // Convert safely
-//     }
-
-//     /// Decodes percent-encoded characters in a string (e.g., `%20` -> ` `)
-//     fn percent_decode(input: &str) -> String {
-//         let mut decoded = String::new();
-//         let mut chars = input.chars();
-
-//         while let Some(c) = chars.next() {
-//             if c == '%' {
-//                 if let (Some(h1), Some(h2)) = (chars.next(), chars.next()) {
-//                     if let Ok(byte) = u8::from_str_radix(&format!("{}{}", h1, h2), 16) {
-//                         decoded.push(byte as char);
-//                         continue;
-//                     }
-//                 }
-//             }
-//             decoded.push(c);
-//         }
-//         decoded
-//     }
-
-//     /// Parses query parameters from a mutable path and removes the query part and prevents query manipulation attacks as well.
-//     fn parse_query_params(path: &mut String) -> HashMap<String, Vec<String>> {
-//         if let Some(pos) = path.find('?') {
-//             let query = path[pos + 1..].to_string();
-//             path.truncate(pos); // Remove query string from path
-
-//             let mut params = HashMap::new();
-//             for pair in query.split('&') {
-//                 let mut parts = pair.splitn(2, '=');
-//                 let key = parts.next().map(Self::percent_decode).unwrap_or_default();
-//                 let value = parts.next().map(Self::percent_decode).unwrap_or_default();
-
-//                 if !key.is_empty() {
-//                     params.entry(key).or_insert_with(Vec::new).push(value);
-//                 }
-//             }
-//             params
-//         } else {
-//             HashMap::new() // No query parameters
-//         }
-//     }
-
-//     pub fn get_query_param(&self, key: &str) -> Option<Vec<String>> {
-//         self.queries.get(key).cloned()
-//     }
-
-//     pub fn get_query_params(&self) -> &HashMap<String, Vec<String>> {
-//         &self.queries
-//     }
-
-//     pub fn get_method(&self) -> &HTTPMethod {
-//         &self.method
-//     }
-
-//     pub fn get_path(&self) -> &str {
-//         self.path.as_str()
-//     }
-
-//     pub fn get_host(&self) -> &str {
-//         self.host.as_str()
-//     }
-
-//     pub fn get_is_h1(&self) -> bool {
-//         self.h2
-//             .as_ref()
-//             .map(|session| !session.is_http2())
-//             .unwrap_or(false)
-//     }
-
-//     pub fn get_is_h2(&self) -> bool {
-//         self.h2
-//             .as_ref()
-//             .map(|session| session.is_http2())
-//             .unwrap_or(false)
-//     }
-
-//     pub fn get_is_h3(&self) -> bool {
-//         self.h3.is_some()
-//     }
-
-//     pub fn get_protocol_upgrade(&self) -> ProtocolUpgrade {
-//         self.protocol_upgrade
-//     }
-
-//     pub fn get_status_was_sent(&self) -> bool {
-//         self.status_was_sent
-//     }
-
-//     pub fn get_cookie(&self, name: &str) -> Option<String> {
-//         let cookie_header = self.read_req_header(http::header::COOKIE)?;
-//         let cookie_str = cookie_header.to_str().ok()?;
-
-//         for cookie in cookie_str.split(';') {
-//             let mut parts = cookie.trim().splitn(2, '=');
-//             let key = parts.next()?.trim();
-//             let value = parts.next()?.trim();
-//             if key == name {
-//                 return Some(value.to_string());
-//             }
-//         }
-//         None
-//     }
-
-//     pub fn get_cookies(&self) -> Vec<String> {
-//         let mut result = Vec::new();
-
-//         if let Some(cookie_header) = self.read_req_header(http::header::COOKIE) {
-//             if let Ok(cookie_str) = cookie_header.to_str() {
-//                 for cookie in cookie_str.split(';') {
-//                     if let Some(kv) = cookie.trim().splitn(2, '=').collect::<Vec<_>>().get(..2) {
-//                         if kv.len() == 2 {
-//                             result.push(format!("{}={}", kv[0].trim(), kv[1].trim()));
-//                         }
-//                     }
-//                 }
-//             }
-//         }
-
-//         result
-//     }
-
-//     pub async fn read_ws_msg(&mut self, timeout: Duration) -> anyhow::Result<(Bytes, WsOpCode)> {
-//         if let Some(h2) = &mut self.h2 {
-//             let mut full_payload = Vec::new();
-//             let mut message_opcode: Option<WsOpCode> = None;
-
-//             loop {
-//                 // Read raw frame
-//                 let body_opt = pingora::time::timeout(timeout, h2.read_request_body()).await??;
-//                 let buf =
-//                     body_opt.ok_or_else(|| anyhow::anyhow!("Failed to read WebSocket frame"))?;
-//                 let mut cursor = std::io::Cursor::new(&buf);
-
-//                 // FIN + OPCODE
-//                 let b0 = cursor.get_u8();
-//                 let fin = b0 & 0b1000_0000 != 0;
-//                 let opcode_raw = b0 & 0x0F;
-//                 let opcode = match opcode_raw {
-//                     0x0 => WsOpCode::Continuation,
-//                     0x1 => WsOpCode::Text,
-//                     0x2 => WsOpCode::Binary,
-//                     0x8 => WsOpCode::Close,
-//                     0x9 => WsOpCode::Ping,
-//                     0xA => WsOpCode::Pong,
-//                     code => anyhow::bail!("Unsupported opcode: {}", code),
-//                 };
-
-//                 // LEN + MASK
-//                 let b1 = cursor.get_u8();
-//                 let masked = b1 & 0x80 != 0;
-//                 let mut payload_len = (b1 & 0x7F) as usize;
-
-//                 if payload_len == 126 {
-//                     payload_len = cursor.get_u16() as usize;
-//                 } else if payload_len == 127 {
-//                     payload_len = cursor.get_u64() as usize;
-//                 }
-
-//                 // Validate control frame size
-//                 if matches!(opcode, WsOpCode::Ping | WsOpCode::Pong | WsOpCode::Close)
-//                     && payload_len > 125
-//                 {
-//                     anyhow::bail!("Control frame payload too large");
-//                 }
-
-//                 // Mask key
-//                 let mask_key = if masked {
-//                     let mut key = [0u8; 4];
-//                     cursor.copy_to_slice(&mut key);
-//                     Some(key)
-//                 } else {
-//                     None
-//                 };
-
-//                 // Payload
-//                 if cursor.remaining() < payload_len {
-//                     anyhow::bail!("Invalid frame length");
-//                 }
-
-//                 let mut payload = BytesMut::with_capacity(payload_len);
-//                 payload.resize(payload_len, 0);
-//                 cursor.copy_to_slice(&mut payload[..]);
-
-//                 if let Some(mask) = mask_key {
-//                     for i in 0..payload_len {
-//                         payload[i] ^= mask[i % 4];
-//                     }
-//                 }
-
-//                 // Handle control frames immediately
-//                 match opcode {
-//                     WsOpCode::Ping => {
-//                         let pong = Self::ws_frame(WsOpCode::Pong, &payload.freeze(), true);
-//                         h2.write_response_body(pong, false).await?;
-//                         continue; // Continue reading next frame
-//                     }
-
-//                     WsOpCode::Pong => {
-//                         continue; // Ignore pong frames
-//                     }
-
-//                     WsOpCode::Close => {
-//                         let code = if payload.len() >= 2 {
-//                             u16::from_be_bytes([payload[0], payload[1]])
-//                         } else {
-//                             1005 // No status code
-//                         };
-//                         let reason = if payload.len() > 2 {
-//                             String::from_utf8_lossy(&payload[2..]).to_string()
-//                         } else {
-//                             String::new()
-//                         };
-//                         anyhow::bail!(
-//                             "Connection closed by peer (code {}, reason: '{}')",
-//                             code,
-//                             reason
-//                         );
-//                     }
-
-//                     WsOpCode::Text | WsOpCode::Binary => {
-//                         if message_opcode.is_none() {
-//                             message_opcode = Some(opcode);
-//                         }
-//                         full_payload.extend(payload);
-
-//                         if full_payload.len() > MAX_WS_PAYLOAD_SIZE {
-//                             anyhow::bail!("Fragmented WebSocket message too large (>64MB)");
-//                         }
-//                     }
-
-//                     WsOpCode::Continuation => {
-//                         if message_opcode.is_none() {
-//                             anyhow::bail!("Unexpected continuation frame");
-//                         }
-//                         full_payload.extend(payload);
-
-//                         if full_payload.len() > MAX_WS_PAYLOAD_SIZE {
-//                             anyhow::bail!("Fragmented WebSocket message too large (>64MB)");
-//                         }
-//                     }
-//                 }
-
-//                 if fin {
-//                     let final_opcode =
-//                         message_opcode.ok_or_else(|| anyhow::anyhow!("Empty fragmented frame"))?;
-//                     return Ok((Bytes::from(full_payload), final_opcode));
-//                 }
-//             }
-//         }
-
-//         anyhow::bail!("WebSocket session not available");
-//     }
-
-//     pub fn read_req_header(&self, key: http::HeaderName) -> Option<&http::HeaderValue> {
-//         if let Some(h2) = &self.h2 {
-//             return h2.get_header(key);
-//         } else if let Some(h3) = &self.h3 {
-//             return h3.headers.get(&key);
-//         }
-//         None
-//     }
-
-//     pub fn read_req_headers(&self) -> Option<&http::HeaderMap> {
-//         self.h2
-//             .as_ref()
-//             .map(|h2| &h2.req_header().headers)
-//             .or_else(|| self.h3.as_ref().map(|h3| &h3.headers))
-//     }
-
-//     pub async fn read_req_body(&mut self, timeout: Duration) -> anyhow::Result<Option<Bytes>> {
-//         if let Some(h2) = &mut self.h2 {
-//             let body = match pingora::time::timeout(timeout, h2.read_request_body()).await {
-//                 Ok(Ok(b)) => {
-//                     if let Some(ref b) = b {
-//                         if b.len() > MAX_BODY_SIZE {
-//                             anyhow::bail!(
-//                                 "Request body too large ({}>{} bytes)",
-//                                 b.len(),
-//                                 MAX_BODY_SIZE
-//                             );
-//                         }
-//                     }
-//                     b
-//                 }
-//                 _ => {
-//                     anyhow::bail!("Got timeout while reading h2 request body");
-//                 }
-//             };
-//             return Ok(body);
-//         } else if let Some(h3) = &mut self.h3 {
-//             // Properly read the h3 body in a non-blocking manner
-//             if !h3.read_fin {
-//                 let body = match pingora::time::timeout(timeout, async move {
-//                     let mut body = bytes::BytesMut::new();
-//                     while let Some(chunk) = h3.in_frame.recv().await {
-//                         match chunk {
-//                             tokio_quiche::http3::driver::InboundFrame::Body(data, fin) => {
-//                                 body.extend_from_slice(&data);
-//                                 if fin || body.len() > MAX_BODY_SIZE {
-//                                     break; // End of stream or too large body
-//                                 }
-//                             }
-//                             _ => break, // Stop on unexpected frame
-//                         }
-//                     }
-//                     body.freeze()
-//                 })
-//                 .await
-//                 {
-//                     Ok(body) => body,
-//                     _ => {
-//                         anyhow::bail!("Got timeout while reading h3 request body");
-//                     }
-//                 };
-
-//                 return Ok(Some(body));
-//             }
-//         }
-//         Ok(None)
-//     }
-
-//     pub fn append_header(&mut self, name: &HeaderName, value: HeaderValue) {
-//         self.res_headers.append(name, value);
-//     }
-
-//     pub fn append_header_str(&mut self, name: &str, value: &str) -> anyhow::Result<()> {
-//         let header_name = HeaderName::from_str(name)?;
-//         let header_value = HeaderValue::from_str(value)?;
-//         self.res_headers.append(header_name, header_value);
-//         Ok(())
-//     }
-
-//     pub fn insert_header(&mut self, name: &HeaderName, value: HeaderValue) {
-//         self.res_headers.insert(name, value);
-//     }
-
-//     pub fn insert_header_str(&mut self, name: &str, value: &str) -> anyhow::Result<()> {
-//         let header_name = HeaderName::from_str(name)?;
-//         let header_value = HeaderValue::from_str(value)?;
-//         self.res_headers.insert(header_name, header_value);
-//         Ok(())
-//     }
-
-//     pub fn append_headers(&mut self, items: &[(HeaderName, HeaderValue)]) {
-//         for (name, value) in items {
-//             self.res_headers.append(name, value.clone());
-//         }
-//     }
-
-//     pub fn append_headers_str(&mut self, items: &[(&str, &str)]) -> anyhow::Result<()> {
-//         for (name, value) in items {
-//             let header_name = HeaderName::from_str(name)?;
-//             let header_value = HeaderValue::from_str(value)?;
-//             self.res_headers.append(header_name, header_value);
-//         }
-//         Ok(())
-//     }
-
-//     pub(crate) async fn h2_send_status_eom(
-//         session: &mut ServerSession,
-//         status_code: http::StatusCode,
-//     ) -> pingora::Result<()> {
-//         session
-//             .write_response_header(Box::new(ResponseHeader::build_no_case(status_code, None)?))
-//             .await
-//     }
-
-//     pub async fn send_status_eom(&mut self, status_code: http::StatusCode) -> anyhow::Result<()> {
-//         self.send_status(status_code).await?;
-//         self.send_eom().await
-//     }
-
-//     pub async fn send_status(&mut self, status_code: http::StatusCode) -> anyhow::Result<()> {
-//         if self.status_was_sent {
-//             s_error!("Response status already sent");
-//             bail!("Response status already sent");
-//         }
-
-//         if let Some(h2) = &mut self.h2 {
-//             let mut response = ResponseHeader::build_no_case(status_code, None)?;
-
-//             for (name, value) in &self.res_headers {
-//                 response.append_header(name, value)?;
-//             }
-
-//             h2.write_response_header(Box::new(response)).await?;
-//         } else if let Some(h3) = &mut self.h3 {
-//             let mut res_headers = Vec::with_capacity(10);
-//             res_headers.push(h3::Header::new(b":status", status_code.as_str().as_bytes()));
-
-//             res_headers.extend(self.res_headers.iter().filter_map(|(name, value)| {
-//                 value.to_str().ok().map(|value_str| {
-//                     h3::Header::new(name.as_str().as_bytes(), value_str.as_bytes())
-//                 })
-//             }));
-
-//             h3.out_frame
-//                 .send(OutboundFrame::Headers(res_headers))
-//                 .await?;
-//         }
-//         self.status_was_sent = true;
-//         Ok(())
-//     }
-
-//     pub async fn send_body(&mut self, body: Bytes, finish: bool) -> anyhow::Result<()> {
-//         if !self.status_was_sent {
-//             s_error!("send_body() called before send_status()");
-//             bail!("Response status not sent yet");
-//         }
-
-//         if let Some(h2) = &mut self.h2 {
-//             h2.write_response_body(body, false).await?;
-//         } else if let Some(h3) = &mut self.h3 {
-//             if h3.out_frame.is_closed() {
-//                 crate::s_warn!(
-//                     "H3 out_frame already closed — skipping body send. size={} finish={}",
-//                     body.len(),
-//                     finish
-//                 );
-//                 return Ok(());
-//             }
-
-//             if let Err(e) = h3
-//                 .out_frame
-//                 .send(OutboundFrame::body(
-//                     BufFactory::buf_from_slice(&body),
-//                     finish,
-//                 ))
-//                 .await
-//             {
-//                 crate::s_error!(
-//                     "Failed to send response body: {:?}, size={}, finish={}",
-//                     e,
-//                     body.len(),
-//                     finish
-//                 );
-//                 anyhow::bail!("Failed to send response body: {:?}", e);
-//             }
-//         }
-
-//         Ok(())
-//     }
-
-//     pub async fn send_eom(&mut self) -> anyhow::Result<()> {
-//         if !self.status_was_sent {
-//             bail!("send_eom() called before send_status()");
-//         }
-
-//         if let Some(h2_session) = self.h2.take() {
-//             match h2_session.finish().await {
-//                 Ok(Some(mut stream)) => {
-//                     let _ = stream.shutdown().await;
-//                 }
-//                 Ok(None) => {
-//                     // Nothing else to do — H2 stream is finished.
-//                 }
-//                 Err(e) => {
-//                     crate::s_error!("Failed to finish H2 session: {:?}", e);
-//                 }
-//             }
-//         } else if let Some(h3) = &mut self.h3 {
-//             //h3.out_frame.close();
-//             h3.out_frame.flush().await?;
-//         }
-
-//         Ok(())
-//     }
-
-//     pub async fn send_ws_msg(
-//         &mut self,
-//         opcode: WsOpCode,
-//         payload: &Bytes,
-//         fin: bool,
-//     ) -> anyhow::Result<()> {
-//         if let Some(h2) = &mut self.h2 {
-//             // Send the frame
-//             h2.write_response_body(Self::ws_frame(opcode, payload, fin), false)
-//                 .await?;
-//             Ok(())
-//         } else {
-//             anyhow::bail!("WebSocket session not available");
-//         }
-//     }
-
-//     pub async fn send_ws_close(&mut self, code: WsCloseCode, reason: &str) -> anyhow::Result<()> {
-//         if let Some(h2) = &mut self.h2 {
-//             let mut payload = BytesMut::with_capacity(2 + reason.len());
-//             payload.put_u16(code.as_u16()); // Close code
-//             payload.put_slice(reason.as_bytes()); // Reason
-
-//             let payload = payload.freeze();
-//             h2.write_response_body(Self::ws_frame(WsOpCode::Close, &payload, true), false)
-//                 .await?;
-//             Ok(())
-//         } else {
-//             anyhow::bail!("WebSocket session not available");
-//         }
-//     }
-
-//     fn ws_frame(opcode: WsOpCode, payload: &Bytes, fin: bool) -> Bytes {
-//         // Estimate size: 2 + len + extended len + payload
-//         let estimated_capacity = 2 + payload.len() + 8;
-//         let mut frame = BytesMut::with_capacity(estimated_capacity);
-
-//         // First byte: FIN + OpCode
-//         let opcode_val = match opcode {
-//             WsOpCode::Continuation => 0x0,
-//             WsOpCode::Text => 0x1,
-//             WsOpCode::Binary => 0x2,
-//             WsOpCode::Close => 0x8,
-//             WsOpCode::Ping => 0x9,
-//             WsOpCode::Pong => 0xA,
-//         };
-//         let first_byte = if fin { 0x80 | opcode_val } else { opcode_val };
-//         frame.put_u8(first_byte);
-
-//         // Second byte: No mask
-//         let len = payload.len();
-//         if len < 126 {
-//             frame.put_u8(len as u8);
-//         } else if len <= u16::MAX as usize {
-//             frame.put_u8(126);
-//             frame.put_u16(len as u16);
-//         } else {
-//             frame.put_u8(127);
-//             frame.put_u64(len as u64);
-//         }
-
-//         // Payload
-//         frame.put_slice(payload);
-
-//         frame.freeze() // Converts mutable bytes to imutable bytes
-//     }
-// }
+impl<'buf, 'stream> Session<'buf, '_, 'stream> {
+    pub fn req_method(&self) -> Option<&str> {
+        self.req.method
+    }
+
+    pub fn req_path(&self) -> Option<&str> {
+        self.req.path
+    }
+
+    pub fn req_http_version(&self) -> Option<u8> {
+        self.req.version
+    }
+
+    pub fn req_headers(&self) -> &[httparse::Header<'_>] {
+        self.req.headers
+    }
+
+    pub fn req_header(&self, header: &str) -> std::io::Result<&str> {
+        for h in self.req.headers.iter() {
+            if h.name.eq_ignore_ascii_case(header) {
+                return std::str::from_utf8(h.value)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
+            }
+        }
+        // Return an error if the header is not found
+        Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("{} header not found", header),
+        ))
+    }
+
+    pub fn req_body(self) -> std::io::Result<Reader<'buf, 'stream>> {
+        let content_length = self.req_header("content-length")?.parse().map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid content-length header: {e}"),
+            )
+        })?;
+        Ok(Reader {
+            body_limit: content_length,
+            total_read: 0,
+            stream: self.stream,
+            req_buf: self.req_buf,
+        })
+    }
+
+    #[inline]
+    pub fn status_code(&mut self, code: usize, msg: &'static str) -> &mut Self {
+        self.rsp_buf.extend_from_slice(b"HTTP/1.1 ");
+        let mut code_buf = itoa::Buffer::new();
+        self.rsp_buf
+            .extend_from_slice(code_buf.format(code).as_bytes());
+        self.rsp_buf.extend_from_slice(b" ");
+        self.rsp_buf.extend_from_slice(msg.as_bytes());
+        self.rsp_buf.extend_from_slice(b"\r\nServer: Sib\r\nDate: ");
+        self.rsp_buf
+            .extend_from_slice(super::date::CURRENT_DATE.load().as_bytes());
+        self.rsp_buf.extend_from_slice(b"\r\n");
+        self
+    }
+
+    pub fn header(&mut self, name: &str, value: &str) -> std::io::Result<&mut Self> {
+        if self.rsp_headers_len >= MAX_HEADERS {
+            return Err(io::Error::new(
+                io::ErrorKind::ArgumentListTooLong,
+                "too many headers",
+            ));
+        }
+        self.rsp_buf.extend_from_slice(name.as_bytes());
+        self.rsp_buf.extend_from_slice(b": ");
+        self.rsp_buf.extend_from_slice(value.as_bytes());
+        self.rsp_buf.extend_from_slice(b"\r\n");
+        self.rsp_headers_len += 1;
+        Ok(self)
+    }
+
+    pub fn body(&mut self, body: &bytes::Bytes) -> &mut Self {
+        self.rsp_buf.extend_from_slice(b"\r\n\r\n");
+        self.rsp_buf.extend_from_slice(body);
+        self
+    }
+
+    pub fn body_static(&mut self, body: &'static str) -> &mut Self {
+        self.rsp_buf.extend_from_slice(b"\r\n\r\n");
+        self.rsp_buf.extend_from_slice(body.as_bytes());
+        self
+    }
+
+    #[inline]
+    pub fn send(&mut self) -> std::io::Result<usize> {
+        write(self.stream.inner_mut(), &mut self.rsp_buf)
+    }
+}
+
+#[cfg(unix)]
+#[inline]
+fn write(stream: &mut impl std::io::Write, rsp_buf: &mut BytesMut) -> io::Result<usize> {
+    let write_buf = rsp_buf.chunk();
+    let len = write_buf.len();
+    let mut write_cnt = 0;
+    while write_cnt < len {
+        match stream.write(unsafe { write_buf.get_unchecked(write_cnt..) }) {
+            Ok(0) => return Err(io::Error::new(io::ErrorKind::BrokenPipe, "write closed")),
+            Ok(n) => write_cnt += n,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+            Err(e) => return Err(e),
+        }
+    }
+    rsp_buf.advance(write_cnt);
+    Ok(write_cnt)
+}
+
+pub fn new_session<'header, 'buf, 'stream>(
+    headers: &'header mut [MaybeUninit<httparse::Header<'buf>>; MAX_HEADERS],
+    req_buf: &'buf mut BytesMut,
+    stream: &'stream mut TcpStream,
+) -> io::Result<Option<Session<'buf, 'header, 'stream>>> {
+    let mut req = httparse::Request::new(&mut []);
+
+    let buf: &[u8] = unsafe { std::mem::transmute(req_buf.chunk()) };
+    let status = match req.parse_with_uninit_headers(buf, headers) {
+        Ok(s) => s,
+        Err(e) => {
+            let msg = format!("failed to parse http request: {e:?}");
+            //s_error!("{msg}");
+            return Err(io::Error::other(msg));
+        }
+    };
+
+    let len = match status {
+        httparse::Status::Complete(amt) => amt,
+        httparse::Status::Partial => return Ok(None),
+    };
+    req_buf.advance(len);
+
+    let mut rsp_buf = BytesMut::with_capacity(BUF_LEN);
+    reserve_buf(&mut rsp_buf);
+
+    // println!("req: {:?}", std::str::from_utf8(req_buf).unwrap());
+    Ok(Some(Session {
+        req,
+        req_buf,
+        rsp_headers_len: 0,
+        rsp_buf,
+        stream,
+    }))
+}
