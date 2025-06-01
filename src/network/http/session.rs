@@ -107,13 +107,13 @@ impl<'buf, 'stream> Session<'buf, '_, 'stream> {
     }
 
     pub fn body(&mut self, body: &bytes::Bytes) -> &mut Self {
-        self.rsp_buf.extend_from_slice(b"\r\n\r\n");
+        self.rsp_buf.extend_from_slice(b"\r\n");
         self.rsp_buf.extend_from_slice(body);
         self
     }
 
     pub fn body_static(&mut self, body: &'static str) -> &mut Self {
-        self.rsp_buf.extend_from_slice(b"\r\n\r\n");
+        self.rsp_buf.extend_from_slice(b"\r\n");
         self.rsp_buf.extend_from_slice(body.as_bytes());
         self
     }
