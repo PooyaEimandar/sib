@@ -21,7 +21,6 @@ impl HttpService for H1Service {
             .header("Content-Length", "13")?
             .body(&BODY)
             .send()?;
-        println!("Sent {} bytes", sent);
         Ok(())
     }
 }
