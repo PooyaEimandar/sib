@@ -1,5 +1,6 @@
 use super::reader::Reader;
 use super::server::reserve_buf;
+use super::status::HttpStatus;
 use bytes::{Buf, BytesMut};
 use may::net::TcpStream;
 use std::io::{self};
@@ -67,13 +68,12 @@ impl<'buf, 'stream> Session<'buf, '_, 'stream> {
     }
 
     #[inline]
-    pub fn status_code(&mut self, code: usize, msg: &'static str) -> &mut Self {
+    pub fn status_code(&mut self, status: HttpStatus) -> &mut Self {
+        let (code, reason) = status.as_parts();
         self.rsp_buf.extend_from_slice(b"HTTP/1.1 ");
-        let mut code_buf = itoa::Buffer::new();
-        self.rsp_buf
-            .extend_from_slice(code_buf.format(code).as_bytes());
+        self.rsp_buf.extend_from_slice(code.as_bytes());
         self.rsp_buf.extend_from_slice(b" ");
-        self.rsp_buf.extend_from_slice(msg.as_bytes());
+        self.rsp_buf.extend_from_slice(reason.as_bytes());
         self.rsp_buf.extend_from_slice(b"\r\nServer: Sib\r\nDate: ");
         self.rsp_buf
             .extend_from_slice(super::date::CURRENT_DATE.load().as_bytes());

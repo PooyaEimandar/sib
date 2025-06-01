@@ -204,6 +204,7 @@ mod tests {
     use crate::network::http::{
         server::{H1ServiceFactory, HttpService},
         session::Session,
+        status::HttpStatus,
     };
 
     struct H1Server<T>(pub T);
@@ -220,7 +221,7 @@ mod tests {
             let mut body_len = itoa::Buffer::new();
             let body_len_str = body_len.format(body.len());
             session
-                .status_code(200, "OK")
+                .status_code(HttpStatus::Ok)
                 .header("Content-Type", "text/plain")?
                 .header("Content-Length", body_len_str)?
                 .body(&body)
