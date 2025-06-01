@@ -123,8 +123,8 @@ pub fn new_session<'header, 'buf, 'stream>(
     rsp_buf: &'buf mut BytesMut,
 ) -> io::Result<Option<Session<'buf, 'header, 'stream>>> {
     let mut req = httparse::Request::new(&mut []);
+    let buf = unsafe { std::slice::from_raw_parts(req_buf.chunk().as_ptr(), req_buf.len()) };
 
-    let buf: &[u8] = unsafe { std::mem::transmute(req_buf.chunk()) };
     let status = match req.parse_with_uninit_headers(buf, headers) {
         Ok(s) => s,
         Err(e) => {
