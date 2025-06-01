@@ -1,5 +1,6 @@
 use bytes::Bytes;
 use sib::network::http::{
+    message::Status,
     server::{H1ServiceFactory, HttpService},
     session::Session,
 };
@@ -15,7 +16,7 @@ struct H1Service;
 impl HttpService for H1Service {
     fn call(&mut self, session: &mut Session) -> std::io::Result<()> {
         session
-            .status_code(200, "OK")
+            .status_code(Status::Ok)
             .header("Content-Type", "text/plain")?
             .header("Content-Length", "13")?
             .body(&Bytes::from_static(b"Hello, World!"))
