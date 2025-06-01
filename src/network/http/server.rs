@@ -36,7 +36,7 @@ pub trait HttpService {
 pub trait H1ServiceFactory: Send + Sized + 'static {
     type Service: HttpService + Send;
     // create a new http service for each connection
-    fn new_service(&self, id: usize) -> Self::Service;
+    fn service(&self, id: usize) -> Self::Service;
 
     /// Spawns the http service, binding to the given address
     /// return a coroutine that you can cancel it when need to stop the service
@@ -56,7 +56,7 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
                     #[cfg(windows)]
                     let id = stream.as_raw_socket() as usize;
                     mc!(stream.set_nodelay(true));
-                    let service = self.new_service(id);
+                    let service = self.service(id);
                     let builder = may::coroutine::Builder::new().id(id);
                     go!(
                         builder,
@@ -211,7 +211,7 @@ mod tests {
     impl H1ServiceFactory for H1Server<EchoService> {
         type Service = EchoService;
 
-        fn new_service(&self, _id: usize) -> EchoService {
+        fn service(&self, _id: usize) -> EchoService {
             EchoService
         }
     }
