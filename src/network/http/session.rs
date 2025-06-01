@@ -109,27 +109,11 @@ impl<'buf, 'stream> Session<'buf, '_, 'stream> {
     }
 
     #[inline]
-    pub fn send(&mut self) -> std::io::Result<usize> {
-        write(self.stream.inner_mut(), &mut self.rsp_buf)
-    }
-}
-
-#[cfg(unix)]
-#[inline]
-fn write(stream: &mut impl std::io::Write, rsp_buf: &mut BytesMut) -> io::Result<usize> {
-    let write_buf = rsp_buf.chunk();
-    let len = write_buf.len();
-    let mut write_cnt = 0;
-    while write_cnt < len {
-        match stream.write(unsafe { write_buf.get_unchecked(write_cnt..) }) {
-            Ok(0) => return Err(io::Error::new(io::ErrorKind::BrokenPipe, "write closed")),
-            Ok(n) => write_cnt += n,
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-            Err(e) => return Err(e),
+    pub fn eom(&mut self) {
+        if !self.rsp_buf.ends_with(b"\r\n") {
+            self.rsp_buf.extend_from_slice(b"\r\n");
         }
     }
-    rsp_buf.advance(write_cnt);
-    Ok(write_cnt)
 }
 
 pub fn new_session<'header, 'buf, 'stream>(

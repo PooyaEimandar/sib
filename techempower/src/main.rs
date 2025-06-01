@@ -14,12 +14,12 @@ struct H1Service;
 
 impl HttpService for H1Service {
     fn call(&mut self, session: &mut Session) -> std::io::Result<()> {
-        let _sent = session
+        session
             .status_code(200, "OK")
             .header("Content-Type", "text/plain")?
             .header("Content-Length", "13")?
             .body(&Bytes::from_static(b"Hello, World!"))
-            .send()?;
+            .eom();
         Ok(())
     }
 }

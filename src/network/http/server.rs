@@ -91,6 +91,26 @@ fn read(stream: &mut impl Read, req_buf: &mut BytesMut) -> io::Result<bool> {
     Ok(read_cnt < len)
 }
 
+#[cfg(unix)]
+#[inline]
+fn write(stream: &mut impl std::io::Write, rsp_buf: &mut BytesMut) -> io::Result<usize> {
+    use bytes::Buf;
+
+    let write_buf = rsp_buf.chunk();
+    let len = write_buf.len();
+    let mut write_cnt = 0;
+    while write_cnt < len {
+        match stream.write(unsafe { write_buf.get_unchecked(write_cnt..) }) {
+            Ok(0) => return Err(io::Error::new(io::ErrorKind::BrokenPipe, "write closed")),
+            Ok(n) => write_cnt += n,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+            Err(e) => return Err(e),
+        }
+    }
+    rsp_buf.advance(write_cnt);
+    Ok(write_cnt)
+}
+
 #[inline]
 pub(crate) fn reserve_buf(buf: &mut BytesMut) {
     let rem = buf.capacity() - buf.len();
@@ -123,6 +143,8 @@ fn serve<T: HttpService>(stream: &mut TcpStream, mut service: T) -> io::Result<(
                 }
             }
         }
+
+        write(stream.inner_mut(), &mut rsp_buf)?;
 
         if read_blocked {
             stream.wait_io();
@@ -196,13 +218,12 @@ mod tests {
             ));
             let mut body_len = itoa::Buffer::new();
             let body_len_str = body_len.format(body.len());
-            let sent = session
+            session
                 .status_code(200, "OK")
                 .header("Content-Type", "text/plain")?
                 .header("Content-Length", body_len_str)?
                 .body(&body)
-                .send()?;
-            println!("Sent {} bytes", sent);
+                .eom();
             Ok(())
         }
     }
