@@ -74,11 +74,7 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
 #[inline]
 fn read(stream: &mut impl Read, req_buf: &mut BytesMut) -> io::Result<bool> {
     reserve_buf(req_buf);
-    //let read_buf: &mut [u8] = unsafe { std::mem::transmute(req_buf.chunk_mut()) };
-
-    let chunk = req_buf.chunk_mut();
-    let read_buf =
-        unsafe { std::slice::from_raw_parts_mut(chunk.as_mut_ptr() as *mut u8, chunk.len()) };
+    let read_buf: &mut [u8] = unsafe { std::mem::transmute(req_buf.chunk_mut()) };
 
     let len = read_buf.len();
 
@@ -193,9 +189,7 @@ fn serve<T: HttpService>(stream: &mut TcpStream, mut service: T) -> io::Result<(
         }
 
         // send the result back to client
-        //stream.write_all(&rsp_buf)?;
-        let bufs = &[IoSlice::new(rsp_buf.chunk())];
-        stream.write_vectored(bufs)?;
+        stream.write_all(&rsp_buf)?;
     }
 }
 
