@@ -189,7 +189,7 @@ fn serve<T: HttpService>(stream: &mut TcpStream, mut service: T) -> io::Result<(
         }
 
         // send the result back to client
-        stream.write(&rsp_buf)?;
+        stream.write_all(&rsp_buf)?;
     }
 }
 
@@ -241,7 +241,7 @@ mod tests {
     #[test]
     fn test_http1_gracefull_shutdown() {
         let addr = "127.0.0.1:8080";
-        let server_handle = H1Server(EchoService).start(&addr).expect("h1 start server");
+        let server_handle = H1Server(EchoService).start(addr).expect("h1 start server");
 
         let client_handler = may::go!(move || {
             may::coroutine::sleep(Duration::from_millis(100));
@@ -255,13 +255,13 @@ mod tests {
     fn test_http_server_response() {
         // Pick a port and start the server
         let addr = "127.0.0.1:8080";
-        let server_handle = H1Server(EchoService).start(&addr).expect("h1 start server");
+        let server_handle = H1Server(EchoService).start(addr).expect("h1 start server");
 
         let client_handler = may::go!(move || {
             may::coroutine::sleep(Duration::from_millis(100));
 
             // Client sends HTTP request
-            let mut stream = TcpStream::connect(&addr).expect("connect");
+            let mut stream = TcpStream::connect(addr).expect("connect");
             stream
                 .write_all(b"GET /test HTTP/1.1\r\nHost: localhost\r\n\r\n")
                 .unwrap();

@@ -33,7 +33,7 @@ jobs:
       - name: Confirm Zig version
         run: zig version
 
-      - name: Run Clippy (only on native)
+      - name: Run Clippy
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: |
           rustup component add clippy
@@ -42,7 +42,7 @@ jobs:
       - name: Build with cargo-zigbuild
         run: cargo zigbuild --release --target=${{ matrix.target }}
 
-      - name: Run Tests (only on native)
+      - name: Run Tests
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: cargo test --release
 
