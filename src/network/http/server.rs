@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use super::session::{self, Session};
 use std::io::{self, Read};
 use std::mem::MaybeUninit;
@@ -104,7 +102,7 @@ pub(crate) fn reserve_buf(buf: &mut BytesMut) {
 #[cfg(unix)]
 fn serve<T: HttpService>(stream: &mut TcpStream, mut service: T) -> io::Result<()> {
     let mut req_buf = BytesMut::with_capacity(BUF_LEN);
-    //let mut body_buf = BytesMut::with_capacity(MAX_BODY_LEN);
+    let mut rsp_buf = BytesMut::with_capacity(BUF_LEN);
 
     loop {
         let read_blocked = read(stream.inner_mut(), &mut req_buf)?;
@@ -112,10 +110,11 @@ fn serve<T: HttpService>(stream: &mut TcpStream, mut service: T) -> io::Result<(
         // prepare the requests, we should make sure the request is fully read
         loop {
             let mut headers = [MaybeUninit::uninit(); session::MAX_HEADERS];
-            let mut sess = match session::new_session(&mut headers, &mut req_buf, stream)? {
-                Some(req) => req,
-                None => break,
-            };
+            let mut sess =
+                match session::new_session(stream, &mut headers, &mut req_buf, &mut rsp_buf)? {
+                    Some(req) => req,
+                    None => break,
+                };
 
             if let Err(e) = service.call(&mut sess) {
                 if e.kind() == std::io::ErrorKind::ConnectionAborted {

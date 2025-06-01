@@ -1,7 +1,5 @@
-#![allow(dead_code)]
-
 use super::reader::Reader;
-use super::server::{BUF_LEN, reserve_buf};
+use super::server::reserve_buf;
 use bytes::{Buf, BytesMut};
 use may::net::TcpStream;
 use std::io::{self};
@@ -17,18 +15,10 @@ pub struct Session<'buf, 'header, 'stream> {
     // length of response headers
     rsp_headers_len: usize,
     // buffer for response
-    rsp_buf: BytesMut,
+    rsp_buf: &'buf mut BytesMut,
     // stream to read body from
     stream: &'stream mut TcpStream,
 }
-
-// impl Drop for Request<'_, '_, '_> {
-//     fn drop(&mut self) {
-//         //let _ = self.body_mut();
-//         self.req_buf.clear();
-//         self.rsp_buf.clear();
-//     }
-// }
 
 impl<'buf, 'stream> Session<'buf, '_, 'stream> {
     pub fn req_method(&self) -> Option<&str> {
@@ -143,9 +133,10 @@ fn write(stream: &mut impl std::io::Write, rsp_buf: &mut BytesMut) -> io::Result
 }
 
 pub fn new_session<'header, 'buf, 'stream>(
+    stream: &'stream mut TcpStream,
     headers: &'header mut [MaybeUninit<httparse::Header<'buf>>; MAX_HEADERS],
     req_buf: &'buf mut BytesMut,
-    stream: &'stream mut TcpStream,
+    rsp_buf: &'buf mut BytesMut,
 ) -> io::Result<Option<Session<'buf, 'header, 'stream>>> {
     let mut req = httparse::Request::new(&mut []);
 
@@ -165,8 +156,7 @@ pub fn new_session<'header, 'buf, 'stream>(
     };
     req_buf.advance(len);
 
-    let mut rsp_buf = BytesMut::with_capacity(BUF_LEN);
-    reserve_buf(&mut rsp_buf);
+    reserve_buf(rsp_buf);
 
     // println!("req: {:?}", std::str::from_utf8(req_buf).unwrap());
     Ok(Some(Session {
