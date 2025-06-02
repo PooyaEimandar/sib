@@ -1,15 +1,12 @@
 use super::session::{self, Session};
-#[cfg(unix)]
 use bytes::{BufMut, BytesMut};
+use may::io::WaitIo;
+use may::net::{TcpListener, TcpStream};
+use may::{coroutine, go};
 use std::io::Write;
 use std::io::{self, Read};
 use std::mem::MaybeUninit;
 use std::net::ToSocketAddrs;
-
-#[cfg(unix)]
-use may::io::WaitIo;
-use may::net::{TcpListener, TcpStream};
-use may::{coroutine, go};
 
 const MIN_BUF_LEN: usize = 1024;
 const MAX_BODY_LEN: usize = 4096;
@@ -70,20 +67,40 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
         )
     }
 
+    #[cfg(feature = "boring-ssl")]
     /// Spawns the http service, binding to the given address
     /// return a coroutine that you can cancel it when need to stop the service
     fn start_tls<L: ToSocketAddrs>(
         self,
         addr: L,
-        cert_path: &str,
-        key_path: &str,
+        cert_pem: &[u8],
+        key_pem: &[u8],
     ) -> io::Result<coroutine::JoinHandle<()>> {
-        let mut tls_builder =
-            boring::ssl::SslAcceptor::mozilla_intermediate(boring::ssl::SslMethod::tls()).unwrap();
-        tls_builder.set_private_key_file(key_path, boring::ssl::SslFiletype::PEM)?;
-        tls_builder.set_certificate_chain_file(cert_path)?;
-        let tls_acceptor = std::sync::Arc::new(tls_builder.build());
+        // Parse the certificate from memory
+        let cert = boring::x509::X509::from_pem(cert_pem).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("Cert error: {e}"))
+        })?;
+        // Parse the private key from memory
+        let pkey = boring::pkey::PKey::private_key_from_pem(key_pem).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("Key error: {e}"))
+        })?;
 
+        // create the tls acceptor
+        let mut tls_builder =
+            boring::ssl::SslAcceptor::mozilla_intermediate(boring::ssl::SslMethod::tls()).map_err(
+                |e| std::io::Error::new(std::io::ErrorKind::Other, format!("Builder error: {e}")),
+            )?;
+        tls_builder.set_private_key(&pkey).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Set private key error: {e}"),
+            )
+        })?;
+        tls_builder.set_certificate(&cert).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, format!("Set cert error: {e}"))
+        })?;
+
+        let tls_acceptor = std::sync::Arc::new(tls_builder.build());
         let listener = TcpListener::bind(addr)?;
         go!(
             coroutine::Builder::new().name("H1ServiceFactory".to_owned()),
@@ -135,27 +152,24 @@ pub(crate) fn reserve_buf(buf: &mut BytesMut) {
 #[inline]
 fn read(stream: &mut impl Read, buf: &mut BytesMut) -> io::Result<bool> {
     reserve_buf(buf);
-    let read_buf: &mut [u8] = unsafe { std::mem::transmute(buf.chunk_mut()) };
-    let len = read_buf.len();
-    let mut read_cnt = 0;
-    while read_cnt < len {
-        use std::io::IoSliceMut;
-        let mut io_slice = [IoSliceMut::new(unsafe {
-            read_buf.get_unchecked_mut(read_cnt..)
-        })];
-        match stream.read_vectored(&mut io_slice) {
-            Ok(0) => return Err(io::Error::new(io::ErrorKind::BrokenPipe, "read closed")),
-            Ok(n) => {
-                read_cnt += n;
-                break;
-            }
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
-            Err(e) => return Err(e),
-        }
-    }
+    let chunk = buf.chunk_mut();
+    let len = chunk.len();
 
-    unsafe { buf.advance_mut(read_cnt) };
-    Ok(read_cnt < len)
+    // SAFETY: We ensure exclusive access and will commit the right amount
+    let read_buf: &mut [u8] = unsafe { std::slice::from_raw_parts_mut(chunk.as_mut_ptr(), len) };
+
+    let mut io_slice = [std::io::IoSliceMut::new(read_buf)];
+    let n = match stream.read_vectored(&mut io_slice) {
+        Ok(0) => return Err(io::Error::new(io::ErrorKind::BrokenPipe, "read closed")),
+        Ok(n) => n,
+        Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(false),
+        Err(e) => return Err(e),
+    };
+
+    unsafe {
+        buf.advance_mut(n);
+    }
+    Ok(n < len)
 }
 
 #[cfg(unix)]
@@ -224,7 +238,7 @@ fn serve<T: HttpService>(stream: &mut TcpStream, mut service: T) -> io::Result<(
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "boring-ssl"))]
 fn serve_tls<T: HttpService>(
     stream: &mut boring::ssl::SslStream<may::net::TcpStream>,
     mut service: T,
@@ -282,19 +296,15 @@ fn serve<T: HttpService>(stream: &mut TcpStream, mut service: T) -> io::Result<(
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        // io::{Read, Write},
-        // net::TcpStream,
-        io::{Read, Write},
-        time::Duration,
-    };
-
-    use may::net::TcpStream;
-
     use crate::network::http::{
         message::Status,
         server::{H1ServiceFactory, HttpService},
         session::Session,
+    };
+    use may::net::TcpStream;
+    use std::{
+        io::{Read, Write},
+        time::Duration,
     };
 
     struct H1Server<T>(pub T);
@@ -328,25 +338,29 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "boring-ssl")]
+    fn create_tls_files() -> (String, String) {
+        use rcgen::{
+            CertificateParams, DistinguishedName, DnType, KeyPair, SanType, date_time_ymd,
+        };
+        let mut params: CertificateParams = Default::default();
+        params.not_before = rcgen::date_time_ymd(1975, 1, 1);
+        params.not_after = date_time_ymd(4096, 1, 1);
+        params.distinguished_name = DistinguishedName::new();
+        params
+            .distinguished_name
+            .push(DnType::OrganizationName, "Sib");
+        params.distinguished_name.push(DnType::CommonName, "Sib");
+        params.subject_alt_names = vec![SanType::DnsName("localhost".try_into().unwrap())];
+        let key_pair = KeyPair::generate().unwrap();
+        let cert = params.self_signed(&key_pair).unwrap();
+        (cert.pem(), key_pair.serialize_pem())
+    }
+
     #[test]
     fn test_http1_gracefull_shutdown() {
         let addr = "127.0.0.1:8080";
         let server_handle = H1Server(EchoService).start(addr).expect("h1 start server");
-
-        let client_handler = may::go!(move || {
-            may::coroutine::sleep(Duration::from_millis(100));
-            unsafe { server_handle.coroutine().cancel() };
-        });
-
-        client_handler.join().expect("client handler failed");
-    }
-
-    #[test]
-    fn test_tls_http1_gracefull_shutdown() {
-        let addr = "127.0.0.1:8080";
-        let server_handle = H1Server(EchoService)
-            .start_tls(addr)
-            .expect("h1 TLS start server");
 
         let client_handler = may::go!(move || {
             may::coroutine::sleep(Duration::from_millis(100));
@@ -384,12 +398,30 @@ mod tests {
         std::thread::sleep(Duration::from_secs(2));
     }
 
+    #[cfg(feature = "boring-ssl")]
+    #[test]
+    fn test_tls_http1_gracefull_shutdown() {
+        let (cert_pem, key_pem) = create_tls_files();
+        let addr = "127.0.0.1:8080";
+        let server_handle = H1Server(EchoService)
+            .start_tls(addr, cert_pem.as_bytes(), key_pem.as_bytes())
+            .expect("h1 TLS start server");
+
+        let client_handler = may::go!(move || {
+            may::coroutine::sleep(Duration::from_millis(100));
+            unsafe { server_handle.coroutine().cancel() };
+        });
+
+        client_handler.join().expect("client handler failed");
+    }
+
     // #[test]
     // fn test_http1_tls_server_response() {
+    //     let (cert_pem, key_pem) = create_tls_files();
     //     // Pick a port and start the server
     //     let addr = "127.0.0.1:8080";
     //     let server_handle = H1Server(EchoService)
-    //         .start_tls(addr)
+    //         .start_tls(addr, cert_pem.as_bytes(), key_pem.as_bytes())
     //         .expect("h1 start server");
 
     //     may::join!(server_handle);

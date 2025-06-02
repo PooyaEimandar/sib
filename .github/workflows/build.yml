@@ -20,6 +20,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install CMake and Ninja
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build
+
       - name: Install Rust target
         run: rustup target add ${{ matrix.target }}
 
@@ -53,6 +56,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install CMake and Ninja
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build
+
       - name: Set up Rust
         run: |
           rustup default stable
@@ -74,6 +80,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install CMake and Ninja
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build
 
       - name: Set up Rust
         run: |

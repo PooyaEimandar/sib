@@ -88,7 +88,8 @@ once_cell = { version = "1.21.3", optional = true, default-features = false, fea
 # wtransport = { version = "0.6.1", optional = true }
 
 [features]
-default = ["http-server"]
+default = ["boring-ssl", "http-server"]
+boring-ssl = ["boring"]
 # all = [
 #     "database",
 #     "http-client",
@@ -147,6 +148,7 @@ http-server = [
 
 [dev-dependencies]
 itoa = { version = "1.0.15", default-features = false }
+rcgen = { version = "0.13.2" }
 
 # portpicker = { version = "0.1.0", default-features = false }
 # rayon = { version = "1.10.0", default-features = false }
