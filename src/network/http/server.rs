@@ -1,12 +1,14 @@
 use super::session::{self, Session};
 use bytes::{BufMut, BytesMut};
-use may::io::WaitIo;
 use may::net::{TcpListener, TcpStream};
 use may::{coroutine, go};
 use std::io::Write;
 use std::io::{self, Read};
 use std::mem::MaybeUninit;
 use std::net::ToSocketAddrs;
+
+#[cfg(unix)]
+use may::io::WaitIo;
 
 const MIN_BUF_LEN: usize = 1024;
 const MAX_BODY_LEN: usize = 4096;
