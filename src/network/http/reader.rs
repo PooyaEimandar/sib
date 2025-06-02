@@ -1,9 +1,11 @@
 use super::server::reserve_buf;
 use bytes::{Buf, BufMut, BytesMut};
-use may::net::TcpStream;
-use std::io::{BufRead, Read};
+use std::io::{BufRead, Read, Write};
 
-pub struct Reader<'buf, 'stream> {
+pub struct Reader<'buf, 'stream, S>
+where
+    S: Read + Write,
+{
     // remaining bytes for body
     pub req_buf: &'buf mut BytesMut,
     // the max body length limit
@@ -11,10 +13,13 @@ pub struct Reader<'buf, 'stream> {
     // total read count
     pub total_read: usize,
     // used to read extra body bytes
-    pub stream: &'stream mut TcpStream,
+    pub stream: &'stream mut S,
 }
 
-impl Reader<'_, '_> {
+impl<'buf, 'stream, S> Reader<'buf, 'stream, S>
+where
+    S: Read + Write,
+{
     fn read_more_data(&mut self) -> std::io::Result<usize> {
         reserve_buf(self.req_buf);
         let chunk_mut = self.req_buf.chunk_mut();
@@ -27,7 +32,10 @@ impl Reader<'_, '_> {
     }
 }
 
-impl Read for Reader<'_, '_> {
+impl<'buf, 'stream, S> Read for Reader<'buf, 'stream, S>
+where
+    S: Read + Write,
+{
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         if self.total_read >= self.body_limit {
             return Ok(0);
@@ -51,7 +59,10 @@ impl Read for Reader<'_, '_> {
     }
 }
 
-impl BufRead for Reader<'_, '_> {
+impl<'buf, 'stream, S> BufRead for Reader<'buf, 'stream, S>
+where
+    S: Read + Write,
+{
     fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
         let remain = self.body_limit - self.total_read;
         if remain == 0 {
@@ -72,7 +83,10 @@ impl BufRead for Reader<'_, '_> {
     }
 }
 
-impl Drop for Reader<'_, '_> {
+impl<'buf, 'stream, S> Drop for Reader<'buf, 'stream, S>
+where
+    S: Read + Write,
+{
     fn drop(&mut self) {
         // consume all the remaining bytes
         while let Ok(n) = self.fill_buf().map(|b| b.len()) {

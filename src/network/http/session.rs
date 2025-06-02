@@ -1,13 +1,15 @@
 use super::reader::Reader;
 use super::server::reserve_buf;
 use bytes::{Buf, BytesMut};
-use may::net::TcpStream;
-use std::io::{self};
+use std::io::{self, Read, Write};
 use std::mem::MaybeUninit;
 
 pub(crate) const MAX_HEADERS: usize = 16;
 
-pub struct Session<'buf, 'header, 'stream> {
+pub struct Session<'buf, 'header, 'stream, S>
+where
+    S: Read + Write,
+{
     // request headers
     req: httparse::Request<'header, 'buf>,
     // request buffer
@@ -17,10 +19,13 @@ pub struct Session<'buf, 'header, 'stream> {
     // buffer for response
     rsp_buf: &'buf mut BytesMut,
     // stream to read body from
-    stream: &'stream mut TcpStream,
+    stream: &'stream mut S,
 }
 
-impl<'buf, 'stream> Session<'buf, '_, 'stream> {
+impl<'buf, 'stream, S> Session<'buf, '_, 'stream, S>
+where
+    S: Read + Write,
+{
     pub fn req_method(&self) -> Option<&str> {
         self.req.method
     }
@@ -51,7 +56,7 @@ impl<'buf, 'stream> Session<'buf, '_, 'stream> {
         ))
     }
 
-    pub fn req_body(self) -> std::io::Result<Reader<'buf, 'stream>> {
+    pub fn req_body(self) -> std::io::Result<Reader<'buf, 'stream, S>> {
         let content_length = self.req_header("content-length")?.parse().map_err(|e| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -115,12 +120,15 @@ impl<'buf, 'stream> Session<'buf, '_, 'stream> {
     }
 }
 
-pub fn new_session<'header, 'buf, 'stream>(
-    stream: &'stream mut TcpStream,
+pub fn new_session<'header, 'buf, 'stream, S>(
+    stream: &'stream mut S,
     headers: &'header mut [MaybeUninit<httparse::Header<'buf>>; MAX_HEADERS],
     req_buf: &'buf mut BytesMut,
     rsp_buf: &'buf mut BytesMut,
-) -> io::Result<Option<Session<'buf, 'header, 'stream>>> {
+) -> io::Result<Option<Session<'buf, 'header, 'stream, S>>>
+where
+    S: Read + Write,
+{
     let mut req = httparse::Request::new(&mut []);
     let buf: &[u8] = unsafe { std::mem::transmute(req_buf.chunk()) };
     let status = match req.parse_with_uninit_headers(buf, headers) {

@@ -1,12 +1,13 @@
+[x] HTTP1.1
 [x] TLS based on boringSSL
-[x] Http1.1/2 server based on Pingora
-[x] Http3 server based on Quiche
-[x] FDB connection pool
-[x] Static file server
-[x] Log for console, file and clickhouse
-[x] Websocket server
-[x] HTTP client pool
-[x] Ratelimit per IP for both Http1.1/2/3
+[] Http1.1/2 server based on Pingora
+[] Http3 server based on Quiche
+[] FDB connection pool
+[] Static file server
+[] Log for console, file and clickhouse
+[] Websocket server
+[] HTTP client pool
+[] Ratelimit per IP for both Http1.1/2/3
 [] Ffmpeg
 [] Rist
 [] TCP client & server
