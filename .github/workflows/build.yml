@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
+        target: [x86_64-linux, aarch64-unknown-linux-gnu]
 
     steps:
       - uses: actions/checkout@v4
@@ -31,19 +31,16 @@ jobs:
           curl -L https://ziglang.org/builds/zig-linux-x86_64-0.15.0-dev.382+6a7ca4b8b.tar.xz | tar -xJ
           ZIG_DIR=$(find . -maxdepth 1 -type d -name "zig-linux-x86_64*" | head -n 1)
           echo "$PWD/$ZIG_DIR" >> $GITHUB_PATH
-          export PATH="$PWD/$ZIG_DIR:$PATH"
-          cargo install cargo-zigbuild
-
-      - name: Set Zig as compiler
-        run: |
           echo "CC=zig cc" >> $GITHUB_ENV
           echo "CXX=zig c++" >> $GITHUB_ENV
+          export PATH="$PWD/$ZIG_DIR:$PATH"
+          cargo install cargo-zigbuild
 
       - name: Confirm Zig version
         run: zig version
 
       - name: Run Clippy
-        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        if: matrix.target == 'x86_64-linux'
         run: |
           rustup component add clippy
           cargo clippy --all-targets --all-features -- -D warnings
@@ -52,7 +49,7 @@ jobs:
         run: cargo zigbuild --release --target=${{ matrix.target }}
 
       - name: Run Tests
-        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        if: matrix.target == 'x86_64-linux'
         run: cargo test --release
 
   windows:
