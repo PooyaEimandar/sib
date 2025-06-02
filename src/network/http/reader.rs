@@ -16,7 +16,7 @@ where
     pub stream: &'stream mut S,
 }
 
-impl<'buf, 'stream, S> Reader<'buf, 'stream, S>
+impl<S> Reader<'_, '_, S>
 where
     S: Read + Write,
 {
@@ -32,7 +32,7 @@ where
     }
 }
 
-impl<'buf, 'stream, S> Read for Reader<'buf, 'stream, S>
+impl<S> Read for Reader<'_, '_, S>
 where
     S: Read + Write,
 {
@@ -59,7 +59,7 @@ where
     }
 }
 
-impl<'buf, 'stream, S> BufRead for Reader<'buf, 'stream, S>
+impl<S> BufRead for Reader<'_, '_, S>
 where
     S: Read + Write,
 {
@@ -83,7 +83,7 @@ where
     }
 }
 
-impl<'buf, 'stream, S> Drop for Reader<'buf, 'stream, S>
+impl<S> Drop for Reader<'_, '_, S>
 where
     S: Read + Write,
 {
