@@ -84,21 +84,17 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
         let pkey = boring::pkey::PKey::private_key_from_pem(key_pem).map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("Key error: {e}"))
         })?;
-
         // create the tls acceptor
         let mut tls_builder =
-            boring::ssl::SslAcceptor::mozilla_intermediate(boring::ssl::SslMethod::tls()).map_err(
-                |e| std::io::Error::new(std::io::ErrorKind::Other, format!("Builder error: {e}")),
-            )?;
-        tls_builder.set_private_key(&pkey).map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Set private key error: {e}"),
-            )
-        })?;
-        tls_builder.set_certificate(&cert).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::Other, format!("Set cert error: {e}"))
-        })?;
+            boring::ssl::SslAcceptor::mozilla_intermediate(boring::ssl::SslMethod::tls())
+                .map_err(|e| std::io::Error::other(format!("Builder error: {e}")))?;
+
+        tls_builder
+            .set_private_key(&pkey)
+            .map_err(|e| std::io::Error::other(format!("Set private key error: {e}")))?;
+        tls_builder
+            .set_certificate(&cert)
+            .map_err(|e| std::io::Error::other(format!("Set cert error: {e}")))?;
 
         let tls_acceptor = std::sync::Arc::new(tls_builder.build());
         let listener = TcpListener::bind(addr)?;
