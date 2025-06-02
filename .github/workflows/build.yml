@@ -29,6 +29,13 @@ jobs:
       - name: Add Rust target
         run: rustup target add ${{ matrix.target }}
 
+      - name: Configure Cargo for Cross
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          mkdir -p .cargo
+          echo '[target.aarch64-unknown-linux-gnu]' >> .cargo/config.toml
+          echo 'linker = "aarch64-linux-gnu-gcc"' >> .cargo/config.toml
+
       - name: Run Clippy
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: |
