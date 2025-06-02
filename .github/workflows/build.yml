@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install CMake and Ninja
-        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build clang
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build clang nasm
 
       - name: Install Rust target
         run: rustup target add ${{ matrix.target }}
@@ -62,7 +62,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install CMake and Ninja
-        run: choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' -y && choco install ninja -y
+        run: choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' -y && choco install ninja nasm -y
 
       - name: Set up Rust
         run: |
