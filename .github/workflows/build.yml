@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install CMake and Ninja
-        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build nasm gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build nasm
 
       - name: Install Rust target
         run: rustup target add ${{ matrix.target }}
@@ -31,7 +31,13 @@ jobs:
           curl -L https://ziglang.org/builds/zig-linux-x86_64-0.15.0-dev.382+6a7ca4b8b.tar.xz | tar -xJ
           ZIG_DIR=$(find . -maxdepth 1 -type d -name "zig-linux-x86_64*" | head -n 1)
           echo "$PWD/$ZIG_DIR" >> $GITHUB_PATH
+          export PATH="$PWD/$ZIG_DIR:$PATH"
           cargo install cargo-zigbuild
+
+      - name: Set Zig as compiler
+        run: |
+          echo "CC=zig cc" >> $GITHUB_ENV
+          echo "CXX=zig c++" >> $GITHUB_ENV
 
       - name: Confirm Zig version
         run: zig version
