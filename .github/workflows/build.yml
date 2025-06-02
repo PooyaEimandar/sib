@@ -21,9 +21,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install tools
-        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build nasm
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build nasm \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libc6-dev-arm64-cross
 
-      - name: Add target
+      - name: Add Rust target
         run: rustup target add ${{ matrix.target }}
 
       - name: Run Clippy
@@ -47,13 +50,14 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install tools
-        run: choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' -y && choco install ninja nasm -y
+        run: |
+          choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' -y
+          choco install ninja nasm -y
 
       - name: Setup Rust
         run: |
           rustup default stable
           rustup component add clippy
-          rustup target add x86_64-pc-windows-msvc
 
       - name: Run Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
@@ -92,10 +96,7 @@ jobs:
 
   apple:
     name: Apple (macOS & iOS)
-    runs-on: macos-latest
-    strategy:
-      matrix:
-        target: [aarch64-apple-darwin, aarch64-apple-ios]
+    runs-on: macos-14
 
     steps:
       - uses: actions/checkout@v4
