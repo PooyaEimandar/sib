@@ -1,4 +1,4 @@
-use super::server::reserve_buf;
+use crate::network::http::h1::reserve_buf;
 use bytes::{Buf, BufMut, BytesMut};
 use std::io::{BufRead, Read, Write};
 

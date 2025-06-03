@@ -27,12 +27,12 @@ macro_rules! mc {
     };
 }
 
-pub trait HttpService {
+pub trait H1Service {
     fn call<S: Read + std::io::Write>(&mut self, req: &mut Session<S>) -> io::Result<()>;
 }
 
 pub trait H1ServiceFactory: Send + Sized + 'static {
-    type Service: HttpService + Send;
+    type Service: H1Service + Send;
     // create a new http service for each connection
     fn service(&self, id: usize) -> Self::Service;
 
@@ -201,7 +201,7 @@ fn read_write<S, T>(
 ) -> io::Result<bool>
 where
     S: Read + Write,
-    T: HttpService,
+    T: H1Service,
 {
     // read the socket for requests
     let blocked = read(stream, req_buf)?;
@@ -225,7 +225,7 @@ where
 }
 
 #[cfg(unix)]
-fn serve<T: HttpService>(stream: &mut TcpStream, mut service: T) -> io::Result<()> {
+fn serve<T: H1Service>(stream: &mut TcpStream, mut service: T) -> io::Result<()> {
     let mut req_buf = BytesMut::with_capacity(BUF_LEN);
     let mut rsp_buf = BytesMut::with_capacity(BUF_LEN);
 
@@ -237,7 +237,7 @@ fn serve<T: HttpService>(stream: &mut TcpStream, mut service: T) -> io::Result<(
 }
 
 #[cfg(all(unix, feature = "boring-ssl"))]
-fn serve_tls<T: HttpService>(
+fn serve_tls<T: H1Service>(
     stream: &mut boring::ssl::SslStream<may::net::TcpStream>,
     mut service: T,
 ) -> io::Result<()> {
@@ -252,7 +252,7 @@ fn serve_tls<T: HttpService>(
 }
 
 #[cfg(not(unix))]
-fn serve<T: HttpService>(stream: &mut TcpStream, mut service: T) -> io::Result<()> {
+fn serve<T: H1Service>(stream: &mut TcpStream, mut service: T) -> io::Result<()> {
     use std::io::Write;
 
     let mut req_buf = BytesMut::with_capacity(BUF_LEN);
@@ -295,8 +295,8 @@ fn serve<T: HttpService>(stream: &mut TcpStream, mut service: T) -> io::Result<(
 #[cfg(test)]
 mod tests {
     use crate::network::http::{
+        h1::{H1Service, H1ServiceFactory},
         message::Status,
-        server::{H1ServiceFactory, HttpService},
         session::Session,
     };
     use may::net::TcpStream;
@@ -309,7 +309,7 @@ mod tests {
 
     struct EchoService;
 
-    impl HttpService for EchoService {
+    impl H1Service for EchoService {
         fn call<S: Read + Write>(&mut self, session: &mut Session<S>) -> std::io::Result<()> {
             let body = bytes::Bytes::from(format!(
                 "Echo: {:?} {:?}",
@@ -337,7 +337,7 @@ mod tests {
     }
 
     #[cfg(feature = "boring-ssl")]
-    fn create_tls_files() -> (String, String) {
+    fn create_self_signed_tls_pems() -> (String, String) {
         use rcgen::{
             CertificateParams, DistinguishedName, DnType, KeyPair, SanType, date_time_ymd,
         };
@@ -356,7 +356,7 @@ mod tests {
     }
 
     #[test]
-    fn test_http1_gracefull_shutdown() {
+    fn test_h1_gracefull_shutdown() {
         let addr = "127.0.0.1:8080";
         let server_handle = H1Server(EchoService).start(addr).expect("h1 start server");
 
@@ -369,7 +369,7 @@ mod tests {
     }
 
     #[test]
-    fn test_http1_server_response() {
+    fn test_h1_server_response() {
         // Pick a port and start the server
         let addr = "127.0.0.1:8080";
         let server_handle = H1Server(EchoService).start(addr).expect("h1 start server");
@@ -398,8 +398,8 @@ mod tests {
 
     #[cfg(feature = "boring-ssl")]
     #[test]
-    fn test_tls_http1_gracefull_shutdown() {
-        let (cert_pem, key_pem) = create_tls_files();
+    fn test_tls_h1_gracefull_shutdown() {
+        let (cert_pem, key_pem) = create_self_signed_tls_pems();
         let addr = "127.0.0.1:8080";
         let server_handle = H1Server(EchoService)
             .start_tls(addr, cert_pem.as_bytes(), key_pem.as_bytes())
@@ -414,8 +414,8 @@ mod tests {
     }
 
     // #[test]
-    // fn test_http1_tls_server_response() {
-    //     let (cert_pem, key_pem) = create_tls_files();
+    // fn test_tls_h1_server_response() {
+    //     let (cert_pem, key_pem) = create_self_signed_tls_pems();
     //     // Pick a port and start the server
     //     let addr = "127.0.0.1:8080";
     //     let server_handle = H1Server(EchoService)

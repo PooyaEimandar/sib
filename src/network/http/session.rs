@@ -1,5 +1,5 @@
 use super::reader::Reader;
-use super::server::reserve_buf;
+use crate::network::http::h1::reserve_buf;
 use bytes::{Buf, BytesMut};
 use std::io::{self, Read, Write};
 use std::mem::MaybeUninit;
