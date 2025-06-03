@@ -49,7 +49,6 @@ where
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
             }
         }
-        // Return an error if the header is not found
         Err(io::Error::new(
             io::ErrorKind::NotFound,
             format!("{} header not found", header),
@@ -148,7 +147,6 @@ where
 
     reserve_buf(rsp_buf);
 
-    // println!("req: {:?}", std::str::from_utf8(req_buf).unwrap());
     Ok(Some(Session {
         req,
         req_buf,

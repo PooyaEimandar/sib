@@ -13,13 +13,11 @@ const MIN_BUF_LEN: usize = 1024;
 const MAX_BODY_LEN: usize = 4096;
 pub const BUF_LEN: usize = MAX_BODY_LEN * 8;
 
-// move or continue
 macro_rules! mc {
     ($e: expr) => {
         match $e {
             Ok(val) => val,
             Err(_err) => {
-                //s_error!("call = {:?}\nerr = {:?}", stringify!($e), err);
                 continue;
             }
         }
@@ -35,8 +33,7 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
     // create a new http service for each connection
     fn service(&self, id: usize) -> Self::Service;
 
-    /// Spawns the http service, binding to the given address
-    /// return a coroutine that you can cancel it when need to stop the service
+    /// Start the http service
     fn start<L: ToSocketAddrs>(self, addr: L) -> io::Result<coroutine::JoinHandle<()>> {
         let listener = TcpListener::bind(addr)?;
         go!(
@@ -69,8 +66,7 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
     }
 
     #[cfg(feature = "boring-ssl")]
-    /// Spawns the http service, binding to the given address
-    /// return a coroutine that you can cancel it when need to stop the service
+    /// Start the https service
     fn start_tls<L: ToSocketAddrs>(
         self,
         addr: L,

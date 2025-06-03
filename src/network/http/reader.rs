@@ -51,7 +51,6 @@ where
                 self.total_read += n;
                 return Ok(n);
             }
-
             if self.read_more_data()? == 0 {
                 return Ok(0);
             }
@@ -88,12 +87,10 @@ where
     S: Read + Write,
 {
     fn drop(&mut self) {
-        // consume all the remaining bytes
         while let Ok(n) = self.fill_buf().map(|b| b.len()) {
             if n == 0 {
                 break;
             }
-            // println!("drop: {:?}", n);
             self.consume(n);
         }
     }
