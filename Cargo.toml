@@ -118,7 +118,6 @@ http-server = [
     #     "httpdate",
     #     "lru",
     "arc-swap",
-    "boring",
     "bytes",
     "httpdate",
     "httparse",
