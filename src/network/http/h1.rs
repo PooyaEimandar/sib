@@ -2,8 +2,7 @@ use super::session::{self, Session};
 use bytes::{BufMut, BytesMut};
 use may::net::{TcpListener, TcpStream};
 use may::{coroutine, go};
-use std::io::Write;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::mem::MaybeUninit;
 use std::net::ToSocketAddrs;
 
@@ -28,7 +27,7 @@ macro_rules! mc {
 }
 
 pub trait H1Service {
-    fn call<S: Read + std::io::Write>(&mut self, req: &mut Session<S>) -> io::Result<()>;
+    fn call<S: Read + std::io::Write>(&mut self, session: &mut Session<S>) -> io::Result<()>;
 }
 
 pub trait H1ServiceFactory: Send + Sized + 'static {
