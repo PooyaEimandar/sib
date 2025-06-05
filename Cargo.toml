@@ -47,3 +47,6 @@ tokio = { version = "1.45.1", default-features = false, features = [
 
 [build-dependencies]
 chrono = { version = "0.4.40" }
+
+[profile.release]
+lto = true
