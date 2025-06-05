@@ -61,7 +61,8 @@ rustdocflags = [
 ]
 
 rustflags = [
-    #"--cfg",
+    "--cfg",
+    "reqwest_unstable",
     "-Dabsolute_paths_not_starting_with_crate",
     "-Dambiguous_associated_items",
     "-Danonymous_parameters",
