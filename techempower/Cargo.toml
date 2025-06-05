@@ -18,4 +18,10 @@ mimalloc = { version = "0.1.46", features = ["secure"] }
 num_cpus = { version = "1.16" }
 
 [profile.release]
-lto = true
+opt-level = "z"            # Consider "3" for max speed, but "z" gives small size & good cache perf
+lto = "fat"                # Full Link Time Optimization (best performance, slower build)
+codegen-units = 1          # Forces whole-program optimization (slower compile, faster runtime)
+panic = "abort"            # Smaller, faster code; no stack unwinding
+strip = "symbols"          # Remove symbols for smaller binary and possibly faster load
+debug = false              # Don't include debug info
+incremental = false        # Disable incremental compilation in release
