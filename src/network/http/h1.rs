@@ -34,7 +34,12 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
     fn service(&self, id: usize) -> Self::Service;
 
     /// Start the http service
-    fn start<L: ToSocketAddrs>(self, addr: L) -> io::Result<coroutine::JoinHandle<()>> {
+    fn start<L: ToSocketAddrs>(
+        self,
+        addr: L,
+        number_of_workers: usize,
+    ) -> io::Result<coroutine::JoinHandle<()>> {
+        may::config().set_workers(number_of_workers);
         let listener = TcpListener::bind(addr)?;
         go!(
             coroutine::Builder::new().name("H1ServiceFactory".to_owned()),
@@ -353,7 +358,9 @@ mod tests {
     #[test]
     fn test_h1_gracefull_shutdown() {
         let addr = "127.0.0.1:8080";
-        let server_handle = H1Server(EchoService).start(addr).expect("h1 start server");
+        let server_handle = H1Server(EchoService)
+            .start(addr, 1)
+            .expect("h1 start server");
 
         let client_handler = may::go!(move || {
             may::coroutine::sleep(Duration::from_millis(100));
@@ -367,7 +374,9 @@ mod tests {
     fn test_h1_server_response() {
         // Pick a port and start the server
         let addr = "127.0.0.1:8080";
-        let server_handle = H1Server(EchoService).start(addr).expect("h1 start server");
+        let server_handle = H1Server(EchoService)
+            .start(addr, 1)
+            .expect("h1 start server");
 
         let client_handler = may::go!(move || {
             may::coroutine::sleep(Duration::from_millis(100));
