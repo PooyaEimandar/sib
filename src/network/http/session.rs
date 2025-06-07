@@ -113,9 +113,7 @@ where
 
     #[inline]
     pub fn eom(&mut self) {
-        if !self.rsp_buf.ends_with(b"\r\n") {
-            self.rsp_buf.extend_from_slice(b"\r\n");
-        }
+        // eom, end of message
     }
 }
 
