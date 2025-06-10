@@ -1,5 +1,5 @@
 cfg_if::cfg_if! {
-    if #[cfg(feature = "h1-server")] {
+    if #[cfg(feature = "net-h1-server")] {
         pub mod h1;
         pub mod message;
         pub mod reader;
@@ -7,5 +7,5 @@ cfg_if::cfg_if! {
     }
 }
 
-#[cfg(feature = "h3-server")]
+#[cfg(feature = "net-h3-server")]
 pub mod h3;

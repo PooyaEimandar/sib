@@ -71,7 +71,7 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
         )
     }
 
-    #[cfg(feature = "boring-ssl")]
+    #[cfg(feature = "sys-boring-ssl")]
     /// Start the https service
     fn start_tls<L: ToSocketAddrs>(
         self,
@@ -237,7 +237,7 @@ fn serve<T: H1Service>(stream: &mut TcpStream, mut service: T) -> io::Result<()>
     }
 }
 
-#[cfg(all(unix, feature = "boring-ssl"))]
+#[cfg(all(unix, feature = "sys-boring-ssl"))]
 fn serve_tls<T: H1Service>(
     stream: &mut boring::ssl::SslStream<may::net::TcpStream>,
     mut service: T,
@@ -337,7 +337,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "boring-ssl")]
+    #[cfg(feature = "sys-boring-ssl")]
     fn create_self_signed_tls_pems() -> (String, String) {
         use rcgen::{
             CertificateParams, DistinguishedName, DnType, KeyPair, SanType, date_time_ymd,
@@ -401,7 +401,7 @@ mod tests {
         std::thread::sleep(Duration::from_secs(2));
     }
 
-    #[cfg(feature = "boring-ssl")]
+    #[cfg(feature = "sys-boring-ssl")]
     #[test]
     fn test_tls_h1_gracefull_shutdown() {
         let (cert_pem, key_pem) = create_self_signed_tls_pems();
