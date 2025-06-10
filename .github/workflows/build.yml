@@ -26,6 +26,9 @@ jobs:
           sudo apt-get install -y cmake ninja-build nasm \
             gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libc6-dev-arm64-cross
 
+      - name: Run FoundationDB setup
+        run: bash ./bash/foundationDB.sh
+
       - name: Add Rust target
         run: rustup target add ${{ matrix.target }}
 
@@ -110,6 +113,9 @@ jobs:
 
       - name: Install tools
         run: brew install cmake ninja
+
+      - name: Run FoundationDB setup
+        run: bash ./bash/foundationDB.sh
 
       - name: Setup Rust
         run: |
