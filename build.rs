@@ -11,5 +11,5 @@ fn main() {
         now.minute(),
         now.second()
     );
-    println!("cargo:rustc-env=SIB_BUILD_VERSION={}", version);
+    println!("cargo:rustc-env=SIB_BUILD_VERSION={version}");
 }
