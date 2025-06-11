@@ -9,6 +9,7 @@ pub(crate) const MAX_HEADERS: usize = 16;
 pub struct Session<'buf, 'header, 'stream, S>
 where
     S: Read + Write,
+    'buf: 'stream,
 {
     // request headers
     req: httparse::Request<'header, 'buf>,
@@ -21,8 +22,7 @@ where
     // stream to read body from
     stream: &'stream mut S,
 }
-
-impl<'buf, 'stream, S> Session<'buf, '_, 'stream, S>
+impl<'buf, 'header, 'stream, S> Session<'buf, 'header, 'stream, S>
 where
     S: Read + Write,
 {
@@ -55,7 +55,10 @@ where
         ))
     }
 
-    pub fn req_body(self) -> std::io::Result<Reader<'buf, 'stream, S>> {
+    pub fn req_body<'a>(&'a mut self) -> std::io::Result<Reader<'a, 'stream, S>>
+    where
+        'a: 'stream,
+    {
         let content_length = self.req_header("content-length")?.parse().map_err(|e| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
