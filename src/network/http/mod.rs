@@ -9,3 +9,6 @@ cfg_if::cfg_if! {
 
 #[cfg(feature = "net-h3-server")]
 pub mod h3;
+
+#[cfg(any(feature = "net-h1-server", feature = "net-h3-server"))]
+pub mod ratelimit;

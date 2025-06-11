@@ -1,3 +1,5 @@
+use crate::network::http::ratelimit::{RateLimiter, RateLimiterKind};
+
 use super::session::{self, Session};
 use bytes::{BufMut, BytesMut};
 use may::net::{TcpListener, TcpStream};
@@ -24,6 +26,43 @@ macro_rules! mc {
     };
 }
 
+#[macro_export]
+macro_rules! enforce_rate_limit {
+    ($stream:expr, $rate_limiter:expr) => {{
+        if let Some(rl) = &$rate_limiter {
+            if let Ok(ip) = $stream.peer_addr().map(|addr| addr.ip().to_string()) {
+                let result = rl.check(ip.into());
+                if !result.allowed {
+                    use std::io::Write;
+                    let _ = write!(
+                        $stream,
+                        r#"HTTP/1.1 429 Too Many Requests\r\n\
+Content-Length: 0\r\n\
+Connection: close\r\n\
+Retry-After: {}\r\n\
+X-RateLimit-Limit: {}\r\n\
+X-RateLimit-Remaining: {}\r\n\
+X-RateLimit-Reset: {}\r\n\r\n"#,
+                        result.retry_after_secs.unwrap_or(60),
+                        result.limit,
+                        result.remaining,
+                        result.reset_after_secs.unwrap_or(60),
+                    );
+                    let _ = $stream.flush();
+                    let _ = $stream.shutdown(std::net::Shutdown::Both);
+                    Some(())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }};
+}
+
 pub trait H1Service {
     fn call<S: Read + std::io::Write>(&mut self, session: &mut Session<S>) -> io::Result<()>;
 }
@@ -38,6 +77,7 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
         self,
         addr: L,
         number_of_workers: usize,
+        rate_limiter: Option<RateLimiterKind>,
     ) -> io::Result<coroutine::JoinHandle<()>> {
         may::config().set_workers(number_of_workers);
         let listener = TcpListener::bind(addr)?;
@@ -51,6 +91,11 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
 
                 for stream in listener.incoming() {
                     let mut stream = mc!(stream);
+
+                    if enforce_rate_limit!(stream, rate_limiter).is_some() {
+                        continue;
+                    }
+
                     #[cfg(unix)]
                     let id = stream.as_raw_fd() as usize;
                     #[cfg(windows)]
@@ -78,6 +123,7 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
         addr: L,
         cert_pem: &[u8],
         key_pem: &[u8],
+        rate_limiter: Option<RateLimiterKind>,
     ) -> io::Result<coroutine::JoinHandle<()>> {
         // Parse the certificate from memory
         let cert = boring::x509::X509::from_pem(cert_pem).map_err(|e| {
@@ -109,7 +155,11 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
                 #[cfg(windows)]
                 use std::os::windows::io::AsRawSocket;
                 for stream in listener.incoming() {
-                    let stream = mc!(stream);
+                    let mut stream = mc!(stream);
+
+                    if enforce_rate_limit!(stream, rate_limiter).is_some() {
+                        continue;
+                    }
 
                     #[cfg(unix)]
                     let id = stream.as_raw_fd() as usize;
@@ -360,7 +410,7 @@ mod tests {
     fn test_h1_gracefull_shutdown() {
         let addr = "127.0.0.1:8080";
         let server_handle = H1Server(EchoService)
-            .start(addr, 1)
+            .start(addr, 1, None)
             .expect("h1 start server");
 
         let client_handler = may::go!(move || {
@@ -376,7 +426,7 @@ mod tests {
         // Pick a port and start the server
         let addr = "127.0.0.1:8080";
         let server_handle = H1Server(EchoService)
-            .start(addr, 1)
+            .start(addr, 1, None)
             .expect("h1 start server");
 
         let client_handler = may::go!(move || {
@@ -407,7 +457,7 @@ mod tests {
         let (cert_pem, key_pem) = create_self_signed_tls_pems();
         let addr = "127.0.0.1:8080";
         let server_handle = H1Server(EchoService)
-            .start_tls(addr, cert_pem.as_bytes(), key_pem.as_bytes())
+            .start_tls(addr, cert_pem.as_bytes(), key_pem.as_bytes(), None)
             .expect("h1 TLS start server");
 
         let client_handler = may::go!(move || {

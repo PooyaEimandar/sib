@@ -20,6 +20,8 @@ arc-swap = { version = "1.7.1", optional = true, default-features = false }
 boring = { version = "4.17.0", optional = true }
 bytes = { version = "1.10.1", optional = true, default-features = false }
 cfg-if = { version = "1.0.1", default-features = false }
+dashmap = { version = "6.1.0", optional = true, default-features = false }
+heapless = { version = "0.8.0", optional = true, default-features = false }
 httparse = { version = "1.10.1", optional = true, default-features = false }
 httpdate = { version = "1.0.3", optional = true, default-features = false }
 may = { version = "0.3.51", optional = true }
@@ -38,23 +40,25 @@ foundationdb-sys = { version = "0.9.1", optional = true, default-features = fals
 
 
 [features]
-default = []
+default = ["net-h1-server"]
 db-fdb = ["foundationdb-sys"]
 net-h1-server = [
     "arc-swap",
     "bytes",
+    "dashmap",
+    "heapless",
     "httpdate",
     "httparse",
     "may",
     "once_cell",
 ]
-net-h3-server = ["bytes", "may", "quiche", "ring"]
+net-h3-server = ["bytes", "dashmap", "heapless", "may", "quiche", "ring"]
 sys-boring-ssl = ["boring"]
 
 [dev-dependencies]
 itoa = { version = "1.0.15", default-features = false }
 rcgen = { version = "0.13.2" }
-reqwest = { version = "0.12.19", default-features = false, features = [
+reqwest = { version = "0.12.20", default-features = false, features = [
     "http3",
 ] }
 tokio = { version = "1.45.1", default-features = false, features = [
