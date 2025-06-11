@@ -4,7 +4,7 @@ use super::session::{self, Session};
 use bytes::{BufMut, BytesMut};
 use may::net::{TcpListener, TcpStream};
 use may::{coroutine, go};
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::mem::MaybeUninit;
 use std::net::ToSocketAddrs;
 
@@ -251,7 +251,7 @@ fn read_write<S, T>(
     service: &mut T,
 ) -> io::Result<bool>
 where
-    S: Read + Write,
+    S: Read + io::Write,
     T: H1Service,
 {
     // read the socket for requests
