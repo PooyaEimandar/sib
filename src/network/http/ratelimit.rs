@@ -94,7 +94,7 @@ impl RateLimiter for SlidingWindowLimiter {
     fn check(&self, key: Cow<str>) -> RateLimitResult {
         let now = Instant::now();
         let key: Cow<'static, str> = Cow::Owned(key.into_owned());
-        let mut queue = self.state.entry(key.clone()).or_insert_with(Deque::new);
+        let mut queue = self.state.entry(key.clone()).or_default();
 
         while let Some(&front) = queue.front() {
             if now.duration_since(front) > self.window {
