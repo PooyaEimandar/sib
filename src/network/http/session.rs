@@ -1,6 +1,5 @@
-use super::reader::Reader;
 use crate::network::http::h1::reserve_buf;
-use bytes::{Buf, BytesMut};
+use bytes::{Buf, BufMut, BytesMut};
 use std::io::{self, Read, Write};
 use std::mem::MaybeUninit;
 
@@ -55,22 +54,67 @@ where
         ))
     }
 
-    pub fn req_body<'a>(&'a mut self) -> std::io::Result<Reader<'a, 'stream, S>>
-    where
-        'a: 'stream,
-    {
-        let content_length = self.req_header("content-length")?.parse().map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("invalid content-length header: {e}"),
-            )
-        })?;
-        Ok(Reader {
-            body_limit: content_length,
-            total_read: 0,
-            stream: self.stream,
-            req_buf: self.req_buf,
-        })
+    pub fn req_body(&mut self, timeout: std::time::Duration) -> io::Result<&str> {
+        let content_length = self
+            .req
+            .headers
+            .iter()
+            .find(|h| h.name.eq_ignore_ascii_case("Content-Length"))
+            .and_then(|h| str::from_utf8(h.value).ok())
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(0);
+
+        if content_length == 0 {
+            return Ok("");
+        }
+
+        if self.req_buf.remaining_mut() < content_length {
+            self.req_buf.reserve(content_length);
+        }
+
+        let mut read = 0;
+        let start = std::time::Instant::now();
+
+        while read < content_length {
+            // Check timeout
+            if start.elapsed() > timeout {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "body read timed out",
+                ));
+            }
+
+            let chunk = self.req_buf.chunk_mut();
+            let to_read = chunk.len().min(content_length - read);
+            let buf = unsafe { std::slice::from_raw_parts_mut(chunk.as_mut_ptr(), to_read) };
+
+            match self.stream.read(buf) {
+                Ok(0) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "connection closed before body fully read",
+                    ));
+                }
+                Ok(n) => {
+                    unsafe {
+                        self.req_buf.advance_mut(n);
+                    }
+                    read += n;
+                }
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    may::coroutine::yield_now();
+                }
+                Err(e) => return Err(e),
+            }
+
+            // yield every 1KB read
+            if read % 1024 == 0 {
+                may::coroutine::yield_now();
+            }
+        }
+
+        let body_bytes = &self.req_buf[..content_length];
+        str::from_utf8(body_bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
     #[inline]

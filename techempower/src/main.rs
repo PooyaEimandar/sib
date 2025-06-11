@@ -66,7 +66,7 @@ fn main() {
             let id = std::thread::current().id();
             println!("Listening {} on thread: {:?}", addr, id);
             H1Server(HService)
-                .start(addr, cpus)
+                .start(addr, cpus, None)
                 .expect(&format!("h1 server failed to start for thread {:?}", id))
                 .join()
                 .expect(&format!("h1 server failed to joining thread {:?}", id));

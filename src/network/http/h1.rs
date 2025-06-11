@@ -362,10 +362,12 @@ mod tests {
 
     impl H1Service for EchoService {
         fn call<S: Read + Write>(&mut self, session: &mut Session<S>) -> std::io::Result<()> {
+            let req_method = session.req_method().unwrap_or_default().to_owned();
+            let req_path = session.req_path().unwrap_or_default().to_owned();
+            let req_body = session.req_body(std::time::Duration::from_secs(1))?;
             let body = bytes::Bytes::from(format!(
-                "Echo: {:?} {:?}",
-                session.req_method(),
-                session.req_path()
+                "Echo: {:?} {:?}\r\nBody: {:?}",
+                req_method, req_path, req_body
             ));
             let mut body_len = itoa::Buffer::new();
             let body_len_str = body_len.format(body.len());
