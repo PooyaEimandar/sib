@@ -22,6 +22,8 @@ pub fn start(
     addr: &'static str,
     cert_pem_file_path: &'static str,
     key_pem_file_path: &'static str,
+    number_of_workers: usize,
+    stack_size: usize,
 ) -> std::io::Result<()> {
     // create the UDP listening socket.
     let socket = may::net::UdpSocket::bind(addr)?;
@@ -76,10 +78,16 @@ pub fn start(
         .local_addr()
         .map_err(|e| std::io::Error::other(format!("Failed to get local address: {e:?}")))?;
 
+    let stacksize = if stack_size > 0 {
+        stack_size
+    } else {
+        2 * 1024 * 1024 // default to 2 MiB
+    };
+    may::config()
+        .set_workers(number_of_workers)
+        .set_stack_size(stacksize);
     let _ = may::go!(
-        may::coroutine::Builder::new()
-            .stack_size(2 * 1024 * 1024) // 2 MiB stack size
-            .name("H3ServiceFactory".to_owned()),
+        may::coroutine::Builder::new().name("H3ServiceFactory".to_owned()),
         move || {
             loop {
                 // Read incoming UDP packets from the socket and feed them to quiche,
@@ -756,7 +764,7 @@ mod tests {
         // Start the server in a background thread
         std::thread::spawn(|| {
             println!("Starting the server...");
-            let _ = start("0.0.0.0:8080", "/tmp/cert.pem", "/tmp/key.pem");
+            let _ = start("0.0.0.0:8080", "/tmp/cert.pem", "/tmp/key.pem", 1, 0);
         });
 
         // Wait for the server to be ready

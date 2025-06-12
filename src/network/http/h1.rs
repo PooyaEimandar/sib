@@ -77,9 +77,17 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
         self,
         addr: L,
         number_of_workers: usize,
+        stack_size: usize,
         rate_limiter: Option<RateLimiterKind>,
     ) -> io::Result<coroutine::JoinHandle<()>> {
-        may::config().set_workers(number_of_workers);
+        let stacksize = if stack_size > 0 {
+            stack_size
+        } else {
+            2 * 1024 * 1024 // default to 2 MiB
+        };
+        may::config()
+            .set_workers(number_of_workers)
+            .set_stack_size(stacksize);
         let listener = TcpListener::bind(addr)?;
         go!(
             coroutine::Builder::new().name("H1ServiceFactory".to_owned()),
@@ -124,9 +132,9 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
         number_of_workers: usize,
         cert_pem: &[u8],
         key_pem: &[u8],
+        stack_size: usize,
         rate_limiter: Option<RateLimiterKind>,
     ) -> io::Result<coroutine::JoinHandle<()>> {
-        may::config().set_workers(number_of_workers);
         // Parse the certificate from memory
         let cert = boring::x509::X509::from_pem(cert_pem).map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("Cert error: {e}"))
@@ -147,6 +155,14 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
             .set_certificate(&cert)
             .map_err(|e| std::io::Error::other(format!("Set cert error: {e}")))?;
 
+        let stacksize = if stack_size > 0 {
+            stack_size
+        } else {
+            2 * 1024 * 1024 // default to 2 MiB
+        };
+        may::config()
+            .set_workers(number_of_workers)
+            .set_stack_size(stacksize);
         let tls_acceptor = std::sync::Arc::new(tls_builder.build());
         let listener = TcpListener::bind(addr)?;
         go!(
@@ -414,7 +430,7 @@ mod tests {
     fn test_h1_gracefull_shutdown() {
         let addr = "127.0.0.1:8080";
         let server_handle = H1Server(EchoService)
-            .start(addr, 1, None)
+            .start(addr, 1, 0, None)
             .expect("h1 start server");
 
         let client_handler = may::go!(move || {
@@ -430,7 +446,7 @@ mod tests {
         // Pick a port and start the server
         let addr = "127.0.0.1:8080";
         let server_handle = H1Server(EchoService)
-            .start(addr, 1, None)
+            .start(addr, 1, 0, None)
             .expect("h1 start server");
 
         let client_handler = may::go!(move || {
@@ -461,7 +477,7 @@ mod tests {
         let (cert_pem, key_pem) = create_self_signed_tls_pems();
         let addr = "127.0.0.1:8080";
         let server_handle = H1Server(EchoService)
-            .start_tls(addr, 1, cert_pem.as_bytes(), key_pem.as_bytes(), None)
+            .start_tls(addr, 1, cert_pem.as_bytes(), key_pem.as_bytes(), 0, None)
             .expect("h1 TLS start server");
 
         let client_handler = may::go!(move || {
