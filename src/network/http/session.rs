@@ -120,12 +120,15 @@ where
 
     #[inline]
     pub fn status_code(&mut self, status: super::message::Status) -> &mut Self {
+        const SERVER_NAME: &str =
+            concat!("\r\nServer: Sib", env!("SIB_BUILD_VERSION"), "\r\nDate: ");
         let (code, reason) = status.as_parts();
+
         self.rsp_buf.extend_from_slice(b"HTTP/1.1 ");
         self.rsp_buf.extend_from_slice(code.as_bytes());
         self.rsp_buf.extend_from_slice(b" ");
         self.rsp_buf.extend_from_slice(reason.as_bytes());
-        self.rsp_buf.extend_from_slice(b"\r\nServer: Sib\r\nDate: ");
+        self.rsp_buf.extend_from_slice(SERVER_NAME.as_bytes());
         self.rsp_buf
             .extend_from_slice(super::message::CURRENT_DATE.load().as_bytes());
         self.rsp_buf.extend_from_slice(b"\r\n");
