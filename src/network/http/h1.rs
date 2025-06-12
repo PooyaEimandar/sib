@@ -121,10 +121,12 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
     fn start_tls<L: ToSocketAddrs>(
         self,
         addr: L,
+        number_of_workers: usize,
         cert_pem: &[u8],
         key_pem: &[u8],
         rate_limiter: Option<RateLimiterKind>,
     ) -> io::Result<coroutine::JoinHandle<()>> {
+        may::config().set_workers(number_of_workers);
         // Parse the certificate from memory
         let cert = boring::x509::X509::from_pem(cert_pem).map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("Cert error: {e}"))
@@ -459,7 +461,7 @@ mod tests {
         let (cert_pem, key_pem) = create_self_signed_tls_pems();
         let addr = "127.0.0.1:8080";
         let server_handle = H1Server(EchoService)
-            .start_tls(addr, cert_pem.as_bytes(), key_pem.as_bytes(), None)
+            .start_tls(addr, 1, cert_pem.as_bytes(), key_pem.as_bytes(), None)
             .expect("h1 TLS start server");
 
         let client_handler = may::go!(move || {
