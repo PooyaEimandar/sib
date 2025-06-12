@@ -169,7 +169,7 @@ where
         Ok(self)
     }
 
-    pub fn headers(&mut self, header_val: &[(&HttpHeader, &str)]) -> std::io::Result<&mut Self> {
+    pub fn headers(&mut self, header_val: &[(HttpHeader, &str)]) -> std::io::Result<&mut Self> {
         for (name, value) in header_val {
             self.header(name, value)?;
         }
