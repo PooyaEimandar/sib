@@ -146,6 +146,23 @@ where
         Ok(self)
     }
 
+    pub fn headers(&mut self, header_val: &[(&str, &str)]) -> std::io::Result<&mut Self> {
+        if self.rsp_headers_len >= MAX_HEADERS {
+            return Err(io::Error::new(
+                io::ErrorKind::ArgumentListTooLong,
+                "too many headers",
+            ));
+        }
+        for (name, value) in header_val {
+            self.rsp_buf.extend_from_slice(name.as_bytes());
+            self.rsp_buf.extend_from_slice(b": ");
+            self.rsp_buf.extend_from_slice(value.as_bytes());
+            self.rsp_buf.extend_from_slice(b"\r\n");
+            self.rsp_headers_len += 1;
+        }
+        Ok(self)
+    }
+
     pub fn body(&mut self, body: &bytes::Bytes) -> &mut Self {
         self.rsp_buf.extend_from_slice(b"\r\n");
         self.rsp_buf.extend_from_slice(body);
