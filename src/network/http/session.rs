@@ -1,4 +1,5 @@
 use crate::network::http::h1::reserve_buf;
+use crate::network::http::message::HttpHeader;
 use bytes::{Buf, BufMut, BytesMut};
 use std::io::{self, Read, Write};
 use std::mem::MaybeUninit;
@@ -131,7 +132,7 @@ where
         self
     }
 
-    pub fn header(&mut self, name: &str, value: &str) -> std::io::Result<&mut Self> {
+    pub fn header_str(&mut self, name: &str, value: &str) -> std::io::Result<&mut Self> {
         if self.rsp_headers_len >= MAX_HEADERS {
             return Err(io::Error::new(
                 io::ErrorKind::ArgumentListTooLong,
@@ -146,19 +147,31 @@ where
         Ok(self)
     }
 
-    pub fn headers(&mut self, header_val: &[(&str, &str)]) -> std::io::Result<&mut Self> {
+    pub fn headers_str(&mut self, header_val: &[(&str, &str)]) -> std::io::Result<&mut Self> {
+        for (name, value) in header_val {
+            self.header_str(name, value)?;
+        }
+        Ok(self)
+    }
+
+    pub fn header(&mut self, name: &HttpHeader, value: &str) -> std::io::Result<&mut Self> {
         if self.rsp_headers_len >= MAX_HEADERS {
             return Err(io::Error::new(
                 io::ErrorKind::ArgumentListTooLong,
                 "too many headers",
             ));
         }
+        self.rsp_buf.extend_from_slice(format!("{name}").as_bytes());
+        self.rsp_buf.extend_from_slice(b": ");
+        self.rsp_buf.extend_from_slice(value.as_bytes());
+        self.rsp_buf.extend_from_slice(b"\r\n");
+        self.rsp_headers_len += 1;
+        Ok(self)
+    }
+
+    pub fn headers(&mut self, header_val: &[(&HttpHeader, &str)]) -> std::io::Result<&mut Self> {
         for (name, value) in header_val {
-            self.rsp_buf.extend_from_slice(name.as_bytes());
-            self.rsp_buf.extend_from_slice(b": ");
-            self.rsp_buf.extend_from_slice(value.as_bytes());
-            self.rsp_buf.extend_from_slice(b"\r\n");
-            self.rsp_headers_len += 1;
+            self.header(name, value)?;
         }
         Ok(self)
     }

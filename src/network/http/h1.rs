@@ -391,8 +391,8 @@ mod tests {
             let body_len_str = body_len.format(body.len());
             session
                 .status_code(Status::Ok)
-                .header("Content-Type", "text/plain")?
-                .header("Content-Length", body_len_str)?
+                .header_str("Content-Type", "text/plain")?
+                .header_str("Content-Length", body_len_str)?
                 .body(&body)
                 .eom();
             Ok(())
