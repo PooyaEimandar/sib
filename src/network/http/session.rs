@@ -74,10 +74,10 @@ where
         }
 
         let mut read = 0;
-        let mut last_yield = 0;
         let deadline = std::time::Instant::now() + timeout;
 
         while read < content_length {
+            // Check timeout
             if std::time::Instant::now() > deadline {
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
@@ -85,31 +85,31 @@ where
                 ));
             }
 
-            let remaining = content_length - read;
-            let buf = &mut self.req_buf.as_mut()[..remaining];
+            let chunk = self.req_buf.chunk_mut();
+            let to_read = chunk.len().min(content_length - read);
+            let buf = unsafe { std::slice::from_raw_parts_mut(chunk.as_mut_ptr(), to_read) };
 
             match self.stream.read(buf) {
                 Ok(0) => {
                     return Err(io::Error::new(
                         io::ErrorKind::UnexpectedEof,
-                        format!(
-                            "connection closed before body fully read (read: {}, expected: {})",
-                            read, content_length
-                        ),
+                        "connection closed before body fully read",
                     ));
                 }
                 Ok(n) => {
-                    unsafe { self.req_buf.advance_mut(n) };
-                    read += n;
-                    if read - last_yield >= 1024 {
-                        may::coroutine::yield_now();
-                        last_yield = read;
+                    unsafe {
+                        self.req_buf.advance_mut(n);
                     }
+                    read += n;
                 }
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                     may::coroutine::yield_now();
                 }
                 Err(e) => return Err(e),
+            }
+
+            if read % 1024 == 0 {
+                may::coroutine::yield_now();
             }
         }
 
