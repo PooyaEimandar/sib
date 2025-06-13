@@ -55,18 +55,18 @@ where
         ))
     }
 
-    pub fn req_body(&mut self, timeout: std::time::Duration) -> io::Result<&str> {
+    pub fn req_body(&mut self, timeout: std::time::Duration) -> io::Result<&[u8]> {
         let content_length = self
             .req
             .headers
             .iter()
             .find(|h| h.name.eq_ignore_ascii_case("Content-Length"))
-            .and_then(|h| str::from_utf8(h.value).ok())
+            .and_then(|h| std::str::from_utf8(h.value).ok())
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(0);
 
         if content_length == 0 {
-            return Ok("");
+            return Ok(&[]);
         }
 
         if self.req_buf.remaining_mut() < content_length {
@@ -74,11 +74,11 @@ where
         }
 
         let mut read = 0;
-        let start = std::time::Instant::now();
+        let deadline = std::time::Instant::now() + timeout;
 
         while read < content_length {
             // Check timeout
-            if start.elapsed() > timeout {
+            if std::time::Instant::now() > deadline {
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     "body read timed out",
@@ -108,14 +108,12 @@ where
                 Err(e) => return Err(e),
             }
 
-            // yield every 1KB read
             if read % 1024 == 0 {
                 may::coroutine::yield_now();
             }
         }
 
-        let body_bytes = &self.req_buf[..content_length];
-        str::from_utf8(body_bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        Ok(&self.req_buf[..content_length])
     }
 
     #[inline]
