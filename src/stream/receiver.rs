@@ -57,7 +57,7 @@ impl Receiver {
         Ok(pipeline)
     }
 
-    pub fn run<F>(&self, callback: F) -> std::io::Result<()>
+    pub fn run<F>(&self, stop_flag: Arc<Mutex<bool>>, callback: F) -> std::io::Result<()>
     where
         F: FnMut(&[u8], usize, usize) + Send + 'static,
     {
@@ -85,8 +85,9 @@ impl Receiver {
                     let height = info.height() as usize;
                     let data = map.as_slice();
 
-                    if let Some(ref mut cb) = *cb.lock().unwrap() {
-                        cb(data, width, height);
+                    let mut cb_guard = cb.lock().map_err(|_| gst::FlowError::Error)?;
+                    if let Some(ref mut cb_fn) = *cb_guard {
+                        cb_fn(data, width, height);
                     }
 
                     Ok(gst::FlowSuccess::Ok)
@@ -98,9 +99,20 @@ impl Receiver {
             .set_state(gst::State::Playing)
             .map_err(|e| std::io::Error::other(format!("Failed to start pipeline: {e}")))?;
 
-        let bus = pipeline.bus().unwrap();
+        let bus = match pipeline.bus() {
+            Some(bus) => bus,
+            None => {
+                return Err(std::io::Error::other(
+                    "failed to get bus from gstreamer pipeline",
+                ));
+            }
+        };
         for msg in bus.iter_timed(gst::ClockTime::NONE) {
             use gst::MessageView;
+            if *stop_flag.lock().unwrap() {
+                println!("Graceful shutdown triggered.");
+                break;
+            }
             match msg.view() {
                 MessageView::Error(err) => {
                     eprintln!(
@@ -140,16 +152,27 @@ mod tests {
             latency_ms: 50,
         };
 
-        let receiver = Receiver::new(config).unwrap();
-        receiver
-            .run(move |data, width, height| {
-                println!(
-                    "Received frame of size: {}x{} with len:{}",
-                    width,
-                    height,
-                    data.len()
-                );
-            })
-            .unwrap();
+        let stop_flag = Arc::new(Mutex::new(false));
+        let stop_flag_thread = Arc::clone(&stop_flag);
+        std::thread::spawn(move || {
+            let receiver = Receiver::new(config).unwrap();
+            receiver
+                .run(stop_flag_thread, move |data, width, height| {
+                    println!(
+                        "Received frame of size: {}x{} with len:{}",
+                        width,
+                        height,
+                        data.len()
+                    );
+                })
+                .unwrap();
+        });
+
+        std::thread::sleep(std::time::Duration::from_secs(10));
+        {
+            let mut flag = stop_flag.lock().unwrap();
+            *flag = true; // Trigger graceful shutdown
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
     }
 }
