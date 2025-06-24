@@ -115,6 +115,5 @@ rustflags = [
     "-Drenamed_and_removed_lints",
     "-Drust_2021_incompatible_or_patterns",
     "-Dwarnings",
-    "-C",
-    "link-args=-Wl,-rpath,/usr/local/lib",
+    "-Clink-args=-Wl,-rpath,/usr/local/lib,-rpath,/Library/Frameworks/GStreamer.framework/Versions/1.0/lib",
 ]
