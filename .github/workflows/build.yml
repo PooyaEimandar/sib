@@ -26,6 +26,14 @@ jobs:
           sudo apt-get install -y cmake ninja-build nasm \
             gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libc6-dev-arm64-cross
 
+      - name: Install GStreamer
+        run: |
+          sudo apt-get install -y libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
+            gstreamer1.0-libav libgstrtspserver-1.0-dev libges-1.0-dev \
+            libgstreamer-plugins-bad1.0-dev
+
       - name: Run FoundationDB setup
         run: bash ./bash/foundationDB.sh
 
@@ -63,6 +71,14 @@ jobs:
         run: |
           choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' -y
           choco install ninja nasm -y
+
+      - name: Install GStreamer
+        run: |
+          Invoke-WebRequest -Uri https://gstreamer.freedesktop.org/data/pkg/windows/1.26.2/gstreamer-1.0-msvc-x86_64-1.26.2.msi -OutFile gstreamer.msi
+          Invoke-WebRequest -Uri https://gstreamer.freedesktop.org/data/pkg/windows/1.26.2/gstreamer-1.0-devel-msvc-x86_64-1.26.2.msi -OutFile gstreamer-devel.msi
+          Start-Process msiexec.exe -Wait -ArgumentList '/i gstreamer.msi /quiet /norestart'
+          Start-Process msiexec.exe -Wait -ArgumentList '/i gstreamer-devel.msi /quiet /norestart'
+          echo "C:\\gstreamer\\1.0\\msvc_x86_64\\bin" | Out-File -Append $env:GITHUB_PATH
 
       - name: Setup Rust
         run: |
@@ -113,6 +129,14 @@ jobs:
 
       - name: Install tools
         run: brew install cmake ninja
+
+      - name: Install GStreamer
+        run: |
+          curl -O https://gstreamer.freedesktop.org/data/pkg/osx/1.26.2/gstreamer-1.0-1.26.2-universal.pkg
+          curl -O https://gstreamer.freedesktop.org/data/pkg/osx/1.26.2/gstreamer-1.0-devel-1.26.2-universal.pkg
+          sudo installer -pkg gstreamer-1.0-1.26.2-universal.pkg -target /
+          sudo installer -pkg gstreamer-1.0-devel-1.26.2-universal.pkg -target /
+          echo "PATH=/Library/Frameworks/GStreamer.framework/Versions/1.0/bin:$PATH" >> $GITHUB_ENV
 
       - name: Run FoundationDB setup
         run: bash ./bash/foundationDB.sh
