@@ -40,9 +40,9 @@ it is designed for **real-time networking**, **low-latency streaming**, and **sc
 
 ## 📚 Documentation
 
-📦 [Crate](https://crates.io/crates/sib)
-📖 [Docs](https://docs.rs/sib)
-🧪 [Benchmarks: TechEmpower](https://github.com/TechEmpower/FrameworkBenchmarks)
+- 📦 [Crate](https://crates.io/crates/sib)
+- 📖 [Docs](https://docs.rs/sib)
+- 🧪 [Benchmarks: TechEmpower](https://github.com/TechEmpower/FrameworkBenchmarks)
 
 ## 📄 License
 
