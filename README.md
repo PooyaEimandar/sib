@@ -3,6 +3,8 @@
 **SIB** is a high-performance, secure, and cross-platform modules optimized for efficiency, scalability, and reliability.
 it is designed for **real-time networking**, **low-latency streaming**, and **scalable HTTP services**.
 
+> 🏷️ _"Sib" means **apple** in Persian (سیب)._
+
 ## ✨ Features
 
 | Feature          | Description                                                |
