@@ -1,10 +1,12 @@
-[x] HTTP1.1
-[x] TLS based on boringSSL
-[x] Http3 server based on Quiche (https://github.com/stunnel/static-curl)
-[x] FDB connection pool based on may
-[x] Ratelimit
-[x] gstreamer
-[] Clickhouse
-[] Log
-[] Websocket server
-[] HTTP client pool
+- [x] HTTP1.1
+- [x] TLS based on boringSSL
+- [x] Http3 server based on Quiche (https://github.com/stunnel/static-curl)
+- [x] FDB connection pool based on may
+- [x] Ratelimit
+- [x] gstreamer
+- [] file server
+- [] Kafka client
+- [] Static file server
+- [] Websocket server
+- [] Log with clickhouse
+- [] HTTP client pool
