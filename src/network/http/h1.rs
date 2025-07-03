@@ -195,6 +195,7 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
                     ));
 
                     if enforce_rate_limit!(stream, rate_limiter).is_some() {
+                        eprintln!("429 Too Many Requests from IP: {client_ip}");
                         continue;
                     }
 
