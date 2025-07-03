@@ -157,9 +157,9 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
             .set_certificate(&cert)
             .map_err(|e| std::io::Error::other(format!("Set cert error: {e}")))?;
 
-        // Enforce TLS 1.2+
-        tls_builder.set_min_proto_version(Some(boring::ssl::SslVersion::TLS1_2))?;
-        tls_builder.set_max_proto_version(Some(boring::ssl::SslVersion::TLS1_3))?;
+        // // Enforce TLS 1.2+
+        // tls_builder.set_min_proto_version(Some(boring::ssl::SslVersion::TLS1_2))?;
+        // tls_builder.set_max_proto_version(Some(boring::ssl::SslVersion::TLS1_3))?;
 
         // // Optional: Reject connections without SNI
         // tls_builder.set_servername_callback(|ssl_ref, _| {
