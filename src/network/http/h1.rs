@@ -6,7 +6,7 @@ use may::net::{TcpListener, TcpStream};
 use may::{coroutine, go};
 use std::io::{self, Read};
 use std::mem::MaybeUninit;
-use std::net::ToSocketAddrs;
+use std::net::{Shutdown, ToSocketAddrs};
 
 #[cfg(unix)]
 use may::io::WaitIo;
@@ -24,43 +24,6 @@ macro_rules! mc {
             }
         }
     };
-}
-
-#[macro_export]
-macro_rules! enforce_rate_limit {
-    ($stream:expr, $rate_limiter:expr) => {{
-        if let Some(rl) = &$rate_limiter {
-            if let Ok(ip) = $stream.peer_addr().map(|addr| addr.ip().to_string()) {
-                let result = rl.check(ip.into());
-                if !result.allowed {
-                    use std::io::Write;
-                    let _ = write!(
-                        $stream,
-                        r#"HTTP/1.1 429 Too Many Requests\r\n\
-Content-Length: 0\r\n\
-Connection: close\r\n\
-Retry-After: {}\r\n\
-X-RateLimit-Limit: {}\r\n\
-X-RateLimit-Remaining: {}\r\n\
-X-RateLimit-Reset: {}\r\n\r\n"#,
-                        result.retry_after_secs.unwrap_or(60),
-                        result.limit,
-                        result.remaining,
-                        result.reset_after_secs.unwrap_or(60),
-                    );
-                    let _ = $stream.flush();
-                    let _ = $stream.shutdown(std::net::Shutdown::Both);
-                    Some(())
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    }};
 }
 
 pub trait H1Service {
@@ -100,8 +63,20 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
                 for stream in listener.incoming() {
                     let mut stream = mc!(stream);
 
-                    if enforce_rate_limit!(stream, rate_limiter).is_some() {
-                        continue;
+                    // get the client IP address
+                    let client_ip = stream.peer_addr().unwrap_or(
+                        std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0)
+                    );
+                    // Check if the client IP is rate limited
+                    if let Some(rl) = &rate_limiter {
+                        if !client_ip.ip().is_unspecified() {
+                            let result = rl.check(client_ip.ip().to_string().into());
+                            if !result.allowed {
+                                eprintln!("Dropped client {client_ip} (rate limited)");
+                                let _ = stream.shutdown(Shutdown::Both);
+                                continue;
+                            }
+                        }
                     }
 
                     #[cfg(unix)]
@@ -188,15 +163,22 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
                 #[cfg(windows)]
                 use std::os::windows::io::AsRawSocket;
                 for stream in listener.incoming() {
-                    let mut stream = mc!(stream);
-                    let client_ip = stream.peer_addr().unwrap_or(std::net::SocketAddr::new(
-                        std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
-                        0,
-                    ));
+                    let stream = mc!(stream);
 
-                    if enforce_rate_limit!(stream, rate_limiter).is_some() {
-                        eprintln!("429 Too Many Requests from IP: {client_ip}");
-                        continue;
+                    // get the client IP address
+                    let client_ip = stream.peer_addr().unwrap_or(
+                        std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0)
+                    );
+                    // Check if the client IP is rate limited
+                    if let Some(rl) = &rate_limiter {
+                        if !client_ip.ip().is_unspecified() {
+                            let result = rl.check(client_ip.ip().to_string().into());
+                            if !result.allowed {
+                                eprintln!("Dropped TLS client {client_ip} (rate limited)");
+                                let _ = stream.shutdown(Shutdown::Both);
+                                continue;
+                            }
+                        }
                     }
 
                     #[cfg(unix)]
