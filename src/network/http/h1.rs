@@ -207,11 +207,11 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
                     let service = self.service(id);
                     let builder = may::coroutine::Builder::new().id(id);
 
-                    // Clone the stream BEFORE moving it into accept()
-                    let stream_clonned = match stream.try_clone() {
-                        Ok(s) => Some(s),
-                        Err(_) => None,
-                    };
+                    // // Clone the stream BEFORE moving it into accept()
+                    // let stream_clonned = match stream.try_clone() {
+                    //     Ok(s) => Some(s),
+                    //     Err(_) => None,
+                    // };
 
                     match tls_acceptor.accept(stream) {
                         Ok(mut tls_stream) => {
@@ -225,9 +225,9 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
                         }
                         Err(e) => {
                             eprintln!("TLS handshake failed: {e} for {client_ip}");
-                            if let Some(s) = stream_clonned {
-                                let _ = s.shutdown(Shutdown::Both);
-                            }
+                            // if let Some(s) = stream_clonned {
+                            //     let _ = s.shutdown(Shutdown::Both);
+                            // }
                         }
                     };
                 }
