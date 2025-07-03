@@ -34,6 +34,8 @@ heapless = { version = "0.8.0", optional = true, default-features = false }
 httparse = { version = "1.10.1", optional = true, default-features = false }
 httpdate = { version = "1.0.3", optional = true, default-features = false }
 may = { version = "0.3.51", optional = true }
+mime = { version = "0.3.17", optional = true }
+mime_guess = { version = "2.0.5", optional = true }
 once_cell = { version = "1.21.3", optional = true, default-features = false, features = [
     "std",
 ] }
@@ -58,9 +60,20 @@ net-h1-server = [
     "httpdate",
     "httparse",
     "may",
+    "mime",
+    "mime_guess",
     "once_cell",
 ]
-net-h3-server = ["bytes", "dashmap", "heapless", "may", "quiche", "ring"]
+net-h3-server = [
+    "bytes",
+    "dashmap",
+    "heapless",
+    "may",
+    "mime",
+    "mime_guess",
+    "quiche",
+    "ring",
+]
 stm-sender = ["crossbeam", "glib", "gstreamer", "gstreamer-video"]
 stm-receiver = ["glib", "gstreamer", "gstreamer-app", "gstreamer-video"]
 sys-boring-ssl = ["boring"]
@@ -68,11 +81,11 @@ sys-boring-ssl = ["boring"]
 [dev-dependencies]
 itoa = { version = "1.0.15", default-features = false }
 num_cpus = { version = "1.16" }
-rcgen = { version = "0.13.2" }
-reqwest = { version = "0.12.20", default-features = false, features = [
+rcgen = { version = "0.14.0" }
+reqwest = { version = "0.12.22", default-features = false, features = [
     "http3",
 ] }
-tokio = { version = "1.45.1", default-features = false, features = [
+tokio = { version = "1.46.0", default-features = false, features = [
     "macros",
     "rt",
 ] }

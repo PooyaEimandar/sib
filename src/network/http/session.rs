@@ -42,7 +42,11 @@ where
         self.req.headers
     }
 
-    pub fn req_header(&self, header: &str) -> std::io::Result<&str> {
+    pub fn req_header(&self, header: &HttpHeader) -> std::io::Result<&str> {
+        return self.req_header_str(&header.to_string());
+    }
+
+    pub fn req_header_str(&self, header: &str) -> std::io::Result<&str> {
         for h in self.req.headers.iter() {
             if h.name.eq_ignore_ascii_case(header) {
                 return std::str::from_utf8(h.value)

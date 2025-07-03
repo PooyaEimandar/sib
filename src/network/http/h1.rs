@@ -136,6 +136,8 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
         rate_limiter: Option<RateLimiterKind>,
     ) -> io::Result<coroutine::JoinHandle<()>> {
         // Parse the certificate from memory
+
+        use std::net::Shutdown;
         let cert = boring::x509::X509::from_pem(cert_pem).map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("Cert error: {e}"))
         })?;
@@ -154,6 +156,19 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
         tls_builder
             .set_certificate(&cert)
             .map_err(|e| std::io::Error::other(format!("Set cert error: {e}")))?;
+
+        // Enforce TLS 1.2+
+        tls_builder.set_min_proto_version(Some(boring::ssl::SslVersion::TLS1_2))?;
+        tls_builder.set_max_proto_version(Some(boring::ssl::SslVersion::TLS1_3))?;
+
+        // Optional: Reject connections without SNI
+        tls_builder.set_servername_callback(|ssl_ref, _| {
+            if ssl_ref.servername(boring::ssl::NameType::HOST_NAME).is_none() {
+                return Err(boring::ssl::SniError::ALERT_FATAL);
+            }
+            Ok(())
+        });
+
 
         let stacksize = if stack_size > 0 {
             stack_size
@@ -174,6 +189,10 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
                 use std::os::windows::io::AsRawSocket;
                 for stream in listener.incoming() {
                     let mut stream = mc!(stream);
+                    let client_ip = stream.peer_addr().unwrap_or(std::net::SocketAddr::new(
+                        std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                        0,
+                    ));
 
                     if enforce_rate_limit!(stream, rate_limiter).is_some() {
                         continue;
@@ -187,18 +206,28 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
                     mc!(stream.set_nodelay(true));
                     let service = self.service(id);
                     let builder = may::coroutine::Builder::new().id(id);
+
+                    // Clone the stream BEFORE moving it into accept()
+                    let stream_clonned = match stream.try_clone() {
+                        Ok(s) => Some(s),
+                        Err(_) => None,
+                    };
+
                     match tls_acceptor.accept(stream) {
                         Ok(mut tls_stream) => {
-                            go!(builder, move || if let Err(_e) =
-                                serve_tls(&mut tls_stream, service)
-                            {
-                                //s_error!("service err = {e:?}");
-                                tls_stream.get_mut().shutdown(std::net::Shutdown::Both).ok();
+
+                            go!(builder, move || {
+                                if let Err(_e) = serve_tls(&mut tls_stream, service) {
+                                    tls_stream.get_mut().shutdown(Shutdown::Both).ok();
+                                }
                             })
                             .unwrap();
                         }
                         Err(e) => {
-                            eprintln!("TLS handshake failed: {:?}", e);
+                            eprintln!("TLS handshake failed: {e} for {client_ip}");
+                            if let Some(s) = stream_clonned {
+                                let _ = s.shutdown(Shutdown::Both);
+                            }
                         }
                     };
                 }
@@ -389,6 +418,7 @@ mod tests {
             ));
             let mut body_len = itoa::Buffer::new();
             let body_len_str = body_len.format(body.len());
+
             session
                 .status_code(Status::Ok)
                 .header_str("Content-Type", "text/plain")?

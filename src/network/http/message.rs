@@ -180,6 +180,13 @@ impl Status {
     }
 }
 
+impl std::fmt::Display for Status {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (code, msg) = self.as_parts();
+        write!(f, "code:{code} msg:{msg}")
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HttpHeader {
     Accept,

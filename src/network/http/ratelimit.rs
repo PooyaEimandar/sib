@@ -1,9 +1,7 @@
 use dashmap::DashMap;
-use heapless::Deque;
+use std::collections::VecDeque;
 use std::borrow::Cow;
 use std::time::{Duration, Instant}; // Use heapless for fixed-capacity Deque
-
-const MAX_QUEUE_LEN: usize = 2048; // Prevent abuse during DDoS
 
 pub struct RateLimitResult {
     pub allowed: bool,
@@ -77,14 +75,16 @@ impl RateLimiter for FixedWindowLimiter {
 pub struct SlidingWindowLimiter {
     window: Duration,
     limit: usize,
-    state: DashMap<Cow<'static, str>, Deque<Instant, MAX_QUEUE_LEN>>, // bounded queue
+    max_queue_len: usize,
+    state: DashMap<Cow<'static, str>, VecDeque<Instant>>, 
 }
 
 impl SlidingWindowLimiter {
-    pub fn new(window: Duration, limit: usize) -> Self {
+    pub fn new(window: Duration, limit: usize, max_queue_len: usize) -> Self {
         Self {
             window,
             limit,
+            max_queue_len,
             state: DashMap::new(),
         }
     }
@@ -94,8 +94,10 @@ impl RateLimiter for SlidingWindowLimiter {
     fn check(&self, key: Cow<str>) -> RateLimitResult {
         let now = Instant::now();
         let key: Cow<'static, str> = Cow::Owned(key.into_owned());
+
         let mut queue = self.state.entry(key.clone()).or_default();
 
+        // Evict expired entries
         while let Some(&front) = queue.front() {
             if now.duration_since(front) > self.window {
                 queue.pop_front();
@@ -109,8 +111,8 @@ impl RateLimiter for SlidingWindowLimiter {
         }
 
         if queue.len() < self.limit {
-            if queue.len() < MAX_QUEUE_LEN {
-                queue.push_back(now).ok(); // discard if full
+            if queue.len() < self.max_queue_len {
+                queue.push_back(now); // will grow up to max_queue_len
             }
             RateLimitResult {
                 allowed: true,
