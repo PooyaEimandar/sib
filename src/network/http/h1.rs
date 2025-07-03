@@ -161,13 +161,13 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
         tls_builder.set_min_proto_version(Some(boring::ssl::SslVersion::TLS1_2))?;
         tls_builder.set_max_proto_version(Some(boring::ssl::SslVersion::TLS1_3))?;
 
-        // Optional: Reject connections without SNI
-        tls_builder.set_servername_callback(|ssl_ref, _| {
-            if ssl_ref.servername(boring::ssl::NameType::HOST_NAME).is_none() {
-                return Err(boring::ssl::SniError::ALERT_FATAL);
-            }
-            Ok(())
-        });
+        // // Optional: Reject connections without SNI
+        // tls_builder.set_servername_callback(|ssl_ref, _| {
+        //     if ssl_ref.servername(boring::ssl::NameType::HOST_NAME).is_none() {
+        //         return Err(boring::ssl::SniError::ALERT_FATAL);
+        //     }
+        //     Ok(())
+        // });
 
 
         let stacksize = if stack_size > 0 {
