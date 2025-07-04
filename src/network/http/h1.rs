@@ -6,6 +6,8 @@ use may::net::{TcpListener, TcpStream};
 use may::{coroutine, go};
 use std::io::{self, Read};
 use std::mem::MaybeUninit;
+#[cfg(unix)]
+use std::net::SocketAddr;
 use std::net::{Shutdown, ToSocketAddrs};
 
 #[cfg(unix)]
@@ -64,15 +66,15 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
                     let mut stream = mc!(stream);
 
                     // get the client IP address
-                    let client_ip = stream.peer_addr().unwrap_or(
+                    let peer_addr = stream.peer_addr().unwrap_or(
                         std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0)
                     );
                     // Check if the client IP is rate limited
                     if let Some(rl) = &rate_limiter {
-                        if !client_ip.ip().is_unspecified() {
-                            let result = rl.check(client_ip.ip().to_string().into());
+                        if !peer_addr.ip().is_unspecified() {
+                            let result = rl.check(peer_addr.ip().to_string().into());
                             if !result.allowed {
-                                eprintln!("Dropped client {client_ip} (rate limited)");
+                                eprintln!("Dropped client {peer_addr} (rate limited)");
                                 let _ = stream.shutdown(Shutdown::Both);
                                 continue;
                             }
@@ -88,7 +90,7 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
                     let builder = may::coroutine::Builder::new().id(id);
                     go!(
                         builder,
-                        move || if let Err(_e) = serve(&mut stream, service) {
+                        move || if let Err(_e) = serve(&mut stream, peer_addr, service) {
                             //s_error!("service err = {e:?}");
                             stream.shutdown(std::net::Shutdown::Both).ok();
                         }
@@ -166,15 +168,15 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
                     let stream = mc!(stream);
 
                     // get the client IP address
-                    let client_ip = stream.peer_addr().unwrap_or(
-                        std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0)
+                    let peer_addr = stream.peer_addr().unwrap_or(
+                        SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0)
                     );
                     // Check if the client IP is rate limited
                     if let Some(rl) = &rate_limiter {
-                        if !client_ip.ip().is_unspecified() {
-                            let result = rl.check(client_ip.ip().to_string().into());
+                        if !peer_addr.ip().is_unspecified() {
+                            let result = rl.check(peer_addr.ip().to_string().into());
                             if !result.allowed {
-                                eprintln!("Dropped TLS client {client_ip} (rate limited)");
+                                eprintln!("Dropped TLS client {peer_addr} (rate limited)");
                                 let _ = stream.shutdown(Shutdown::Both);
                                 continue;
                             }
@@ -190,24 +192,21 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
                     let service = self.service(id);
                     let builder = may::coroutine::Builder::new().id(id);
 
-                    // Clone the stream BEFORE moving it into accept()
-                    let stream_clonned = match stream.try_clone() {
-                        Ok(s) => Some(s),
-                        Err(_) => None,
-                    };
+                    // Clone the stream before moving it into accept()
+                    let stream_clonned = stream.try_clone().ok();
 
                     match tls_acceptor.accept(stream) {
                         Ok(mut tls_stream) => {
 
                             go!(builder, move || {
-                                if let Err(_e) = serve_tls(&mut tls_stream, service) {
+                                if let Err(_e) = serve_tls(&mut tls_stream, peer_addr, service) {
                                     tls_stream.get_mut().shutdown(Shutdown::Both).ok();
                                 }
                             })
                             .unwrap();
                         }
                         Err(e) => {
-                            eprintln!("TLS handshake failed: {e} for {client_ip}");
+                            eprintln!("{e} for {peer_addr}");
                             if let Some(s) = stream_clonned {
                                 let _ = s.shutdown(Shutdown::Both);
                             }
@@ -276,6 +275,7 @@ fn write(stream: &mut impl std::io::Write, rsp_buf: &mut BytesMut) -> io::Result
 #[cfg(unix)]
 fn read_write<S, T>(
     stream: &mut S,
+    peer_addr: &SocketAddr,
     req_buf: &mut BytesMut,
     rsp_buf: &mut BytesMut,
     service: &mut T,
@@ -289,7 +289,7 @@ where
     loop {
         // create a new session
         let mut headers = [MaybeUninit::uninit(); session::MAX_HEADERS];
-        let mut sess = match session::new_session(stream, &mut headers, req_buf, rsp_buf)? {
+        let mut sess = match session::new_session(stream, peer_addr, &mut headers, req_buf, rsp_buf)? {
             Some(sess) => sess,
             None => break,
         };
@@ -306,12 +306,12 @@ where
 }
 
 #[cfg(unix)]
-fn serve<T: H1Service>(stream: &mut TcpStream, mut service: T) -> io::Result<()> {
+fn serve<T: H1Service>(stream: &mut TcpStream, peer_addr: SocketAddr,mut service: T) -> io::Result<()> {
     let mut req_buf = BytesMut::with_capacity(BUF_LEN);
     let mut rsp_buf = BytesMut::with_capacity(BUF_LEN);
 
     loop {
-        if read_write(stream, &mut req_buf, &mut rsp_buf, &mut service)? {
+        if read_write(stream, &peer_addr, &mut req_buf, &mut rsp_buf, &mut service)? {
             stream.wait_io();
         }
     }
@@ -320,13 +320,14 @@ fn serve<T: H1Service>(stream: &mut TcpStream, mut service: T) -> io::Result<()>
 #[cfg(all(unix, feature = "sys-boring-ssl"))]
 fn serve_tls<T: H1Service>(
     stream: &mut boring::ssl::SslStream<may::net::TcpStream>,
+    peer_addr: SocketAddr,
     mut service: T,
 ) -> io::Result<()> {
     let mut req_buf = BytesMut::with_capacity(BUF_LEN);
     let mut rsp_buf = BytesMut::with_capacity(BUF_LEN);
 
     loop {
-        if read_write(stream, &mut req_buf, &mut rsp_buf, &mut service)? {
+        if read_write(stream, &peer_addr, &mut req_buf, &mut rsp_buf, &mut service)? {
             stream.get_mut().wait_io();
         }
     }

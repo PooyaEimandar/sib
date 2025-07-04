@@ -81,7 +81,7 @@ sys-boring-ssl = ["boring"]
 [dev-dependencies]
 itoa = { version = "1.0.15", default-features = false }
 num_cpus = { version = "1.16" }
-rcgen = { version = "0.14.0" }
+rcgen = { version = "0.14.1" }
 reqwest = { version = "0.12.22", default-features = false, features = [
     "http3",
 ] }

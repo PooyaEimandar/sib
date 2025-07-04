@@ -110,12 +110,12 @@ impl RateLimiter for SlidingWindowLimiter {
         if CLEANUP_COUNTER.fetch_add(1, Ordering::Relaxed) % 100 == 0 {
             let window = self.window;
             self.state.retain(|_, queue| {
-                queue.back().map_or(false, |&t| now.duration_since(t) <= window)
+                queue.back().is_some_and(|&t| now.duration_since(t) <= window)
             });
         }
 
         // Access or insert queue
-        let mut entry = self.state.entry(key.clone()).or_insert(VecDeque::new());
+        let mut entry = self.state.entry(key.clone()).or_default();
         let queue = entry.value_mut();
 
         // Prune expired timestamps

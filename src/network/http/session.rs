@@ -11,6 +11,7 @@ where
     S: Read + Write,
     'buf: 'stream,
 {
+    peer_addr: &'stream std::net::SocketAddr,
     // request headers
     req: httparse::Request<'header, 'buf>,
     // request buffer
@@ -26,6 +27,10 @@ impl<'buf, 'header, 'stream, S> Session<'buf, 'header, 'stream, S>
 where
     S: Read + Write,
 {
+    pub fn peer_addr(&self) -> &std::net::SocketAddr {
+        self.peer_addr
+    }
+
     pub fn req_method(&self) -> Option<&str> {
         self.req.method
     }
@@ -43,7 +48,7 @@ where
     }
 
     pub fn req_header(&self, header: &HttpHeader) -> std::io::Result<&str> {
-        return self.req_header_str(&header.to_string());
+        self.req_header_str(&header.to_string())
     }
 
     pub fn req_header_str(&self, header: &str) -> std::io::Result<&str> {
@@ -201,6 +206,7 @@ where
 
 pub fn new_session<'header, 'buf, 'stream, S>(
     stream: &'stream mut S,
+    peer_addr: &'stream std::net::SocketAddr,
     headers: &'header mut [MaybeUninit<httparse::Header<'buf>>; MAX_HEADERS],
     req_buf: &'buf mut BytesMut,
     rsp_buf: &'buf mut BytesMut,
@@ -228,6 +234,7 @@ where
     reserve_buf(rsp_buf);
 
     Ok(Some(Session {
+        peer_addr,
         req,
         req_buf,
         rsp_headers_len: 0,
