@@ -2,10 +2,14 @@ use crate::network::http::ratelimit::{RateLimiter, RateLimiterKind};
 
 use super::session::{self, Session};
 use bytes::{BufMut, BytesMut};
+use dashmap::DashMap;
 use may::net::{TcpListener, TcpStream};
 use may::{coroutine, go};
-use std::io::{self, Read};
+use std::time::Instant;
+use std::{io::{self, Read}, time::Duration};
 use std::mem::MaybeUninit;
+use std::net::IpAddr;
+
 #[cfg(unix)]
 use std::net::SocketAddr;
 use std::net::{Shutdown, ToSocketAddrs};
@@ -17,6 +21,13 @@ const MIN_BUF_LEN: usize = 1024;
 const MAX_BODY_LEN: usize = 4096;
 pub const BUF_LEN: usize = MAX_BODY_LEN * 8;
 
+static STRIKE_CACHE: once_cell::sync::Lazy<DashMap<IpAddr, (u8, Instant)>> =
+    once_cell::sync::Lazy::new(DashMap::new);
+
+static BAN_CACHE: once_cell::sync::Lazy<DashMap<IpAddr, Instant>> =
+    once_cell::sync::Lazy::new(DashMap::new);
+
+    
 macro_rules! mc {
     ($e: expr) => {
         match $e {
@@ -26,6 +37,22 @@ macro_rules! mc {
             }
         }
     };
+}
+
+pub struct BanConfig {
+    pub max_strikes: u8,
+    pub strike_window: Duration,
+    pub ban_duration: Duration,
+}
+
+impl Default for BanConfig {
+    fn default() -> Self {
+        Self {
+            max_strikes: 5, // Maximum strikes before banning 
+            strike_window: Duration::from_secs(30), // 30 seconds
+            ban_duration: Duration::from_secs(120), // 120 seconds
+        }
+    }
 }
 
 pub trait H1Service {
@@ -107,19 +134,19 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
         self,
         addr: L,
         number_of_workers: usize,
-        cert_pem: &[u8],
-        key_pem: &[u8],
+        cert_key_pems: (&[u8], &[u8]),
         stack_size: usize,
         rate_limiter: Option<RateLimiterKind>,
+        ban_config: Option<BanConfig>,
     ) -> io::Result<coroutine::JoinHandle<()>> {
         // Parse the certificate from memory
 
         use std::net::Shutdown;
-        let cert = boring::x509::X509::from_pem(cert_pem).map_err(|e| {
+        let cert = boring::x509::X509::from_pem(cert_key_pems.0).map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("Cert error: {e}"))
         })?;
         // Parse the private key from memory
-        let pkey = boring::pkey::PKey::private_key_from_pem(key_pem).map_err(|e| {
+        let pkey = boring::pkey::PKey::private_key_from_pem(cert_key_pems.1).map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("Key error: {e}"))
         })?;
         // create the tls acceptor
@@ -141,6 +168,7 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
         // Optional: Reject connections without SNI
         tls_builder.set_servername_callback(|ssl_ref, _| {
             if ssl_ref.servername(boring::ssl::NameType::HOST_NAME).is_none() {
+                eprintln!("SNI not provided, rejecting connection");
                 return Err(boring::ssl::SniError::ALERT_FATAL);
             }
             Ok(())
@@ -165,21 +193,51 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
                 #[cfg(windows)]
                 use std::os::windows::io::AsRawSocket;
                 for stream in listener.incoming() {
+
                     let stream = mc!(stream);
 
                     // get the client IP address
                     let peer_addr = stream.peer_addr().unwrap_or(
                         SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0)
                     );
+                    let ip = peer_addr.ip();
+
+                    if ban_config.is_some() {
+                        // Check ban cache
+                        if let Some(&banned_until) = BAN_CACHE.get(&ip).as_deref() {
+                            if banned_until > Instant::now() {
+                                eprintln!("Temporarily banned IP: {peer_addr}");
+                                let _ = stream.shutdown(Shutdown::Both);
+                                continue;
+                            } else {
+                                BAN_CACHE.remove(&ip);
+                            }
+                        }
+                    }
+
                     // Check if the client IP is rate limited
                     if let Some(rl) = &rate_limiter {
                         if !peer_addr.ip().is_unspecified() {
                             let result = rl.check(peer_addr.ip().to_string().into());
                             if !result.allowed {
-                                eprintln!("Dropped TLS client {peer_addr} (rate limited)");
                                 let _ = stream.shutdown(Shutdown::Both);
+                                if let Some(config) =  &ban_config {
+                                    record_strike(ip, "rate limited", config);
+                                }
                                 continue;
                             }
+                        }
+                    }
+
+                    // Min cost check if stream has the correct TLS bytes
+                    let mut peek_buf = [0u8; 11];
+                    if let Ok(n) = stream.peek(&mut peek_buf) {
+                        if n != peek_buf.len() || !is_probably_tls(&peek_buf) {
+                            let _ = stream.shutdown(Shutdown::Both);
+                            if let Some(config) =  &ban_config {
+                                record_strike(ip, "invalid TLS preamble", config);
+                            }
+                            continue;
                         }
                     }
 
@@ -193,7 +251,7 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
                     let builder = may::coroutine::Builder::new().id(id);
 
                     // Clone the stream before moving it into accept()
-                    let stream_clonned = stream.try_clone().ok();
+                    let stream_cloned = stream.try_clone().ok();
 
                     match tls_acceptor.accept(stream) {
                         Ok(mut tls_stream) => {
@@ -207,7 +265,7 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
                         }
                         Err(e) => {
                             eprintln!("{e} for {peer_addr}");
-                            if let Some(s) = stream_clonned {
+                            if let Some(s) = stream_cloned {
                                 let _ = s.shutdown(Shutdown::Both);
                             }
                         }
@@ -216,6 +274,35 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
             }
         )
     }
+}
+
+#[inline]
+fn record_strike(ip: IpAddr, reason: &'static str, config: &BanConfig) {
+    let now = Instant::now();
+    let mut entry = STRIKE_CACHE.entry(ip).or_insert((0, now));
+    if now.duration_since(entry.1) > config.strike_window {
+        *entry = (1, now);
+    } else {
+        entry.0 += 1;
+        if entry.0 >= config.max_strikes {
+            eprintln!("Banning IP {ip} due to repeated {reason} (within {:?})", config.strike_window);
+            BAN_CACHE.insert(ip, now + config.ban_duration);
+            STRIKE_CACHE.remove(&ip);
+        }
+    }
+}
+
+#[inline]
+fn is_probably_tls(buf: &[u8]) -> bool {
+    if buf.len() < 6 {
+        return false;
+    }
+
+    let is_handshake = buf[0] == 0x16; // Handshake content type
+    let is_tls_version = matches!( (buf[1], buf[2]), (0x03, 0x01..=0x04)); // TLS 1.0–1.3
+    let is_client_hello = buf[5] == 0x01; // handshake type, ClientHello
+
+    is_handshake && is_tls_version && is_client_hello
 }
 
 #[inline]
@@ -397,8 +484,7 @@ mod tests {
             let req_path = session.req_path().unwrap_or_default().to_owned();
             let req_body = session.req_body(std::time::Duration::from_secs(1))?;
             let body = bytes::Bytes::from(format!(
-                "Echo: {:?} {:?}\r\nBody: {:?}",
-                req_method, req_path, req_body
+                "Echo: {req_method:?} {req_path:?}\r\nBody: {req_body:?}"
             ));
             let mut body_len = itoa::Buffer::new();
             let body_len_str = body_len.format(body.len());
@@ -477,7 +563,7 @@ mod tests {
             let response = std::str::from_utf8(&buf[..n]).unwrap();
 
             assert!(response.contains("/test"));
-            print!("Response: {}", response);
+            print!("Response: {response}");
         });
 
         may::join!(server_handle, client_handler);
@@ -491,7 +577,7 @@ mod tests {
         let (cert_pem, key_pem) = create_self_signed_tls_pems();
         let addr = "127.0.0.1:8080";
         let server_handle = H1Server(EchoService)
-            .start_tls(addr, 1, cert_pem.as_bytes(), key_pem.as_bytes(), 0, None)
+            .start_tls(addr, 1, (cert_pem.as_bytes(), key_pem.as_bytes()), 0, None, None)
             .expect("h1 TLS start server");
 
         let client_handler = may::go!(move || {
