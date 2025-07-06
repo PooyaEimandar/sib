@@ -60,7 +60,7 @@ where
         }
         Err(io::Error::new(
             io::ErrorKind::NotFound,
-            format!("{} header not found", header),
+            format!("{header} header not found"),
         ))
     }
 

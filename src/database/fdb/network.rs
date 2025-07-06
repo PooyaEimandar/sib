@@ -65,8 +65,7 @@ impl FDBNetwork {
         let res = unsafe { foundationdb_sys::fdb_select_api_version_impl(730, 730) };
         if res != 0 {
             return Err(std::io::Error::other(format!(
-                "Failed to select FoundationDB API version: {}",
-                res
+                "Failed to select FoundationDB API version: {res}"
             )));
         }
         if let Some(opt) = option {
@@ -79,16 +78,14 @@ impl FDBNetwork {
             };
             if res != 0 {
                 return Err(std::io::Error::other(format!(
-                    "Failed to setup FoundationDB network option: {}",
-                    res
+                    "Failed to setup FoundationDB network option: {res}"
                 )));
             }
         }
         let res = unsafe { foundationdb_sys::fdb_setup_network() };
         if res != 0 {
             return Err(std::io::Error::other(format!(
-                "Failed to setup FoundationDB network: {}",
-                res
+                "Failed to setup FoundationDB network: {res}"
             )));
         }
         Ok(Self { init: true })
@@ -98,8 +95,7 @@ impl FDBNetwork {
         let res = unsafe { foundationdb_sys::fdb_run_network() };
         if res != 0 {
             return Err(std::io::Error::other(format!(
-                "Failed to start FoundationDB network: {}",
-                res
+                "Failed to start FoundationDB network: {res}"
             )));
         }
         Ok(())
@@ -113,8 +109,7 @@ impl FDBNetwork {
         let res = unsafe { foundationdb_sys::fdb_stop_network() };
         if res != 0 {
             return Err(std::io::Error::other(format!(
-                "Failed to stop FoundationDB network: {}",
-                res
+                "Failed to stop FoundationDB network: {res}"
             )));
         }
         self.init = false;

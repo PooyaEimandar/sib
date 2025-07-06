@@ -362,7 +362,7 @@ impl fmt::Display for HttpHeader {
             XFrameOptions => "x-frame-options",
             XXssProtection => "x-xss-protection",
         };
-        write!(f, "{}", name)
+        write!(f, "{name}")
     }
 }
 

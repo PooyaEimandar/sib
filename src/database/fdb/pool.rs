@@ -43,8 +43,7 @@ impl FDBPool {
     fn put(&self, conn: FDB) -> std::io::Result<()> {
         self.sender.send(conn).map_err(|e| {
             std::io::Error::other(format!(
-                "Failed to return FDB connection back to the pool: {}",
-                e
+                "Failed to return FDB connection back to the pool: {e}"
             ))
         })
     }

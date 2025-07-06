@@ -168,10 +168,10 @@ pub enum RateLimiterKind {
 }
 
 impl RateLimiter for RateLimiterKind {
-    fn check(&self, key: Cow<str>) -> RateLimitResult {
+    fn check(&self, ip: Cow<str>) -> RateLimitResult {
         match self {
-            RateLimiterKind::Fixed(f) => f.check(key),
-            RateLimiterKind::Sliding(s) => s.check(key),
+            RateLimiterKind::Fixed(f) => f.check(ip),
+            RateLimiterKind::Sliding(s) => s.check(ip),
         }
     }
 }

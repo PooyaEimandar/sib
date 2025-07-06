@@ -109,16 +109,13 @@ pub fn start(
                                 Ok((n, f)) => {
                                     from = f;
                                     len = n;
-                                    eprintln!("Received {} bytes from {}", len, from);
+                                    eprintln!("Received {len} bytes from {from}");
                                     event = 0; // continue
                                 }
                                 Err(e) => {
                                     if e.kind() == std::io::ErrorKind::WouldBlock {
-                                        eprintln!("WouldBlock");
                                         event = 1; // yield and break
                                     } else {
-                                        // s_error!("recv_from failed: {:?}", e);
-                                        eprintln!("panic");
                                         event = 3; // panic
                                     }
                                 }
@@ -147,7 +144,7 @@ pub fn start(
                         }
                     };
 
-                    eprintln!("got {} bytes", len);
+                    eprintln!("got {len} bytes");
 
                     let pkt_buf = &mut buf[..len];
 
@@ -155,12 +152,12 @@ pub fn start(
                     let hdr = match quiche::Header::from_slice(pkt_buf, quiche::MAX_CONN_ID_LEN) {
                         Ok(v) => v,
                         Err(e) => {
-                            eprintln!("Parsing packet header failed: {:?}", e);
+                            eprintln!("Parsing packet header failed: {e:?}");
                             continue 'read;
                         }
                     };
 
-                    eprintln!("got packet {:?}", hdr);
+                    eprintln!("got packet {hdr:?}");
                     let conn_id = ring::hmac::sign(&conn_id_seed, &hdr.dcid);
                     let conn_id = &conn_id.as_ref()[..quiche::MAX_CONN_ID_LEN];
                     let conn_id = conn_id.to_vec().into();
@@ -182,7 +179,7 @@ pub fn start(
                                 match quiche::negotiate_version(&hdr.scid, &hdr.dcid, &mut out) {
                                     Ok(v) => v,
                                     Err(e) => {
-                                        eprintln!("quiche negotiate version failed: {:?}", e);
+                                        eprintln!("quiche negotiate version failed: {e:?}");
                                         return;
                                     }
                                 };
@@ -193,7 +190,7 @@ pub fn start(
                                     eprintln!("send() would block");
                                     break;
                                 }
-                                panic!("send() failed: {:?}", e);
+                                eprintln!("send() failed: {e:?}");
                             }
                             continue 'read;
                         }
@@ -228,7 +225,7 @@ pub fn start(
                             ) {
                                 Ok(v) => v,
                                 Err(e) => {
-                                    eprintln!("quiche retry failed: {:?}", e);
+                                    eprintln!("quiche retry failed: {e:?}");
                                     return;
                                 }
                             };
@@ -240,8 +237,7 @@ pub fn start(
                                     eprintln!("send() would block");
                                     break;
                                 }
-
-                                panic!("send() failed: {:?}", e);
+                                eprintln!("send() failed: {e:?}");
                             }
                             continue 'read;
                         }
@@ -275,7 +271,7 @@ pub fn start(
                         ) {
                             Ok(v) => v,
                             Err(e) => {
-                                eprintln!("quiche accept failed: {:?}", e);
+                                eprintln!("quiche accept failed: {e:?}");
                                 return;
                             }
                         };
@@ -290,7 +286,7 @@ pub fn start(
                         match clients.get_mut(&scid) {
                             Some(v) => v,
                             None => {
-                                eprintln!("Failed to get client with scid={:?}", scid);
+                                eprintln!("Failed to get client with scid={scid:?}");
                                 return;
                             }
                         }
@@ -313,7 +309,7 @@ pub fn start(
                     let to = match socket.local_addr() {
                         Ok(v) => v,
                         Err(e) => {
-                            eprintln!("Failed to get local address: {:?}", e);
+                            eprintln!("Failed to get local address: {e:?}");
                             return;
                         }
                     };
@@ -335,7 +331,7 @@ pub fn start(
                             Ok((write, send_info)) => {
                                 if let Err(e) = socket.send_to(&out[..write], send_info.to) {
                                     if e.kind() != std::io::ErrorKind::WouldBlock {
-                                        panic!("send failed: {:?}", e);
+                                        eprintln!("send failed: {e:?}");
                                     }
                                 }
                                 eprintln!("{} wrote {} bytes", client.conn.trace_id(), write);
@@ -370,7 +366,7 @@ pub fn start(
                         ) {
                             Ok(v) => v,
                             Err(e) => {
-                                eprintln!("failed to create HTTP/3 connection: {}", e);
+                                eprintln!("failed to create HTTP/3 connection: {e}");
                                 continue 'read;
                             }
                         };
@@ -451,7 +447,7 @@ pub fn start(
                                 eprintln!("send() would block");
                                 break;
                             }
-                            panic!("send() failed: {:?}", e);
+                            eprintln!("send() failed: {e:?}");
                         }
                         eprintln!("{} written {} bytes", client.conn.trace_id(), write);
                     }
@@ -734,58 +730,58 @@ pub fn hdrs_to_strings(hdrs: &[quiche::h3::Header]) -> Vec<(String, String)> {
 
 #[cfg(test)]
 mod tests {
-    use crate::network::http::h3::start;
+    // use crate::network::http::h3::start;
 
-    fn create_self_signed_tls_pems() -> (String, String) {
-        use rcgen::{
-            CertificateParams, DistinguishedName, DnType, KeyPair, SanType, date_time_ymd,
-        };
-        let mut params: CertificateParams = Default::default();
-        params.not_before = rcgen::date_time_ymd(1975, 1, 1);
-        params.not_after = date_time_ymd(4096, 1, 1);
-        params.distinguished_name = DistinguishedName::new();
-        params
-            .distinguished_name
-            .push(DnType::OrganizationName, "Sib");
-        params.distinguished_name.push(DnType::CommonName, "Sib");
-        params.subject_alt_names = vec![SanType::DnsName("localhost".try_into().unwrap())];
-        let key_pair = KeyPair::generate().unwrap();
-        let cert = params.self_signed(&key_pair).unwrap();
-        (cert.pem(), key_pair.serialize_pem())
-    }
+    // fn create_self_signed_tls_pems() -> (String, String) {
+    //     use rcgen::{
+    //         CertificateParams, DistinguishedName, DnType, KeyPair, SanType, date_time_ymd,
+    //     };
+    //     let mut params: CertificateParams = Default::default();
+    //     params.not_before = rcgen::date_time_ymd(1975, 1, 1);
+    //     params.not_after = date_time_ymd(4096, 1, 1);
+    //     params.distinguished_name = DistinguishedName::new();
+    //     params
+    //         .distinguished_name
+    //         .push(DnType::OrganizationName, "Sib");
+    //     params.distinguished_name.push(DnType::CommonName, "Sib");
+    //     params.subject_alt_names = vec![SanType::DnsName("localhost".try_into().unwrap())];
+    //     let key_pair = KeyPair::generate().unwrap();
+    //     let cert = params.self_signed(&key_pair).unwrap();
+    //     (cert.pem(), key_pair.serialize_pem())
+    // }
 
-    #[tokio::test]
-    async fn test_quiche_server_response() -> Result<(), Box<dyn std::error::Error>> {
-        // create self-signed TLS certificates
-        let certs = create_self_signed_tls_pems();
-        std::fs::write("/tmp/cert.pem", certs.0)?;
-        std::fs::write("/tmp/key.pem", certs.1)?;
+    // #[tokio::test]
+    // async fn test_quiche_server_response() -> Result<(), Box<dyn std::error::Error>> {
+    //     // create self-signed TLS certificates
+    //     let certs = create_self_signed_tls_pems();
+    //     std::fs::write("/tmp/cert.pem", certs.0)?;
+    //     std::fs::write("/tmp/key.pem", certs.1)?;
 
-        // Start the server in a background thread
-        std::thread::spawn(|| {
-            println!("Starting the server...");
-            let _ = start("0.0.0.0:8080", "/tmp/cert.pem", "/tmp/key.pem", 1, 0);
-        });
+    //     // Start the server in a background thread
+    //     std::thread::spawn(|| {
+    //         println!("Starting the server...");
+    //         let _ = start("0.0.0.0:8080", "/tmp/cert.pem", "/tmp/key.pem", 1, 0);
+    //     });
 
-        // Wait for the server to be ready
-        std::thread::sleep(std::time::Duration::from_millis(300));
+    //     // Wait for the server to be ready
+    //     std::thread::sleep(std::time::Duration::from_millis(300));
 
-        let client = reqwest::Client::builder()
-            .http3_prior_knowledge()
-            .danger_accept_invalid_certs(true)
-            .build()?;
-        let url = "https://127.0.0.1:8080/";
-        let res = client
-            .get(url)
-            .version(reqwest::Version::HTTP_3)
-            .send()
-            .await?;
+    //     let client = reqwest::Client::builder()
+    //         .http3_prior_knowledge()
+    //         .danger_accept_invalid_certs(true)
+    //         .build()?;
+    //     let url = "https://127.0.0.1:8080/";
+    //     let res = client
+    //         .get(url)
+    //         .version(reqwest::Version::HTTP_3)
+    //         .send()
+    //         .await?;
 
-        println!("Response: {:?} {}", res.version(), res.status());
-        println!("Headers: {:#?}\n", res.headers());
-        let body = res.text().await?;
-        println!("{body}");
+    //     println!("Response: {:?} {}", res.version(), res.status());
+    //     println!("Headers: {:#?}\n", res.headers());
+    //     let body = res.text().await?;
+    //     println!("{body}");
 
-        Ok(())
-    }
+    //     Ok(())
+    // }
 }

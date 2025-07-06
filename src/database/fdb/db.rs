@@ -14,8 +14,7 @@ impl FDB {
         let res = unsafe { foundationdb_sys::fdb_create_database(c_path.as_ptr(), &mut db) };
         if res != 0 {
             return Err(std::io::Error::other(format!(
-                "Failed to setup FoundationDB network: {}",
-                res
+                "Failed to setup FoundationDB network: {res}"
             )));
         }
         Ok(Self { db })
