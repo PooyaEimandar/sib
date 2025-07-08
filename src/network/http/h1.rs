@@ -2,13 +2,11 @@ use crate::network::http::ratelimit::{RateLimiter, RateLimiterKind};
 
 use super::session::{self, Session};
 use bytes::{BufMut, BytesMut};
-use dashmap::DashMap;
 use may::net::{TcpListener, TcpStream};
 use may::{coroutine, go};
 use std::time::Instant;
-use std::{io::{self, Read}, time::Duration};
+use std::{io::{self, Read}};
 use std::mem::MaybeUninit;
-use std::net::IpAddr;
 
 #[cfg(unix)]
 use std::net::SocketAddr;
@@ -20,13 +18,6 @@ use may::io::WaitIo;
 const MIN_BUF_LEN: usize = 1024;
 const MAX_BODY_LEN: usize = 4096;
 pub const BUF_LEN: usize = MAX_BODY_LEN * 8;
-
-static STRIKE_CACHE: once_cell::sync::Lazy<DashMap<IpAddr, (u8, Instant)>> =
-    once_cell::sync::Lazy::new(DashMap::new);
-
-static BAN_CACHE: once_cell::sync::Lazy<DashMap<IpAddr, Instant>> =
-    once_cell::sync::Lazy::new(DashMap::new);
-
     
 macro_rules! mc {
     ($e: expr) => {
@@ -37,22 +28,6 @@ macro_rules! mc {
             }
         }
     };
-}
-
-pub struct BanConfig {
-    pub max_strikes: u8,
-    pub strike_window: Duration,
-    pub ban_duration: Duration,
-}
-
-impl Default for BanConfig {
-    fn default() -> Self {
-        Self {
-            max_strikes: 5, // Maximum strikes before banning 
-            strike_window: Duration::from_secs(30), // 30 seconds
-            ban_duration: Duration::from_secs(120), // 120 seconds
-        }
-    }
 }
 
 pub trait H1Service {
@@ -137,11 +112,14 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
         cert_key_pems: (&[u8], &[u8]),
         stack_size: usize,
         rate_limiter: Option<RateLimiterKind>,
-        ban_config: Option<BanConfig>,
+        ban_config: Option<super::ban::BanConfig>,
     ) -> io::Result<coroutine::JoinHandle<()>> {
         // Parse the certificate from memory
 
         use std::net::Shutdown;
+        use crate::network::http::ban::*;
+
+        use crate::network::http::ban::BAN_CACHE;
         let cert = boring::x509::X509::from_pem(cert_key_pems.0).map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("Cert error: {e}"))
         })?;
@@ -273,22 +251,6 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
                 }
             }
         )
-    }
-}
-
-#[inline]
-fn record_strike(ip: IpAddr, reason: &'static str, config: &BanConfig) {
-    let now = Instant::now();
-    let mut entry = STRIKE_CACHE.entry(ip).or_insert((0, now));
-    if now.duration_since(entry.1) > config.strike_window {
-        *entry = (1, now);
-    } else {
-        entry.0 += 1;
-        if entry.0 >= config.max_strikes {
-            eprintln!("Banning IP {ip} due to repeated {reason} (within {:?})", config.strike_window);
-            BAN_CACHE.insert(ip, now + config.ban_duration);
-            STRIKE_CACHE.remove(&ip);
-        }
     }
 }
 
