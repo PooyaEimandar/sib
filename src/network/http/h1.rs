@@ -23,7 +23,8 @@ macro_rules! mc {
     ($e: expr) => {
         match $e {
             Ok(val) => val,
-            Err(_err) => {
+            Err(err) => {
+                eprintln!("Accept error: {err}");
                 continue;
             }
         }
