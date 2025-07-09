@@ -91,14 +91,13 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
                     mc!(stream.set_nodelay(true));
                     let service = self.service(id);
                     let builder = may::coroutine::Builder::new().id(id);
-                    go!(
+                    let _ = go!(
                         builder,
                         move || if let Err(_e) = serve(&mut stream, peer_addr, service) {
                             //s_error!("service err = {e:?}");
                             stream.shutdown(std::net::Shutdown::Both).ok();
                         }
-                    )
-                    .unwrap();
+                    );
                 }
             }
         )
@@ -110,7 +109,7 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
         self,
         addr: L,
         number_of_workers: usize,
-        cert_key_pems: (&[u8], &[u8]),
+        ssl: &super::util::SSL,
         stack_size: usize,
         rate_limiter: Option<RateLimiterKind>,
         ban_config: Option<super::ban::BanConfig>,
@@ -121,11 +120,11 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
         use crate::network::http::ban::*;
 
         use crate::network::http::ban::BAN_CACHE;
-        let cert = boring::x509::X509::from_pem(cert_key_pems.0).map_err(|e| {
+        let cert = boring::x509::X509::from_pem(ssl.cert_pem).map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("Cert error: {e}"))
         })?;
         // Parse the private key from memory
-        let pkey = boring::pkey::PKey::private_key_from_pem(cert_key_pems.1).map_err(|e| {
+        let pkey = boring::pkey::PKey::private_key_from_pem(ssl.key_pem).map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("Key error: {e}"))
         })?;
         // create the tls acceptor
@@ -140,11 +139,10 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
             .set_certificate(&cert)
             .map_err(|e| std::io::Error::other(format!("Set cert error: {e}")))?;
 
-        // Enforce TLS 1.2+
-        tls_builder.set_min_proto_version(Some(boring::ssl::SslVersion::TLS1_2))?;
-        tls_builder.set_max_proto_version(Some(boring::ssl::SslVersion::TLS1_3))?;
+        tls_builder.set_min_proto_version(ssl.min_version.to_boring())?;
+        tls_builder.set_max_proto_version(ssl.max_version.to_boring())?;
 
-        // Optional: Reject connections without SNI
+        // Reject connections without SNI
         tls_builder.set_servername_callback(|ssl_ref, _| {
             if ssl_ref.servername(boring::ssl::NameType::HOST_NAME).is_none() {
                 eprintln!("SNI not provided, rejecting connection");
@@ -208,18 +206,6 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
                         }
                     }
 
-                    // Min cost check if stream has the correct TLS bytes
-                    let mut peek_buf = [0u8; 11];
-                    if let Ok(n) = stream.peek(&mut peek_buf) {
-                        if n != peek_buf.len() || !is_probably_tls(&peek_buf) {
-                            let _ = stream.shutdown(Shutdown::Both);
-                            if let Some(config) =  &ban_config {
-                                record_strike(ip, "invalid TLS preamble", config);
-                            }
-                            continue;
-                        }
-                    }
-
                     #[cfg(unix)]
                     let id = stream.as_raw_fd() as usize;
                     #[cfg(windows)]
@@ -234,18 +220,25 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
 
                     match tls_acceptor.accept(stream) {
                         Ok(mut tls_stream) => {
-
-                            go!(builder, move || {
+                            if let Err(err) = go!(builder, move || {
                                 if let Err(_e) = serve_tls(&mut tls_stream, peer_addr, service) {
                                     tls_stream.get_mut().shutdown(Shutdown::Both).ok();
                                 }
                             })
-                            .unwrap();
+                            {
+                                eprintln!("TLS coroutine failed: {err}");
+                                if let Some(s) = stream_cloned {
+                                    let _ = s.shutdown(Shutdown::Both);
+                                }
+                            }
                         }
                         Err(e) => {
                             eprintln!("{e} for {peer_addr}");
                             if let Some(s) = stream_cloned {
                                 let _ = s.shutdown(Shutdown::Both);
+                            }
+                            if let Some(config) =  &ban_config {
+                                record_strike(ip, "invalid TLS", config);
                             }
                         }
                     };
@@ -255,18 +248,6 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
     }
 }
 
-#[inline]
-fn is_probably_tls(buf: &[u8]) -> bool {
-    if buf.len() < 6 {
-        return false;
-    }
-
-    let is_handshake = buf[0] == 0x16; // Handshake content type
-    let is_tls_version = matches!( (buf[1], buf[2]), (0x03, 0x01..=0x04)); // TLS 1.0–1.3
-    let is_client_hello = buf[5] == 0x01; // handshake type, ClientHello
-
-    is_handshake && is_tls_version && is_client_hello
-}
 
 #[inline]
 pub(crate) fn reserve_buf(buf: &mut BytesMut) {
@@ -428,7 +409,7 @@ fn serve<T: H1Service>(stream: &mut TcpStream, mut service: T) -> io::Result<()>
 mod tests {
     use crate::network::http::{
         h1::{H1Service, H1ServiceFactory},
-        message::Status,
+        util::Status,
         session::Session,
     };
     use may::net::TcpStream;
@@ -538,9 +519,16 @@ mod tests {
     #[test]
     fn test_tls_h1_gracefull_shutdown() {
         let (cert_pem, key_pem) = create_self_signed_tls_pems();
+        let ssl = crate::network::http::util::SSL
+        {
+            cert_pem: cert_pem.as_bytes(),
+            key_pem: key_pem.as_bytes(),
+            min_version: crate::network::http::util::SSLVersion::TLS1,
+            max_version: crate::network::http::util::SSLVersion::TLS1_3
+        };
         let addr = "127.0.0.1:8080";
         let server_handle = H1Server(EchoService)
-            .start_tls(addr, 1, (cert_pem.as_bytes(), key_pem.as_bytes()), 0, None, None)
+            .start_tls(addr, 1, &ssl, 0, None, None)
             .expect("h1 TLS start server");
 
         let client_handler = may::go!(move || {

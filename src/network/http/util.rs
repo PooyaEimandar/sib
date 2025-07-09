@@ -25,6 +25,39 @@ pub(crate) static CURRENT_DATE: Lazy<Arc<ArcSwap<Arc<str>>>> = Lazy::new(|| {
     swap
 });
 
+
+#[cfg(feature = "sys-boring-ssl")]
+#[derive(Debug, Copy, Clone)]
+pub enum SSLVersion {
+    SSL3 = 768,
+    TLS1,      
+    TLS1_1,    
+    TLS1_2,    
+    TLS1_3,    
+}
+
+#[cfg(feature = "sys-boring-ssl")]
+pub struct SSL<'a> {
+    pub cert_pem: &'a [u8],
+    pub key_pem: &'a [u8],
+    pub min_version: SSLVersion,
+    pub max_version: SSLVersion,
+}
+
+// Map from your enum to boring::ssl::SslVersion
+#[cfg(feature = "sys-boring-ssl")]
+impl SSLVersion {
+    pub fn to_boring(self) -> Option<boring::ssl::SslVersion> {
+        match self {
+            SSLVersion::SSL3   => Some(boring::ssl::SslVersion::SSL3),
+            SSLVersion::TLS1   => Some(boring::ssl::SslVersion::TLS1),
+            SSLVersion::TLS1_1 => Some(boring::ssl::SslVersion::TLS1_1),
+            SSLVersion::TLS1_2 => Some(boring::ssl::SslVersion::TLS1_2),
+            SSLVersion::TLS1_3 => Some(boring::ssl::SslVersion::TLS1_3),
+        }
+    }
+}
+
 // RFC 9110-compliant
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Status {

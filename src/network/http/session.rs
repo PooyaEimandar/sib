@@ -1,5 +1,5 @@
 use crate::network::http::h1::reserve_buf;
-use crate::network::http::message::HttpHeader;
+use crate::network::http::util::HttpHeader;
 use bytes::{Buf, BufMut, BytesMut};
 use std::io::{self, Read, Write};
 use std::mem::MaybeUninit;
@@ -126,7 +126,7 @@ where
     }
 
     #[inline]
-    pub fn status_code(&mut self, status: super::message::Status) -> &mut Self {
+    pub fn status_code(&mut self, status: super::util::Status) -> &mut Self {
         const SERVER_NAME: &str =
             concat!("\r\nServer: Sib", env!("SIB_BUILD_VERSION"), "\r\nDate: ");
         let (code, reason) = status.as_parts();
@@ -137,7 +137,7 @@ where
         self.rsp_buf.extend_from_slice(reason.as_bytes());
         self.rsp_buf.extend_from_slice(SERVER_NAME.as_bytes());
         self.rsp_buf
-            .extend_from_slice(super::message::CURRENT_DATE.load().as_bytes());
+            .extend_from_slice(super::util::CURRENT_DATE.load().as_bytes());
         self.rsp_buf.extend_from_slice(b"\r\n");
         self
     }
