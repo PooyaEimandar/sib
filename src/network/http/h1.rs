@@ -103,145 +103,118 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
         )
     }
 
-   #[cfg(feature = "sys-boring-ssl")]
-fn start_tls<L: ToSocketAddrs>(
-    self,
-    addr: L,
-    number_of_workers: usize,
-    ssl: &super::util::SSL,
-    stack_size: usize,
-    rate_limiter: Option<RateLimiterKind>,
-    ban_config: Option<super::ban::BanConfig>,
-) -> io::Result<coroutine::JoinHandle<()>> {
-    use crate::network::http::ban::*;
-    use crate::network::http::ban::BAN_CACHE;
-    use std::net::Shutdown;
+    #[cfg(feature = "sys-boring-ssl")]
+    fn start_tls<L: ToSocketAddrs>(
+        self,
+        addr: L,
+        number_of_workers: usize,
+        ssl: &super::util::SSL,
+        stack_size: usize,
+        rate_limiter: Option<RateLimiterKind>,
+        ban_config: Option<super::ban::BanConfig>,
+    ) -> io::Result<coroutine::JoinHandle<()>> {
+        use crate::network::http::ban::*;
+        use crate::network::http::ban::BAN_CACHE;
+        use std::net::Shutdown;
 
-    let cert = boring::x509::X509::from_pem(ssl.cert_pem).map_err(|e| {
-        io::Error::new(io::ErrorKind::InvalidInput, format!("Cert error: {e}"))
-    })?;
-    let pkey = boring::pkey::PKey::private_key_from_pem(ssl.key_pem).map_err(|e| {
-        io::Error::new(io::ErrorKind::InvalidInput, format!("Key error: {e}"))
-    })?;
+        let cert = boring::x509::X509::from_pem(ssl.cert_pem).map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidInput, format!("Cert error: {e}"))
+        })?;
+        let pkey = boring::pkey::PKey::private_key_from_pem(ssl.key_pem).map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidInput, format!("Key error: {e}"))
+        })?;
 
-    let mut tls_builder =
-        boring::ssl::SslAcceptor::mozilla_intermediate(boring::ssl::SslMethod::tls())
-            .map_err(|e| io::Error::other(format!("Builder error: {e}")))?;
+        let mut tls_builder =
+            boring::ssl::SslAcceptor::mozilla_intermediate(boring::ssl::SslMethod::tls())
+                .map_err(|e| io::Error::other(format!("Builder error: {e}")))?;
 
-    tls_builder.set_private_key(&pkey)?;
-    tls_builder.set_certificate(&cert)?;
-    tls_builder.set_min_proto_version(ssl.min_version.to_boring())?;
-    tls_builder.set_max_proto_version(ssl.max_version.to_boring())?;
+        tls_builder.set_private_key(&pkey)?;
+        tls_builder.set_certificate(&cert)?;
+        tls_builder.set_min_proto_version(ssl.min_version.to_boring())?;
+        tls_builder.set_max_proto_version(ssl.max_version.to_boring())?;
 
-    tls_builder.set_servername_callback(|ssl_ref, _| {
-        if ssl_ref.servername(boring::ssl::NameType::HOST_NAME).is_none() {
-            eprintln!("SNI not provided, rejecting connection");
-            return Err(boring::ssl::SniError::ALERT_FATAL);
-        }
-        Ok(())
-    });
+        tls_builder.set_servername_callback(|ssl_ref, _| {
+            if ssl_ref.servername(boring::ssl::NameType::HOST_NAME).is_none() {
+                eprintln!("SNI not provided, rejecting connection");
+                return Err(boring::ssl::SniError::ALERT_FATAL);
+            }
+            Ok(())
+        });
 
-    let stacksize = if stack_size > 0 { stack_size } else { 2 * 1024 * 1024 };
-    may::config()
-        .set_workers(number_of_workers)
-        .set_stack_size(stacksize);
+        let stacksize = if stack_size > 0 { stack_size } else { 2 * 1024 * 1024 };
+        may::config()
+            .set_workers(number_of_workers)
+            .set_stack_size(stacksize);
 
-    let tls_acceptor = std::sync::Arc::new(tls_builder.build());
-    let listener = TcpListener::bind(addr)?;
+        let tls_acceptor = std::sync::Arc::new(tls_builder.build());
+        let listener = TcpListener::bind(addr)?;
 
-    // Start main loop
-     go!(coroutine::Builder::new().name("H1TLSServiceFactory".to_owned()), move || {
-        loop {
-            let tls_acceptor = tls_acceptor.clone();
-            let listener = match listener.try_clone() {
-                Ok(l) => l,
-                Err(e) => {
-                    eprintln!("Failed to clone listener: {e}");
-                    break;
+        go!(coroutine::Builder::new().name("H1TLSServiceFactory".to_owned()), move || {
+            #[cfg(unix)]
+            use std::os::fd::AsRawFd;
+            #[cfg(windows)]
+            use std::os::windows::io::AsRawSocket;
+
+            for stream_incoming in listener.incoming() {
+
+                let stream = mc!(stream_incoming);
+                let peer_addr = stream.peer_addr().unwrap_or_else(|_| {
+                    SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0)
+                });
+                let ip = peer_addr.ip();
+
+                if let Some(&banned_until) = BAN_CACHE.get(&ip).as_deref() {
+                    if banned_until > Instant::now() {
+                        eprintln!("Temporarily banned IP: {peer_addr}");
+                        let _ = stream.shutdown(Shutdown::Both);
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        continue;
+                    } else {
+                        BAN_CACHE.remove(&ip);
+                    }
                 }
-            };
 
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                #[cfg(unix)]
-                use std::os::fd::AsRawFd;
-                #[cfg(windows)]
-                use std::os::windows::io::AsRawSocket;
-
-                for stream in listener.incoming() {
-                    let stream = match stream {
-                        Ok(s) => s,
-                        Err(e) => {
-                            eprintln!("Accept error: {e}");
-                            continue;
-                        }
-                    };
-
-                    let peer_addr = stream.peer_addr().unwrap_or_else(|_| {
-                        SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0)
-                    });
-                    let ip = peer_addr.ip();
-
-                    if let Some(&banned_until) = BAN_CACHE.get(&ip).as_deref() {
-                        if banned_until > Instant::now() {
-                            eprintln!("Temporarily banned IP: {peer_addr}");
+                if let Some(rl) = &rate_limiter {
+                    if !ip.is_unspecified() {
+                        let result = rl.check(ip.to_string().into());
+                        if !result.allowed {
                             let _ = stream.shutdown(Shutdown::Both);
-                            continue;
-                        } else {
-                            BAN_CACHE.remove(&ip);
-                        }
-                    }
-
-                    if let Some(rl) = &rate_limiter {
-                        if !ip.is_unspecified() {
-                            let result = rl.check(ip.to_string().into());
-                            if !result.allowed {
-                                let _ = stream.shutdown(Shutdown::Both);
-                                if let Some(config) = &ban_config {
-                                    record_strike(ip, "rate limited", config);
-                                }
-                                continue;
+                            if let Some(config) = &ban_config {
+                                record_strike(ip, "rate limited", config);
                             }
+                            std::thread::sleep(std::time::Duration::from_millis(50));
+                            continue;
                         }
                     }
+                }
 
-                    #[cfg(unix)]
-                    let id = stream.as_raw_fd() as usize;
-                    #[cfg(windows)]
-                    let id = stream.as_raw_socket() as usize;
+                #[cfg(unix)]
+                let id = stream.as_raw_fd() as usize;
+                #[cfg(windows)]
+                let id = stream.as_raw_socket() as usize;
 
-                    let builder = coroutine::Builder::new().id(id);
-                    let service = self.service(id);
-                    let tls_acceptor = tls_acceptor.clone();
+                let service = self.service(id);
+                let tls_acceptor = tls_acceptor.clone();
+                let ban_config = ban_config.clone();
 
+                let _ = go!(coroutine::Builder::new().id(id), move || {
                     match tls_acceptor.accept(stream) {
                         Ok(mut tls_stream) => {
-                            let _ = go!(builder, move || {
-                                if let Err(_e) = serve_tls(&mut tls_stream, peer_addr, service) {
-                                    tls_stream.get_mut().shutdown(Shutdown::Both).ok();
-                                }
-                            });
+                            if let Err(_e) = serve_tls(&mut tls_stream, peer_addr, service) {
+                                tls_stream.get_mut().shutdown(Shutdown::Both).ok();
+                            }
                         }
                         Err(e) => {
-                            eprintln!("{e} for {peer_addr}");
+                            eprintln!("TLS handshake failed {e} for {peer_addr}");
                             if let Some(config) = &ban_config {
                                 record_strike(ip, "invalid TLS", config);
                             }
                         }
                     }
-                }
-            }));
-
-            if result.is_err() {
-                eprintln!("TLS listener panicked. Restarting...");
-                std::thread::sleep(std::time::Duration::from_millis(300));
-                continue; // restart loop
-            } else {
-                break; // exit only if loop completes normally
+                });
             }
-        }
         })
     }
-
 }
 
 #[inline]

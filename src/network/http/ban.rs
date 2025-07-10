@@ -7,6 +7,7 @@ pub(crate) static STRIKE_CACHE: once_cell::sync::Lazy<DashMap<IpAddr, (u8, Insta
 pub(crate) static BAN_CACHE: once_cell::sync::Lazy<DashMap<IpAddr, Instant>> =
     once_cell::sync::Lazy::new(DashMap::new);
 
+#[derive(Clone)]
 pub struct BanConfig {
     pub max_strikes: u8,
     pub strike_window: Duration,
