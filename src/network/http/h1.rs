@@ -179,6 +179,7 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
                 #[cfg(windows)]
                 let id = stream.as_raw_socket() as usize;
 
+                let stream_cloned = stream.try_clone();
                 match tls_acceptor.accept(stream) {
                     Ok(mut tls_stream) => {
                         if let Err(e) = serve_tls(&mut tls_stream, peer_addr, self.service(id)) {
@@ -188,6 +189,15 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
                     }
                     Err(e) => {
                         eprintln!("TLS handshake failed {e} from {peer_addr}");
+                        match stream_cloned
+                        {
+                            Ok(stream_owned) => {
+                                stream_owned.shutdown(Shutdown::Both).ok();
+                            },
+                            Err(e) => {
+                                eprintln!("Failed to shut down the stream after TLS handshake failure: {e} from {peer_addr}");
+                            },
+                        };
                     }
                 }                    
             }
