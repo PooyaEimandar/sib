@@ -1,4 +1,5 @@
 use arc_swap::ArcSwap;
+#[cfg(feature = "sys-boring-ssl")]
 use once_cell::sync::Lazy;
 use std::fmt;
 use std::str::FromStr;
@@ -42,6 +43,7 @@ pub struct SSL<'a> {
     pub key_pem: &'a [u8],
     pub min_version: SSLVersion,
     pub max_version: SSLVersion,
+    pub io_timeout: std::time::Duration
 }
 
 // Map from your enum to boring::ssl::SslVersion

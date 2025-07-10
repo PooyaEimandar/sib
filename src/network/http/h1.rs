@@ -146,6 +146,7 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
             .set_workers(number_of_workers)
             .set_stack_size(stacksize);
 
+        let io_timeout = ssl.io_timeout;
         let tls_acceptor = std::sync::Arc::new(tls_builder.build());
         let listener = TcpListener::bind(addr)?;
 
@@ -158,6 +159,10 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
             for stream_incoming in listener.incoming() {
 
                 let stream = mc!(stream_incoming);
+                let _ = stream.set_nodelay(true);
+                let _ = stream.set_write_timeout(Some(io_timeout));
+                let _ = stream.set_read_timeout(Some(io_timeout));
+
                 let peer_addr = stream.peer_addr().unwrap_or_else(|_| {
                     SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0)
                 });
@@ -194,24 +199,29 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
                 let id = stream.as_raw_socket() as usize;
 
                 let service = self.service(id);
-                let tls_acceptor = tls_acceptor.clone();
                 let ban_config = ban_config.clone();
 
-                let _ = go!(coroutine::Builder::new().id(id), move || {
-                    match tls_acceptor.accept(stream) {
-                        Ok(mut tls_stream) => {
-                            if let Err(_e) = serve_tls(&mut tls_stream, peer_addr, service) {
-                                tls_stream.get_mut().shutdown(Shutdown::Both).ok();
+                let _ = may::select! {
+                    tls_stream_res = tls_acceptor.accept(stream)=> {
+                        match tls_stream_res {
+                            Ok(mut tls_stream) => {
+                                if let Err(e) = serve_tls(&mut tls_stream, peer_addr, service) {
+                                    tls_stream.get_mut().shutdown(Shutdown::Both).ok();
+                                    eprintln!("serve_tls failed with error: {e} from {peer_addr}");
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("TLS handshake failed {e} from {peer_addr}");
+                                if let Some(config) = &ban_config {
+                                    record_strike(ip, "invalid TLS", config);
+                                }
                             }
                         }
-                        Err(e) => {
-                            eprintln!("TLS handshake failed {e} for {peer_addr}");
-                            if let Some(config) = &ban_config {
-                                record_strike(ip, "invalid TLS", config);
-                            }
-                        }
+                    },
+                    _ = may::coroutine::sleep(io_timeout) => {
+                        eprintln!("TLS handshake got timeout from {peer_addr}");
                     }
-                });
+                };
             }
         })
     }
@@ -492,7 +502,8 @@ mod tests {
             cert_pem: cert_pem.as_bytes(),
             key_pem: key_pem.as_bytes(),
             min_version: crate::network::http::util::SSLVersion::TLS1,
-            max_version: crate::network::http::util::SSLVersion::TLS1_3
+            max_version: crate::network::http::util::SSLVersion::TLS1_3,
+            io_timeout: std::time::Duration::from_secs(10)
         };
         let addr = "127.0.0.1:8080";
         let server_handle = H1Server(EchoService)
