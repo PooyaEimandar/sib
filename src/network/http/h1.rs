@@ -4,7 +4,6 @@ use super::session::{self, Session};
 use bytes::{BufMut, BytesMut};
 use may::net::{TcpListener, TcpStream};
 use may::{coroutine, go};
-use std::time::Instant;
 use std::{io::{self, Read}};
 use std::mem::MaybeUninit;
 
@@ -111,10 +110,7 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
         ssl: &super::util::SSL,
         stack_size: usize,
         rate_limiter: Option<RateLimiterKind>,
-        ban_config: Option<super::ban::BanConfig>,
     ) -> io::Result<coroutine::JoinHandle<()>> {
-        use crate::network::http::ban::*;
-        use crate::network::http::ban::BAN_CACHE;
         use std::net::Shutdown;
 
         let cert = boring::x509::X509::from_pem(ssl.cert_pem).map_err(|e| {
@@ -168,26 +164,11 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
                 });
                 let ip = peer_addr.ip();
 
-                if let Some(&banned_until) = BAN_CACHE.get(&ip).as_deref() {
-                    if banned_until > Instant::now() {
-                        eprintln!("Temporarily banned IP: {peer_addr}");
-                        let _ = stream.shutdown(Shutdown::Both);
-                        std::thread::sleep(std::time::Duration::from_millis(50));
-                        continue;
-                    } else {
-                        BAN_CACHE.remove(&ip);
-                    }
-                }
-
                 if let Some(rl) = &rate_limiter {
                     if !ip.is_unspecified() {
                         let result = rl.check(ip.to_string().into());
                         if !result.allowed {
                             let _ = stream.shutdown(Shutdown::Both);
-                            if let Some(config) = &ban_config {
-                                record_strike(ip, "rate limited", config);
-                            }
-                            std::thread::sleep(std::time::Duration::from_millis(50));
                             continue;
                         }
                     }
@@ -198,30 +179,17 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
                 #[cfg(windows)]
                 let id = stream.as_raw_socket() as usize;
 
-                let service = self.service(id);
-                let ban_config = ban_config.clone();
-
-                let _ = may::select! {
-                    tls_stream_res = tls_acceptor.accept(stream)=> {
-                        match tls_stream_res {
-                            Ok(mut tls_stream) => {
-                                if let Err(e) = serve_tls(&mut tls_stream, peer_addr, service) {
-                                    tls_stream.get_mut().shutdown(Shutdown::Both).ok();
-                                    eprintln!("serve_tls failed with error: {e} from {peer_addr}");
-                                }
-                            }
-                            Err(e) => {
-                                eprintln!("TLS handshake failed {e} from {peer_addr}");
-                                if let Some(config) = &ban_config {
-                                    record_strike(ip, "invalid TLS", config);
-                                }
-                            }
+                match tls_acceptor.accept(stream) {
+                    Ok(mut tls_stream) => {
+                        if let Err(e) = serve_tls(&mut tls_stream, peer_addr, self.service(id)) {
+                            tls_stream.get_mut().shutdown(Shutdown::Both).ok();
+                            eprintln!("serve_tls failed with error: {e} from {peer_addr}");
                         }
-                    },
-                    _ = may::coroutine::sleep(io_timeout) => {
-                        eprintln!("TLS handshake got timeout from {peer_addr}");
                     }
-                };
+                    Err(e) => {
+                        eprintln!("TLS handshake failed {e} from {peer_addr}");
+                    }
+                }                    
             }
         })
     }
@@ -507,7 +475,7 @@ mod tests {
         };
         let addr = "127.0.0.1:8080";
         let server_handle = H1Server(EchoService)
-            .start_tls(addr, 1, &ssl, 0, None, None)
+            .start_tls(addr, 1, &ssl, 0, None)
             .expect("h1 TLS start server");
 
         let client_handler = may::go!(move || {
