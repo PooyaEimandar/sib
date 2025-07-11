@@ -4,7 +4,7 @@ use bytes::{Buf, BufMut, BytesMut};
 use std::io::{self, Read, Write};
 use std::mem::MaybeUninit;
 
-pub(crate) const MAX_HEADERS: usize = 16;
+pub(crate) const MAX_HEADERS: usize = 32;
 
 pub struct Session<'buf, 'header, 'stream, S>
 where
