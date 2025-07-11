@@ -30,10 +30,7 @@ pub(crate) static CURRENT_DATE: Lazy<Arc<ArcSwap<Arc<str>>>> = Lazy::new(|| {
 #[cfg(feature = "sys-boring-ssl")]
 #[derive(Debug, Copy, Clone)]
 pub enum SSLVersion {
-    SSL3 = 768,
-    TLS1,      
-    TLS1_1,    
-    TLS1_2,    
+    TLS1_2 = 771,    
     TLS1_3,    
 }
 
@@ -51,9 +48,6 @@ pub struct SSL<'a> {
 impl SSLVersion {
     pub fn to_boring(self) -> Option<boring::ssl::SslVersion> {
         match self {
-            SSLVersion::SSL3   => Some(boring::ssl::SslVersion::SSL3),
-            SSLVersion::TLS1   => Some(boring::ssl::SslVersion::TLS1),
-            SSLVersion::TLS1_1 => Some(boring::ssl::SslVersion::TLS1_1),
             SSLVersion::TLS1_2 => Some(boring::ssl::SslVersion::TLS1_2),
             SSLVersion::TLS1_3 => Some(boring::ssl::SslVersion::TLS1_3),
         }

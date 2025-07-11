@@ -488,7 +488,7 @@ mod tests {
         {
             cert_pem: cert_pem.as_bytes(),
             key_pem: key_pem.as_bytes(),
-            min_version: crate::network::http::util::SSLVersion::TLS1,
+            min_version: crate::network::http::util::SSLVersion::TLS1_2,
             max_version: crate::network::http::util::SSLVersion::TLS1_3,
             io_timeout: std::time::Duration::from_secs(10)
         };
