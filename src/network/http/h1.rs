@@ -19,11 +19,11 @@ const MAX_BODY_LEN: usize = 4096;
 pub const BUF_LEN: usize = MAX_BODY_LEN * 8;
     
 macro_rules! mc {
-    ($e: expr) => {
-        match $e {
-            Ok(val) => val,
-            Err(err) => {
-                eprintln!("Accept error: {err}");
+    ($exp: expr) => {
+        match $exp {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("Accept error: {e}");
                 continue;
             }
         }
@@ -128,6 +128,7 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
         tls_builder.set_certificate(&cert)?;
         tls_builder.set_min_proto_version(ssl.min_version.to_boring())?;
         tls_builder.set_max_proto_version(ssl.max_version.to_boring())?;
+        tls_builder.set_alpn_protos(b"\x08http/1.1")?;
 
         tls_builder.set_servername_callback(|ssl_ref, _| {
             if ssl_ref.servername(boring::ssl::NameType::HOST_NAME).is_none() {

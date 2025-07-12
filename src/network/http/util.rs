@@ -37,10 +37,10 @@ pub enum SSLVersion {
 #[cfg(feature = "sys-boring-ssl")]
 pub struct SSL<'a> {
     pub cert_pem: &'a [u8],
+    pub io_timeout: std::time::Duration,
     pub key_pem: &'a [u8],
-    pub min_version: SSLVersion,
     pub max_version: SSLVersion,
-    pub io_timeout: std::time::Duration
+    pub min_version: SSLVersion,
 }
 
 // Map from your enum to boring::ssl::SslVersion
