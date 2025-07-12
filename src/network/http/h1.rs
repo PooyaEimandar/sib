@@ -126,6 +126,12 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
 
         tls_builder.set_private_key(&pkey)?;
         tls_builder.set_certificate(&cert)?;
+        if let Some(chain) = ssl.chain_pem {
+            let chain_x509 = boring::x509::X509::from_pem(chain).map_err(|e| {
+                io::Error::new(io::ErrorKind::InvalidInput, format!("Chain error: {e}"))
+            })?;
+            tls_builder.add_extra_chain_cert(chain_x509)?;
+        }
         tls_builder.set_min_proto_version(ssl.min_version.to_boring())?;
         tls_builder.set_max_proto_version(ssl.max_version.to_boring())?;
         tls_builder.set_alpn_protos(b"\x08http/1.1")?;
@@ -489,6 +495,7 @@ mod tests {
         {
             cert_pem: cert_pem.as_bytes(),
             key_pem: key_pem.as_bytes(),
+            chain_pem: None,
             min_version: crate::network::http::util::SSLVersion::TLS1_2,
             max_version: crate::network::http::util::SSLVersion::TLS1_3,
             io_timeout: std::time::Duration::from_secs(10)
