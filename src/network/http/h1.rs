@@ -8,8 +8,7 @@ use std::{io::{self, Read}};
 use std::mem::MaybeUninit;
 
 #[cfg(unix)]
-use std::net::SocketAddr;
-use std::net::{Shutdown, ToSocketAddrs};
+use std::net::{SocketAddr, ToSocketAddrs};
 
 #[cfg(unix)]
 use may::io::WaitIo;
@@ -45,7 +44,6 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
         addr: L,
         number_of_workers: usize,
         stack_size: usize,
-        rate_limiter: Option<RateLimiterKind>,
     ) -> io::Result<coroutine::JoinHandle<()>> {
         let stacksize = if stack_size > 0 {
             stack_size
@@ -71,18 +69,6 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
                     let peer_addr = stream.peer_addr().unwrap_or(
                         std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0)
                     );
-                    // Check if the client IP is rate limited
-                    if let Some(rl) = &rate_limiter {
-                        if !peer_addr.ip().is_unspecified() {
-                            let result = rl.check(peer_addr.ip().to_string().into());
-                            if !result.allowed {
-                                eprintln!("Dropped client {peer_addr} (rate limited)");
-                                let _ = stream.shutdown(Shutdown::Both);
-                                continue;
-                            }
-                        }
-                    }
-
                     #[cfg(unix)]
                     let id = stream.as_raw_fd() as usize;
                     #[cfg(windows)]
@@ -448,7 +434,7 @@ mod tests {
     fn test_h1_gracefull_shutdown() {
         let addr = "127.0.0.1:8080";
         let server_handle = H1Server(EchoService)
-            .start(addr, 1, 0, None)
+            .start(addr, 1, 0)
             .expect("h1 start server");
 
         let client_handler = may::go!(move || {
@@ -464,7 +450,7 @@ mod tests {
         // Pick a port and start the server
         let addr = "127.0.0.1:8080";
         let server_handle = H1Server(EchoService)
-            .start(addr, 1, 0, None)
+            .start(addr, 1, 0)
             .expect("h1 start server");
 
         let client_handler = may::go!(move || {
