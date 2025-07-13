@@ -1,11 +1,9 @@
 use arc_swap::ArcSwap;
-#[cfg(feature = "sys-boring-ssl")]
-use once_cell::sync::Lazy;
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 
-pub(crate) static CURRENT_DATE: Lazy<Arc<ArcSwap<Arc<str>>>> = Lazy::new(|| {
+pub(crate) static CURRENT_DATE: once_cell::sync::Lazy<Arc<ArcSwap<Arc<str>>>> = once_cell::sync::Lazy::new(|| {
     let now = httpdate::HttpDate::from(std::time::SystemTime::now()).to_string();
     let swap = Arc::new(ArcSwap::from_pointee(Arc::from(now.into_boxed_str())));
 

@@ -50,7 +50,7 @@ foundationdb-sys = { version = "0.9.1", optional = true, default-features = fals
 
 
 [features]
-default = ["net-h1-server", "sys-boring-ssl"]
+default = []
 db-fdb = ["foundationdb-sys"]
 net-h1-server = [
     "arc-swap",
