@@ -1,5 +1,3 @@
-use crate::network::http::ratelimit::{RateLimiter, RateLimiterKind};
-
 use super::session::{self, Session};
 use bytes::{BufMut, BytesMut};
 use may::net::{TcpListener, TcpStream};
@@ -95,7 +93,7 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
         number_of_workers: usize,
         ssl: &super::util::SSL,
         stack_size: usize,
-        rate_limiter: Option<RateLimiterKind>,
+        rate_limiter: Option<super::ratelimit::RateLimiterKind>,
     ) -> io::Result<coroutine::JoinHandle<()>> {
         use std::net::Shutdown;
 
@@ -161,6 +159,7 @@ pub trait H1ServiceFactory: Send + Sized + 'static {
 
                 if let Some(rl) = &rate_limiter {
                     if !ip.is_unspecified() {
+                        use super::ratelimit::RateLimiter;
                         let result = rl.check(ip.to_string().into());
                         if !result.allowed {
                             let _ = stream.shutdown(Shutdown::Both);

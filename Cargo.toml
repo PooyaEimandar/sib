@@ -50,7 +50,7 @@ foundationdb-sys = { version = "0.9.1", optional = true, default-features = fals
 
 
 [features]
-default = []
+default = ["net-h1-server", "sys-boring-ssl"]
 db-fdb = ["foundationdb-sys"]
 net-h1-server = [
     "arc-swap",
@@ -81,7 +81,7 @@ sys-boring-ssl = ["boring"]
 [dev-dependencies]
 itoa = { version = "1.0.15", default-features = false }
 num_cpus = { version = "1.16" }
-rcgen = { version = "0.14.1" }
+rcgen = { version = "0.14.2" }
 reqwest = { version = "0.12.22", default-features = false, features = [
     "http3",
 ] }
