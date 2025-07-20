@@ -4,9 +4,8 @@
 - [x] FDB connection pool based on may
 - [x] Ratelimit
 - [x] gstreamer
-- [] file server
+- [x] Static file server
 - [] Kafka client
-- [] Static file server
 - [] Websocket server
 - [] Log with clickhouse
 - [] HTTP client pool

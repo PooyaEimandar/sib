@@ -23,6 +23,7 @@ where
     // stream to read body from
     stream: &'stream mut S,
 }
+
 impl<'buf, 'header, 'stream, S> Session<'buf, 'header, 'stream, S>
 where
     S: Read + Write,
@@ -142,6 +143,7 @@ where
         self
     }
 
+    #[inline]
     pub fn header_str(&mut self, name: &str, value: &str) -> std::io::Result<&mut Self> {
         if self.rsp_headers_len >= MAX_HEADERS {
             return Err(io::Error::new(
@@ -157,6 +159,7 @@ where
         Ok(self)
     }
 
+    #[inline]
     pub fn headers_str(&mut self, header_val: &[(&str, &str)]) -> std::io::Result<&mut Self> {
         for (name, value) in header_val {
             self.header_str(name, value)?;
@@ -164,6 +167,7 @@ where
         Ok(self)
     }
 
+    #[inline]
     pub fn header(&mut self, name: &HttpHeader, value: &str) -> std::io::Result<&mut Self> {
         if self.rsp_headers_len >= MAX_HEADERS {
             return Err(io::Error::new(
@@ -179,6 +183,7 @@ where
         Ok(self)
     }
 
+    #[inline]
     pub fn headers(&mut self, header_val: &[(HttpHeader, &str)]) -> std::io::Result<&mut Self> {
         for (name, value) in header_val {
             self.header(name, value)?;
@@ -186,12 +191,29 @@ where
         Ok(self)
     }
 
+    #[inline]
+    pub fn headers_vec(&mut self, header_val: &Vec<(HttpHeader, String)>) -> std::io::Result<&mut Self> {
+        for (name, value) in header_val {
+            self.header(name, value)?;
+        }
+        Ok(self)
+    }
+
+    #[inline]
     pub fn body(&mut self, body: &bytes::Bytes) -> &mut Self {
         self.rsp_buf.extend_from_slice(b"\r\n");
         self.rsp_buf.extend_from_slice(body);
         self
     }
 
+    #[inline]
+    pub fn body_slice(&mut self, body: &[u8]) -> &mut Self {
+        self.rsp_buf.extend_from_slice(b"\r\n");
+        self.rsp_buf.extend_from_slice(body);
+        self
+    }
+
+    #[inline]
     pub fn body_static(&mut self, body: &'static str) -> &mut Self {
         self.rsp_buf.extend_from_slice(b"\r\n");
         self.rsp_buf.extend_from_slice(body.as_bytes());
@@ -201,6 +223,8 @@ where
     #[inline]
     pub fn eom(&mut self) {
         // eom, end of message
+        #[cfg(debug_assertions)]
+        eprintln!("sent: {:?}", self.rsp_buf);
     }
 }
 
