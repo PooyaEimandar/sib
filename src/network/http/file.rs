@@ -339,36 +339,35 @@ pub fn load_file_cache(capacity: u64, ttl: Option<std::time::Duration>) -> FileC
     }
 }
 
-#[cfg(target_os = "linux")]
-fn read_file_uring_range(path: &str, offset: u64, len: usize) -> std::io::Result<Bytes> {
-    use io_uring::{IoUring, opcode, types};
-    use nix::sys::uio::IoVec;
-    use std::{fs::File, os::unix::io::AsRawFd};
+// #[cfg(target_os = "linux")]
+// fn read_file_uring_range(path: &str, offset: u64, len: usize) -> std::io::Result<Bytes> {
+//     use io_uring::{IoUring, opcode, types};
+//     use nix::sys::uio::IoVec;
+//     use std::{fs::File, os::unix::io::AsRawFd};
 
-    let file = File::open(path)?;
-    let fd = file.as_raw_fd();
-    let mut buf = vec![0u8; len];
-    let mut ring = IoUring::new(4)?;
+//     let file = File::open(path)?;
+//     let fd = file.as_raw_fd();
+//     let mut buf = vec![0u8; len];
+//     let mut ring = IoUring::new(4)?;
 
-    unsafe {
-        let iovec = [IoVec::from_mut_slice(&mut buf)];
-        let read_e = opcode::Readv::new(types::Fd(fd), iovec.as_ptr(), 1)
-            .offset(offset as i64)
-            .build()
-            .user_data(0x42);
+//     unsafe {
+//         let iovec = [IoVec::from_mut_slice(&mut buf)];
+//         let read_e = opcode::Readv::new(types::Fd(fd), iovec.as_ptr(), 1)
+//             .offset(offset as i64)
+//             .build()
+//             .user_data(0x42);
 
-        ring.submission().push(&read_e).unwrap();
-        ring.submit_and_wait(1)?;
+//         ring.submission().push(&read_e).unwrap();
+//         ring.submit_and_wait(1)?;
 
-        let cqe = ring.completion().next().unwrap();
-        if cqe.result() < 0 {
-            return Err(std::io::Error::from_raw_os_error(-cqe.result()));
-        }
-        buf.truncate(cqe.result() as usize);
-        Ok(Bytes::from(buf))
-    }
-}
-
+//         let cqe = ring.completion().next().unwrap();
+//         if cqe.result() < 0 {
+//             return Err(std::io::Error::from_raw_os_error(-cqe.result()));
+//         }
+//         buf.truncate(cqe.result() as usize);
+//         Ok(Bytes::from(buf))
+//     }
+// }
 
 fn respond_with_compressed<S: Session>(session: &mut S,
                                headers: &mut Vec<(HttpHeader, String)>,
