@@ -1,8 +1,8 @@
-use std::{fs::Metadata, io::{Read, Write}, ops::Range, path::PathBuf, time::SystemTime};
+use std::{fs::Metadata, io::Read, ops::Range, path::PathBuf, time::SystemTime};
 use bytes::{Bytes, BytesMut};
 use mime::Mime;
 use moka::sync::Cache;
-use crate::network::http::{session::Session, util::{HttpHeader, Status}};
+use crate::network::http::{util::{HttpHeader, Status}, session::Session};
 
 const MIN_BYTES_ON_THE_FLY_SIZE: u64 = 512;
 const MAX_BYTES_ON_THE_FLY_SIZE: u64 = 32 * 1024; // 32 KB
@@ -26,7 +26,6 @@ impl EncodingType {
     }
 }
 
-
 #[derive(Clone)]
 pub struct FileInfo {
     etag: String,
@@ -38,12 +37,13 @@ pub struct FileInfo {
 
 pub type FileCache = Cache<String, FileInfo>;
 
-pub fn serve<'buf, 'header, 'stream, S: Read + Write>(
-    session: &mut Session<'buf, 'header, 'stream, S>,
+pub fn serve<S: Session>(
+    session: &mut S,
     path: &str,
     file_cache: FileCache,
+    rsp_headers: &mut Vec<(HttpHeader, String)>,
     encoding_order: &[EncodingType],
-){
+) -> std::io::Result<()> {
     // canonicalise
     let canonical = match std::fs::canonicalize(path) {
         Ok(path) => path,
@@ -51,7 +51,8 @@ pub fn serve<'buf, 'header, 'stream, S: Read + Write>(
             eprintln!(
                 "File server failed to canonicalize path: {path}"
             );
-            return session.status_code(Status::NotFound).body_static("").eom();
+            session.status_code(Status::NotFound).headers_vec(rsp_headers)?.body_static("").eom();
+            return Ok(()); 
         }
     };
      // meta
@@ -60,7 +61,8 @@ pub fn serve<'buf, 'header, 'stream, S: Read + Write>(
         Ok(meta) => meta,
         Err(e) => {
             eprintln!("File server failed to get metadata for path: {}: {}", canonical.display(), e);
-            return session.status_code(Status::NotFound).body_static("").eom();
+            session.status_code(Status::NotFound).headers_vec(rsp_headers)?.body_static("").eom();
+            return Ok(()); 
         }
     };
 
@@ -72,7 +74,8 @@ pub fn serve<'buf, 'header, 'stream, S: Read + Write>(
         Ok(m) => m,
         Err(e) => {
             eprintln!("Failed to read modified time for: {}: {}", canonical.display(), e);
-            return session.status_code(Status::InternalServerError).body_static("").eom();
+            session.status_code(Status::InternalServerError).headers_vec(rsp_headers)?.body_static("").eom();
+            return Ok(()); 
         }
     };
 
@@ -92,21 +95,13 @@ pub fn serve<'buf, 'header, 'stream, S: Read + Write>(
     // check ‘If-None-Match’ header
     if let Ok(p_header_val) = session.req_header(&HttpHeader::IfNoneMatch) {
         if p_header_val == file_info.etag {
-            let headers = &[
-                (HttpHeader::Etag, file_info.etag.as_str()),
-                (
-                    HttpHeader::LastModified,
-                    &httpdate::HttpDate::from(file_info.modified).to_string(),
-                ),
-                (HttpHeader::ContentLength, "0"), // prevent keep-alive
-                (HttpHeader::Connection, "close"), // or keep-alive
-            ];
-            if let Ok(session) = session.status_code(Status::NotModified).headers(headers) {
-                session.body_static("").eom();
-            } else {
-                session.status_code(Status::InternalServerError).body_static("").eom();
-            }
-            return;
+            rsp_headers.extend([
+                (HttpHeader::ContentLength, "0".to_owned()),
+                (HttpHeader::Etag, file_info.etag),
+                (HttpHeader::LastModified, httpdate::HttpDate::from(file_info.modified).to_string()),
+            ]);
+            session.status_code(Status::NotModified).headers_vec(rsp_headers)?.body_static("").eom();
+            return Ok(()); 
         }
     }
 
@@ -129,10 +124,6 @@ pub fn serve<'buf, 'header, 'stream, S: Read + Write>(
         }
     };
 
-    let mut headers: Vec<(HttpHeader, String)> = vec![
-        (HttpHeader::Connection, "close".to_string()),
-    ];
-
     let mut meta_opt: Option<Metadata> = None;
     let mut file_path = file_info.path.clone();
     if file_info.size > MIN_BYTES_ON_THE_FLY_SIZE {
@@ -140,14 +131,16 @@ pub fn serve<'buf, 'header, 'stream, S: Read + Write>(
             Some(parent) => parent,
             None => {
                 eprintln!("File server failed to get parent directory for path: {}", file_info.path.display());
-                return session.status_code(Status::NotFound).body_static("").eom();
+                session.status_code(Status::NotFound).headers_vec(rsp_headers)?.body_static("").eom();
+                return Ok(()); 
             }
         };
         let file_name_osstr = match file_info.path.file_name() {
             Some(name) => name,
             None => {
                 eprintln!("File server failed to get file name for path: {}", file_info.path.display());
-                return session.status_code(Status::InternalServerError).body_static("").eom();
+                session.status_code(Status::InternalServerError).headers_vec(rsp_headers)?.body_static("").eom();
+                return Ok(()); 
             }
         };
 
@@ -155,7 +148,8 @@ pub fn serve<'buf, 'header, 'stream, S: Read + Write>(
             Some(name) => name,
             None => {
                 eprintln!("File server failed to convert file name to string for path: {}", file_info.path.display());
-                return session.status_code(Status::InternalServerError).body_static("").eom();
+                session.status_code(Status::InternalServerError).headers_vec(rsp_headers)?.body_static("").eom();
+                return Ok(()); 
             }
         };
 
@@ -164,7 +158,7 @@ pub fn serve<'buf, 'header, 'stream, S: Read + Write>(
                 let com_file = parent.join("gz").join(format!("{filename}.gz"));
                 let com_meta_res = std::fs::metadata(&com_file);
                 if let Ok(com_meta) = com_meta_res {
-                    headers.push((
+                    rsp_headers.push((
                         HttpHeader::ContentEncoding,
                         "gzip".to_string(),
                     ));
@@ -172,13 +166,14 @@ pub fn serve<'buf, 'header, 'stream, S: Read + Write>(
                 } else if file_info.size <= MAX_BYTES_ON_THE_FLY_SIZE {  
                     respond_with_compressed(
                         session,
+                        rsp_headers,
                         &file_info.path,
                         file_info.mime_type.as_ref(),
                         &file_info.etag,
          "gzip",
                         |b| encode_gzip(b, level),
                     );
-                    return;
+                    return Ok(()); 
                 } else {
                     (file_info.path.clone(), None)
                 }
@@ -187,7 +182,7 @@ pub fn serve<'buf, 'header, 'stream, S: Read + Write>(
                 let com_file = parent.join("br").join(format!("{filename}.br"));
                 let com_meta_res = std::fs::metadata(&com_file);
                 if let Ok(com_meta) = com_meta_res {
-                    headers.push((
+                    rsp_headers.push((
                         HttpHeader::ContentEncoding,
                         "br".to_string(),
                     ));
@@ -195,13 +190,14 @@ pub fn serve<'buf, 'header, 'stream, S: Read + Write>(
                 } else if file_info.size <= MAX_BYTES_ON_THE_FLY_SIZE {
                     respond_with_compressed(
                             session,
+                            rsp_headers,
                             &file_info.path,
                             file_info.mime_type.as_ref(),
                             &file_info.etag,
                             "br",
                             |b| encode_brotli(b, buffer_size, quality, lgwindow),
                         );
-                    return;
+                    return Ok(()); 
                 } else {
                     (file_info.path.clone(), None)
                 }
@@ -210,7 +206,7 @@ pub fn serve<'buf, 'header, 'stream, S: Read + Write>(
                 let com_file = parent.join("zstd").join(format!("{filename}.zstd"));
                 let com_meta_res = std::fs::metadata(&com_file);
                 if let Ok(com_meta) = com_meta_res {
-                    headers.push((
+                    rsp_headers.push((
                         HttpHeader::ContentEncoding,
                         "zstd".to_string(),
                     ));
@@ -218,13 +214,14 @@ pub fn serve<'buf, 'header, 'stream, S: Read + Write>(
                 } else if file_info.size <= MAX_BYTES_ON_THE_FLY_SIZE {
                     respond_with_compressed(
                         session,
+                        rsp_headers,
                         &file_info.path,
                         file_info.mime_type.as_ref(),
                         &file_info.etag,
                         "zstd",
                         |b| encode_zstd(b, level),
                     );
-                    return;
+                    return Ok(()); 
                 } else {
                     (file_info.path.clone(), None)
                 }
@@ -245,7 +242,7 @@ pub fn serve<'buf, 'header, 'stream, S: Read + Write>(
     .ok()
     .and_then(|h| parse_byte_range(h, total_size));
 
-    headers.extend([
+    rsp_headers.extend([
         (
             HttpHeader::ContentType,
             file_info.mime_type,
@@ -266,7 +263,7 @@ pub fn serve<'buf, 'header, 'stream, S: Read + Write>(
 
     let (status, start, end) = if let Some(r) = range {
         let content_length = r.end - r.start;
-        headers.extend([
+        rsp_headers.extend([
             (
                 HttpHeader::ContentRange,
                 format!("bytes {}-{}/{}", r.start, r.end - 1, total_size),
@@ -279,7 +276,7 @@ pub fn serve<'buf, 'header, 'stream, S: Read + Write>(
 
         (Status::PartialContent, r.start, r.end)
     } else {
-        headers.push((
+        rsp_headers.push((
             HttpHeader::ContentLength,
             total_size.to_string(),
         ));
@@ -287,47 +284,48 @@ pub fn serve<'buf, 'header, 'stream, S: Read + Write>(
     };
 
     if session.req_method() == Some("Head") {
-        match session.status_code(status).headers_vec(&headers) {
-            Ok(session) => {
-                session.body_static("").eom();
-                return;
-            }
-            Err(e) => {
-                eprintln!("Failed to write headers for HEAD request: {e}");
-                session.status_code(Status::InternalServerError).body_static("").eom();
-                return;
-            }
-        }
+        session.status_code(status).headers_vec(rsp_headers)?.body_static("").eom();
+        return Ok(());
     }
 
-    let mmap = match std::fs::File::open(&file_path) {
-        Ok(std_file) => match unsafe { memmap2::Mmap::map(&std_file) } {
-            Ok(mmap) => mmap,
+    // #[cfg(target_os = "linux")]
+    // {
+    //     match read_file_uring_range(file_path.to_str().unwrap(), start, (end - start) as usize) {
+    //         Ok(buf) => {
+    //             session.status_code(status)
+    //                 .headers_vec(&rsp_headers)?
+    //                 .body_slice(&buf)
+    //                 .eom();
+    //         }
+    //         Err(e) => {
+    //             eprintln!("io_uring read failed: {e}");
+    //             session.status_code(Status::InternalServerError)
+    //                 .headers_vec(&rsp_headers)?
+    //                 .body_static("")
+    //                 .eom();
+    //         }
+    //     }
+    // }
+    // #[cfg(not(target_os = "linux"))]
+    // {
+        let mmap = match std::fs::File::open(&file_path) {
+            Ok(std_file) => match unsafe { memmap2::Mmap::map(&std_file) } {
+                Ok(mmap) => mmap,
+                Err(e) => {
+                    eprintln!("Failed to memory-map file: {}: {}", file_path.display(), e);
+                    session.status_code(Status::InternalServerError).headers_vec(rsp_headers)?.body_static("").eom();
+                    return Ok(());
+                }
+            },
             Err(e) => {
-                eprintln!("Failed to memory-map file: {}: {}", file_path.display(), e);
-                session.status_code(Status::InternalServerError).body_static("").eom();
-                return;
+                eprintln!("Failed to open file: {}: {}", file_path.display(), e);
+                session.status_code(Status::InternalServerError).headers_vec(rsp_headers)?.body_static("").eom();
+                return Ok(());
             }
-        },
-        Err(e) => {
-            eprintln!("Failed to open file: {}: {}", file_path.display(), e);
-            session.status_code(Status::InternalServerError).body_static("").eom();
-            return;
-        }
-    };
-
-    let offset = start as usize;
-    let end = end as usize;
-
-    match session.status_code(status).headers_vec(&headers) {
-        Ok(session) => {
-            session.body_slice(&mmap[offset..end]).eom();
-        }
-        Err(e) => {
-            eprintln!("Failed to write final file server response: {e}");
-            session.status_code(Status::InternalServerError).body_static("").eom();
-        }
-    }
+        };
+        session.status_code(status).headers_vec(rsp_headers)?.body_slice(&mmap[start as usize..end as usize]).eom();
+    // }
+    Ok(())
 }
 
 pub fn load_file_cache(capacity: u64, ttl: Option<std::time::Duration>) -> FileCache {
@@ -341,7 +339,39 @@ pub fn load_file_cache(capacity: u64, ttl: Option<std::time::Duration>) -> FileC
     }
 }
 
-fn respond_with_compressed<S: Read + Write>(session: &mut Session<'_, '_, '_, S>,
+#[cfg(target_os = "linux")]
+fn read_file_uring_range(path: &str, offset: u64, len: usize) -> std::io::Result<Bytes> {
+    use io_uring::{IoUring, opcode, types};
+    use nix::sys::uio::IoVec;
+    use std::{fs::File, os::unix::io::AsRawFd};
+
+    let file = File::open(path)?;
+    let fd = file.as_raw_fd();
+    let mut buf = vec![0u8; len];
+    let mut ring = IoUring::new(4)?;
+
+    unsafe {
+        let iovec = [IoVec::from_mut_slice(&mut buf)];
+        let read_e = opcode::Readv::new(types::Fd(fd), iovec.as_ptr(), 1)
+            .offset(offset as i64)
+            .build()
+            .user_data(0x42);
+
+        ring.submission().push(&read_e).unwrap();
+        ring.submit_and_wait(1)?;
+
+        let cqe = ring.completion().next().unwrap();
+        if cqe.result() < 0 {
+            return Err(std::io::Error::from_raw_os_error(-cqe.result()));
+        }
+        buf.truncate(cqe.result() as usize);
+        Ok(Bytes::from(buf))
+    }
+}
+
+
+fn respond_with_compressed<S: Session>(session: &mut S,
+                               headers: &mut Vec<(HttpHeader, String)>,
                                file_path: &PathBuf,
                                mime_type: &str,
                                etag: &str,
@@ -349,17 +379,27 @@ fn respond_with_compressed<S: Read + Write>(session: &mut Session<'_, '_, '_, S>
                                compress_fn: impl Fn(Bytes) -> std::io::Result<Bytes>) {
     match get_file_buffer(file_path).and_then(compress_fn) {
         Ok(compressed) => {
-            let headers = &[
-                (HttpHeader::ContentEncoding, encoding_name),
-                (HttpHeader::ContentLength, &compressed.len().to_string()),
-                (HttpHeader::ContentType, mime_type),
-                (HttpHeader::Etag, etag),
-                (HttpHeader::ContentDisposition, "inline"),
-            ];
-            if let Ok(session) = session.status_code(Status::Ok).headers(headers) {
-                session.body(&compressed).eom();
-            } else {
-                session.status_code(Status::InternalServerError).body_static("").eom();
+            headers.extend(
+                [
+                    (HttpHeader::ContentEncoding, encoding_name.to_string()),
+                    (HttpHeader::ContentLength, compressed.len().to_string()),
+                    (HttpHeader::ContentType, mime_type.to_owned()),
+                    (HttpHeader::Etag, etag.to_owned()),
+                    (HttpHeader::ContentDisposition, "inline".to_owned()),
+                ]);
+            match session.status_code(Status::Ok).headers_vec(headers)
+            {
+                Ok(session) => {
+                    session.body(&compressed).eom();
+                }
+                Err(e) => 
+                {
+                    eprintln!(
+                        "Compression failed ({encoding_name}) while sending headers for {}: {e}",
+                        file_path.display()
+                    );
+                    session.status_code(Status::InternalServerError).body_static("").eom();
+                }
             }
         }
         Err(e) => {
@@ -367,7 +407,16 @@ fn respond_with_compressed<S: Read + Write>(session: &mut Session<'_, '_, '_, S>
                 "Compression failed ({encoding_name}) for {}: {e}",
                 file_path.display()
             );
-            session.status_code(Status::InternalServerError).body_static("").eom();
+            match session.status_code(Status::InternalServerError).headers_vec(headers)
+            {
+                Ok(session) => {
+                    session.body_static("").eom();
+                }
+                Err(_) => 
+                {
+                    session.status_code(Status::InternalServerError).body_static("").eom();
+                }
+            }
         }
     }
 }
@@ -488,10 +537,10 @@ mod tests {
     use moka::sync::Cache;
 
     use crate::network::http::{
-        file::{serve, EncodingType, FileInfo}, h1::{H1Service, H1ServiceFactory}, session::Session
+        file::{serve, EncodingType, FileInfo}, server::HFactory, session::{HService, Session}
     };
     use std::{
-        io::{Read, Write}, sync::OnceLock,
+        sync::OnceLock,
     };
 
     struct FileServer<T>(pub T);
@@ -507,9 +556,22 @@ mod tests {
         })
     }
 
-    impl H1Service for FileService {
-        fn call<S: Read + Write>(&mut self, session: &mut Session<S>) -> std::io::Result<()> {
-            serve(session,"/Users/pooyaeimandar/Desktop/k6.js", get_cache().clone(), 
+    impl HService for FileService {
+        fn call<S: Session>(&mut self, session: &mut S) -> std::io::Result<()> {
+            use crate::network::http::file::HttpHeader;
+
+            let mut rsp_headers: Vec<(HttpHeader, String)> = if session.is_h3()
+            {
+                Vec::new()
+            } else {
+                vec![
+                    (HttpHeader::Connection, "close".to_string()),
+                    (HttpHeader::AltSvc, "h3=\":8080\"; ma=86400".to_string()),
+                ]
+            };
+
+            serve(session,"/Users/pooyaeimandar/Desktop/k6.js", get_cache().clone(),
+            &mut rsp_headers,
             &[
                     EncodingType::Zstd { level: 3 },
                     EncodingType::Br {
@@ -520,12 +582,11 @@ mod tests {
                     EncodingType::Gzip { level: 4 },
                     EncodingType::None,
                 ]
-            );
-            Ok(())
+            )
         }
     }
 
-    impl H1ServiceFactory for FileServer<FileService> {
+    impl HFactory for FileServer<FileService> {
         type Service = FileService;
 
         fn service(&self, _id: usize) -> FileService {
@@ -533,33 +594,82 @@ mod tests {
         }
     }
 
+    fn create_self_signed_tls_pems() -> (String, String) {
+        use rcgen::{
+            CertificateParams, DistinguishedName, DnType, KeyPair, SanType, date_time_ymd,
+        };
+        let mut params: CertificateParams = Default::default();
+        params.not_before = rcgen::date_time_ymd(1975, 1, 1);
+        params.not_after = date_time_ymd(4096, 1, 1);
+        params.distinguished_name = DistinguishedName::new();
+        params
+            .distinguished_name
+            .push(DnType::OrganizationName, "Sib");
+        params.distinguished_name.push(DnType::CommonName, "Sib");
+        params.subject_alt_names = vec![SanType::DnsName("localhost".try_into().unwrap())];
+        let key_pair = KeyPair::generate().unwrap();
+        let cert = params.self_signed(&key_pair).unwrap();
+        (cert.pem(), key_pair.serialize_pem())
+    }
+
     #[test]
     fn file_server() {
-        // Print number of CPU cores
-        let cpus = num_cpus::get();
+        const STACK_SIZE: usize = 2 * 1024 * 1024;
+        const NUMBER_OF_WORKERS: usize = 1;
+        may::config()
+            .set_workers(NUMBER_OF_WORKERS)
+            .set_stack_size(STACK_SIZE);
+
         // Pick a port and start the server
         let addr = "0.0.0.0:8080";
-        let mut threads = Vec::with_capacity(cpus);
+        let mut threads = Vec::with_capacity(2);
 
-        for _ in 0..cpus {
-            let handle = std::thread::spawn(move || {
-                let id = std::thread::current().id();
-                println!("Listening {addr} on thread: {id:?}");
-                FileServer(FileService)
-                    .start(addr, cpus, 0)
-                    .unwrap_or_else(|_| panic!("file server failed to start for thread {id:?}"))
-                    .join()
-                    .unwrap_or_else(|_| panic!("file server failed to joining thread {id:?}"));
-            });
-            threads.push(handle);
-        }
+        // create self-signed TLS certificates
+        let certs = create_self_signed_tls_pems();
+        let cert_path = "/tmp/cert.pem";
+        let key_path = "/tmp/key.pem";
+
+        std::fs::write(cert_path, certs.0.clone()).unwrap();
+        std::fs::write(key_path, certs.1.clone()).unwrap();
+
+        let cert_pem = certs.0.clone();
+        let key_pem = certs.1.clone();
+
+        let h1_handle = std::thread::spawn(move || {
+
+            let id = std::thread::current().id();
+            let ssl = crate::network::http::util::SSL
+            {
+                cert_pem: cert_pem.as_bytes(),
+                key_pem: key_pem.as_bytes(),
+                chain_pem: None,
+                min_version: crate::network::http::util::SSLVersion::TLS1_2,
+                max_version: crate::network::http::util::SSLVersion::TLS1_3,
+                io_timeout: std::time::Duration::from_secs(10)
+            };
+            println!("Starting H1 server on {addr} with thread: {id:?}");
+            FileServer(FileService)
+                .start_h1_tls(addr, &ssl, STACK_SIZE, None)
+                .unwrap_or_else(|_| panic!("file server failed to start for thread {id:?}"))
+                .join()
+                .unwrap_or_else(|_| panic!("file server failed to joining thread {id:?}"));
+        });
+        threads.push(h1_handle);
+
+        let h3_handle = std::thread::spawn(move || {
+            let id = std::thread::current().id();
+            println!("Starting H3 server on {addr} with thread: {id:?}");
+            FileServer(FileService)
+                .start_h3_tls(addr, cert_path, key_path, STACK_SIZE)
+                .unwrap_or_else(|_| panic!("file server failed to start for thread {id:?}"));
+        });
+        threads.push(h3_handle);
 
         // Wait for all threads to complete (they won’t unless crashed)
         for handle in threads {
             handle.join().expect("Thread panicked");
         }
     }
-
 }
 
 

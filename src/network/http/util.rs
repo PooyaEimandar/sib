@@ -24,7 +24,6 @@ pub(crate) static CURRENT_DATE: once_cell::sync::Lazy<Arc<ArcSwap<Arc<str>>>> = 
     swap
 });
 
-
 #[cfg(feature = "sys-boring-ssl")]
 #[derive(Debug, Copy, Clone)]
 pub enum SSLVersion {
@@ -302,10 +301,11 @@ pub enum HttpHeader {
     XXssProtection,
 }
 
-impl fmt::Display for HttpHeader {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl HttpHeader {
+    pub fn as_str(&self) -> &'static str
+    {
         use HttpHeader::*;
-        let name = match self {
+        match self {
             Accept => "accept",
             AcceptCharset => "accept-charset",
             AcceptEncoding => "accept-encoding",
@@ -389,8 +389,13 @@ impl fmt::Display for HttpHeader {
             XDnsPrefetchControl => "x-dns-prefetch-control",
             XFrameOptions => "x-frame-options",
             XXssProtection => "x-xss-protection",
-        };
-        write!(f, "{name}")
+        }
+    }
+}
+
+impl fmt::Display for HttpHeader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
     }
 }
 

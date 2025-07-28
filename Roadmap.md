@@ -5,7 +5,6 @@
 - [x] Ratelimit
 - [x] gstreamer
 - [x] Static file server
-- [] Kafka client
+- [] io_uring
 - [] Websocket server
 - [] Log with clickhouse
-- [] HTTP client pool
