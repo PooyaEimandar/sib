@@ -179,6 +179,14 @@ impl Sender {
             .lock()
             .map_err(|e| std::io::Error::other(format!("could not lock gstreamer config: {e}")))?;
 
+        let video_src = if cfg!(target_os = "macos") {
+            "avfvideosrc capture-screen=true"
+        } else if cfg!(target_os = "windows") {
+            "d3d11screencapturesrc"
+        } else {
+            panic!("Unsupported platform");
+        };
+
         let pipeline_str = if cfg.codec == Codec::AV1 {
             let crf = match (cfg.width * cfg.height, cfg.bitrate) {
                 // ≤360p (e.g., 640×360 or less)
@@ -206,7 +214,7 @@ impl Sender {
             };
             // videotestsrc is-live=true
             format!(
-                "avfvideosrc capture-screen=true !video/x-raw,framerate={f}/1 ! videoscale ! video/x-raw,width={w},height={h} ! videoconvert ! \
+                "{video_src} capture-screen=true !video/x-raw,framerate={f}/1 ! videoscale ! video/x-raw,width={w},height={h} ! videoconvert ! \
                 svtav1enc name=encoder crf={crf} preset=12 target-socket=-1 intra-period-length=15 ! \
                 av1parse ! {sink}",
                 f = cfg.fps,
@@ -217,7 +225,7 @@ impl Sender {
         } else {
             // videotestsrc is-live=true
             format!(
-                "avfvideosrc capture-screen=true ! video/x-raw,framerate={f}/1 ! videoscale ! video/x-raw,width={w},height={h} ! videoconvert ! \
+                "{video_src} capture-screen=true ! video/x-raw,framerate={f}/1 ! videoscale ! video/x-raw,width={w},height={h} ! videoconvert ! \
                 x264enc name=encoder tune=zerolatency bitrate={b} speed-preset=ultrafast ! {sink}",
                 f = cfg.fps,
                 w = cfg.width,
