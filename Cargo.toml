@@ -1,6 +1,6 @@
 [package]
 name = "sib"
-version = "0.0.9"
+version = "0.0.10"
 authors = ["mail@pooya.ai"]
 description = "A high-performance, secure, and cross-platform modules optimized for efficiency, scalability, and reliability."
 documentation = "https://docs.rs/sib"
