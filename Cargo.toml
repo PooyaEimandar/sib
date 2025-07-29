@@ -26,7 +26,9 @@ cfg-if = { version = "1.0.1", default-features = false }
 crossbeam = { version = "0.8.4", optional = true, default-features = false, features = [
     "std",
 ] }
-dashmap = { version = "6.1.0", optional = true, default-features = false }
+dashmap = { version = "6.1.0", optional = true, default-features = false, features = [
+    "rayon",
+] }
 flate2 = { version = "1.1.2", optional = true, default-features = false, features = [
     "rust_backend",
 ] }
@@ -43,7 +45,6 @@ itoa = { version = "1.0.15", default-features = false }
 may = { version = "0.3.51", optional = true }
 mime = { version = "0.3.17", optional = true }
 mime_guess = { version = "2.0.5", optional = true }
-quick_cache = { version = "0.6.15", optional = true }
 memmap2 = { version = "0.9.7", optional = true, default-features = false }
 once_cell = { version = "1.21.3", optional = true, default-features = false, features = [
     "std",
@@ -71,7 +72,7 @@ default = [
     "sys-boring-ssl",
 ]
 db-fdb = ["foundationdb-sys", "may"]
-net-file-server = ["brotli", "flate2", "quick_cache", "memmap2", "zstd"]
+net-file-server = ["brotli", "flate2", "dashmap", "memmap2", "zstd"]
 net-h1-server = [
     "arc-swap",
     "bytes",
@@ -101,6 +102,7 @@ sys-boring-ssl = ["boring"]
 
 [dev-dependencies]
 num_cpus = { version = "1.16" }
+dashmap = { version = "6.1.0", default-features = false, features = ["rayon"] }
 rcgen = { version = "0.14.3" }
 reqwest = { version = "0.12.22", default-features = false, features = [
     "http3",

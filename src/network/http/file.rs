@@ -1,7 +1,7 @@
 use std::{fs::Metadata, io::Read, ops::Range, path::PathBuf, time::SystemTime};
 use bytes::{Bytes, BytesMut};
+use dashmap::DashMap;
 use mime::Mime;
-use quick_cache::sync::Cache;
 use crate::network::http::{util::{HttpHeader, Status}, session::Session};
 
 const MIN_BYTES_ON_THE_FLY_SIZE: u64 = 512;
@@ -35,7 +35,7 @@ pub struct FileInfo {
     modified: SystemTime,
 }
 
-pub type FileCache = Cache<String, FileInfo>;
+pub type FileCache = DashMap<String, FileInfo>;
 
 pub fn serve<S: Session>(
     session: &mut S,
@@ -329,7 +329,7 @@ pub fn serve<S: Session>(
 }
 
 pub fn load_file_cache(capacity: usize) -> FileCache {
-    Cache::new(capacity)
+    DashMap::with_capacity(capacity)
 }
 
 // #[cfg(target_os = "linux")]
@@ -526,11 +526,10 @@ fn encode_gzip<T: AsRef<[u8]>>(input: T, level: u32) -> std::io::Result<Bytes> {
 
 #[cfg(test)]
 mod tests {
-    use quick_cache::sync::Cache;
-
     use crate::network::http::{
         file::{serve, EncodingType, FileInfo}, server::HFactory, session::{HService, Session}
     };
+    use dashmap::DashMap;
     use std::{
         sync::OnceLock,
     };
@@ -539,10 +538,10 @@ mod tests {
 
     struct FileService;
 
-    static FILE_CACHE: OnceLock<Cache<String, FileInfo>> = OnceLock::new();
-    fn get_cache() -> &'static Cache<String, FileInfo> {
+    static FILE_CACHE: OnceLock<DashMap<String, FileInfo>> = OnceLock::new();
+    fn get_cache() -> &'static DashMap<String, FileInfo> {
         FILE_CACHE.get_or_init(|| {
-            Cache::new(100) // Set a reasonable cache size
+            DashMap::with_capacity(128)
         })
     }
 
