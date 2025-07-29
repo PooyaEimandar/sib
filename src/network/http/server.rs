@@ -308,7 +308,7 @@ pub trait HFactory: Send + Sized + 'static {
                                 }
                             },
                             _ = may::coroutine::sleep(timeout) => {
-                                eprintln!("timeout");
+                                //eprintln!("timeout");
                                 event = 2; // timeout
                             }
                         };

@@ -1,7 +1,7 @@
 use std::{fs::Metadata, io::Read, ops::Range, path::PathBuf, time::SystemTime};
 use bytes::{Bytes, BytesMut};
 use mime::Mime;
-use moka::sync::Cache;
+use quick_cache::sync::Cache;
 use crate::network::http::{util::{HttpHeader, Status}, session::Session};
 
 const MIN_BYTES_ON_THE_FLY_SIZE: u64 = 512;
@@ -40,7 +40,7 @@ pub type FileCache = Cache<String, FileInfo>;
 pub fn serve<S: Session>(
     session: &mut S,
     path: &str,
-    file_cache: FileCache,
+    file_cache: &FileCache,
     rsp_headers: &mut Vec<(HttpHeader, String)>,
     encoding_order: &[EncodingType],
 ) -> std::io::Result<()> {
@@ -85,11 +85,11 @@ pub fn serve<S: Session>(
             info.clone()
         } else {
             // outdated cache entry, fall through to regeneration
-            generate_file_info(&key, canonical, &meta, modified, &file_cache)
+            generate_file_info(&key, canonical, &meta, modified, file_cache)
         }
     } else {
         // cache miss, generate and insert
-        generate_file_info(&key, canonical, &meta, modified, &file_cache)
+        generate_file_info(&key, canonical, &meta, modified, file_cache)
     };
 
     // check ‘If-None-Match’ header
@@ -328,15 +328,8 @@ pub fn serve<S: Session>(
     Ok(())
 }
 
-pub fn load_file_cache(capacity: u64, ttl: Option<std::time::Duration>) -> FileCache {
-    if let Some(ttl_time) = ttl {
-        Cache::builder()
-            .max_capacity(capacity)
-            .time_to_live(ttl_time)
-            .build()
-    } else {
-        Cache::builder().max_capacity(capacity).build()
-    }
+pub fn load_file_cache(capacity: usize) -> FileCache {
+    Cache::new(capacity)
 }
 
 // #[cfg(target_os = "linux")]
@@ -533,7 +526,7 @@ fn encode_gzip<T: AsRef<[u8]>>(input: T, level: u32) -> std::io::Result<Bytes> {
 
 #[cfg(test)]
 mod tests {
-    use moka::sync::Cache;
+    use quick_cache::sync::Cache;
 
     use crate::network::http::{
         file::{serve, EncodingType, FileInfo}, server::HFactory, session::{HService, Session}
@@ -549,9 +542,7 @@ mod tests {
     static FILE_CACHE: OnceLock<Cache<String, FileInfo>> = OnceLock::new();
     fn get_cache() -> &'static Cache<String, FileInfo> {
         FILE_CACHE.get_or_init(|| {
-            Cache::builder()
-                .max_capacity(128)
-                .build()
+            Cache::new(100) // Set a reasonable cache size
         })
     }
 
@@ -569,7 +560,7 @@ mod tests {
                 ]
             };
 
-            serve(session,"/Users/pooyaeimandar/Desktop/k6.js", get_cache().clone(),
+            serve(session,"/Users/pooyaeimandar/Desktop/k6.js", get_cache(),
             &mut rsp_headers,
             &[
                     EncodingType::Zstd { level: 3 },
