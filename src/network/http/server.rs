@@ -200,11 +200,11 @@ pub trait HFactory: Send + Sized + 'static {
     }
 
     #[cfg(feature = "net-h3-server")]
-    fn start_h3_tls(
+    fn start_h3_tls<L: ToSocketAddrs>(
         self,
-        addr: &'static str,
-        cert_pem_file_path: &'static str,
-        key_pem_file_path: &'static str,
+        addr: L,
+        cert_pem_file_path: &str,
+        key_pem_file_path: &str,
         stack_size: usize,
     ) -> std::io::Result<()>
     {
