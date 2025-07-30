@@ -214,7 +214,7 @@ impl Sender {
             };
             // videotestsrc is-live=true
             format!(
-                "{video_src} capture-screen=true !video/x-raw,framerate={f}/1 ! videoscale ! video/x-raw,width={w},height={h} ! videoconvert ! \
+                "{video_src} !video/x-raw,framerate={f}/1 ! videoscale ! video/x-raw,width={w},height={h} ! videoconvert ! \
                 svtav1enc name=encoder crf={crf} preset=12 target-socket=-1 intra-period-length=15 ! \
                 av1parse ! {sink}",
                 f = cfg.fps,
@@ -225,7 +225,7 @@ impl Sender {
         } else {
             // videotestsrc is-live=true
             format!(
-                "{video_src} capture-screen=true ! video/x-raw,framerate={f}/1 ! videoscale ! video/x-raw,width={w},height={h} ! videoconvert ! \
+                "{video_src} ! video/x-raw,framerate={f}/1 ! videoscale ! video/x-raw,width={w},height={h} ! videoconvert ! \
                 x264enc name=encoder tune=zerolatency bitrate={b} speed-preset=ultrafast ! {sink}",
                 f = cfg.fps,
                 w = cfg.width,

@@ -65,12 +65,7 @@ foundationdb-sys = { version = "0.9.1", optional = true, default-features = fals
 # nix = { version = "0.30.1", optional = true }
 
 [features]
-default = [
-    "net-h1-server",
-    "net-h3-server",
-    "net-file-server",
-    "sys-boring-ssl",
-]
+default = []
 db-fdb = ["foundationdb-sys", "may"]
 net-file-server = ["brotli", "flate2", "dashmap", "memmap2", "zstd"]
 net-h1-server = [
