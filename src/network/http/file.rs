@@ -494,7 +494,7 @@ fn choose_encoding(
     EncodingType::None
 }
 
-fn encode_brotli<T: AsRef<[u8]>>(
+pub fn encode_brotli<T: AsRef<[u8]>>(
     input: T,
     buffer_size: usize,
     q: u32,
@@ -507,13 +507,13 @@ fn encode_brotli<T: AsRef<[u8]>>(
     Ok(Bytes::from(out))
 }
 
-fn encode_zstd<T: AsRef<[u8]>>(input: T, level: i32) -> std::io::Result<Bytes> {
+pub fn encode_zstd<T: AsRef<[u8]>>(input: T, level: i32) -> std::io::Result<Bytes> {
     let mut out = vec![];
     zstd::stream::copy_encode(std::io::Cursor::new(input.as_ref()), &mut out, level)?;
     Ok(Bytes::from(out))
 }
 
-fn encode_gzip<T: AsRef<[u8]>>(input: T, level: u32) -> std::io::Result<Bytes> {
+pub fn encode_gzip<T: AsRef<[u8]>>(input: T, level: u32) -> std::io::Result<Bytes> {
     use flate2::Compression;
     use flate2::write::GzEncoder;
 
