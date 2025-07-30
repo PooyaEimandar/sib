@@ -87,15 +87,17 @@ where
             return Ok(&[]);
         }
 
-        if self.req_buf.remaining_mut() < content_length {
-            self.req_buf.reserve(content_length);
+        if self.req_buf.len() >= content_length {
+            // already buffered enough
+            return Ok(&self.req_buf[..content_length]);
         }
 
-        let mut read = 0;
+        self.req_buf.reserve(content_length - self.req_buf.len());
+
+        let mut read = self.req_buf.len();
         let deadline = std::time::Instant::now() + timeout;
 
         while read < content_length {
-            // Check timeout
             if std::time::Instant::now() > deadline {
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
@@ -103,9 +105,17 @@ where
                 ));
             }
 
-            let chunk = self.req_buf.chunk_mut();
-            let to_read = chunk.len().min(content_length - read);
-            let buf = unsafe { std::slice::from_raw_parts_mut(chunk.as_mut_ptr(), to_read) };
+            let spare = self.req_buf.spare_capacity_mut();
+            let to_read = spare.len().min(content_length - read);
+
+            if to_read == 0 {
+                may::coroutine::yield_now();
+                continue;
+            }
+
+            let buf = unsafe {
+                std::slice::from_raw_parts_mut(spare.as_mut_ptr() as *mut u8, to_read)
+            };
 
             match self.stream.read(buf) {
                 Ok(0) => {
