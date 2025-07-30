@@ -603,11 +603,9 @@ mod tests {
 
     #[test]
     fn file_server() {
-        const STACK_SIZE: usize = 2 * 1024 * 1024;
         const NUMBER_OF_WORKERS: usize = 1;
-        may::config()
-            .set_workers(NUMBER_OF_WORKERS)
-            .set_stack_size(STACK_SIZE);
+        const STACK_SIZE: usize = 2 * 1024 * 1024;
+        crate::init(NUMBER_OF_WORKERS, STACK_SIZE);
 
         // Pick a port and start the server
         let addr = "0.0.0.0:8080";

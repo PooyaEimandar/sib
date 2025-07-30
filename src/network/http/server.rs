@@ -1105,8 +1105,7 @@ mod tests {
     #[test]
     fn test_h1_gracefull_shutdown() {
         const NUMBER_OF_WORKERS: usize = 1;
-        may::config()
-            .set_workers(NUMBER_OF_WORKERS);
+        crate::init(NUMBER_OF_WORKERS, 2 * 1024 * 1024);
 
         let addr = "127.0.0.1:8080";
         let server_handle = EchoServer
@@ -1124,8 +1123,7 @@ mod tests {
     #[test]
     fn test_h1_server_response() {
         const NUMBER_OF_WORKERS: usize = 1;
-        may::config()
-            .set_workers(NUMBER_OF_WORKERS);
+        crate::init(NUMBER_OF_WORKERS, 2 * 1024 * 1024);
 
         // Pick a port and start the server
         let addr = "127.0.0.1:8080";
@@ -1159,8 +1157,7 @@ mod tests {
     #[test]
     fn test_tls_h1_gracefull_shutdown() {
         const NUMBER_OF_WORKERS: usize = 1;
-        may::config()
-            .set_workers(NUMBER_OF_WORKERS);
+        crate::init(NUMBER_OF_WORKERS, 2 * 1024 * 1024);
 
         let (cert_pem, key_pem) = create_self_signed_tls_pems();
         let ssl = crate::network::http::util::SSL
@@ -1202,8 +1199,7 @@ mod tests {
     #[tokio::test]
     async fn test_quiche_server_response() -> Result<(), Box<dyn std::error::Error>> {
         const NUMBER_OF_WORKERS: usize = 1;
-        may::config()
-            .set_workers(NUMBER_OF_WORKERS);
+        crate::init(NUMBER_OF_WORKERS, 2 * 1024 * 1024);
         
         // create self-signed TLS certificates
         let certs = create_self_signed_tls_pems();
