@@ -579,17 +579,7 @@ pub trait HFactory: Send + Sized + 'static {
                                 match http3_conn.poll(&mut session.conn) {
                                     Ok((stream_id, quiche::h3::Event::Headers { list, .. })) => {
                                         session.req_headers = Some(list);
-
-                                        match stream_id.try_into() {
-                                            Ok(id) => {
-                                                let mut service = self.service(id);
-                                                handle_h3_request(stream_id, session, &mut service);
-                                            },
-                                            Err(_) => {
-                                                eprintln!("{} invalid stream id {}", session.conn.trace_id(), stream_id);
-                                                return;
-                                            }
-                                        };
+                                        session.current_stream_id = Some(stream_id);
                                     }
                                     Ok((stream_id, quiche::h3::Event::Data)) => {
                                         eprintln!(
@@ -597,8 +587,47 @@ pub trait HFactory: Send + Sized + 'static {
                                             session.conn.trace_id(),
                                             stream_id
                                         );
+                                        let http3_conn = match session.http3_conn.as_mut() {
+                                            Some(c) => c,
+                                            None => {
+                                                eprintln!(
+                                                    "{} HTTP/3 connection is not initialized",
+                                                    session.conn.trace_id()
+                                                );
+                                                return;
+                                            }
+                                        };
+
+                                        let mut buf = [0u8; 4096];
+                                        loop {
+                                            match http3_conn.recv_body(&mut session.conn, stream_id, &mut buf) {
+                                                Ok(read) => {
+                                                    let body = session.req_body_map.entry(stream_id).or_default();
+                                                    body.extend_from_slice(&buf[..read]);
+                                                }
+                                                Err(quiche::h3::Error::Done) => break,
+                                                Err(e) => {
+                                                    eprintln!("recv_body failed: {:?}", e);
+                                                    break;
+                                                }
+                                            }
+                                        }
                                     }
-                                    Ok((_stream_id, quiche::h3::Event::Finished)) => (),
+                                    Ok((stream_id, quiche::h3::Event::Finished)) => {
+                                        if session.current_stream_id == Some(stream_id) {
+                                            match stream_id.try_into() {
+                                                Ok(id) => {
+                                                    let mut service = self.service(id);
+                                                    handle_h3_request(stream_id, session, &mut service);
+                                                },
+                                                Err(_) => {
+                                                    eprintln!("Invalid stream id: {}", stream_id);
+                                                }
+                                            };
+                                            session.current_stream_id = None;
+                                        }
+                                        session.req_body_map.remove(&stream_id);
+                                    }
                                     Ok((_stream_id, quiche::h3::Event::Reset { .. })) => (),
                                     Ok((
                                         _prioritized_element_id,
@@ -1214,7 +1243,7 @@ mod tests {
         });
 
         // Wait for the server to be ready
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        std::thread::sleep(std::time::Duration::from_millis(300000));
 
         let client = reqwest::Client::builder()
             .http3_prior_knowledge()

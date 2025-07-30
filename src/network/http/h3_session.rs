@@ -14,6 +14,8 @@ pub(crate) struct H3Session {
     pub conn: quiche::Connection,
     pub http3_conn: Option<quiche::h3::Connection>,
     pub req_headers: Option<Vec<quiche::h3::Header>>,
+    pub req_body_map: HashMap<u64, Vec<u8>>,
+    pub current_stream_id: Option<u64>,
     pub rsp_headers: Vec<quiche::h3::Header>,
     pub rsp_body: Vec<u8>,
     pub partial_responses: HashMap<u64, PartialResponse>,
@@ -92,12 +94,17 @@ impl Session for H3Session {
                 .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "Header not found"))
         }
         else {
-            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "No request headers available"))
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "No h3 request headers available"))
         }
     }
 
     fn req_body(&mut self, _timeout: Duration) -> std::io::Result<&[u8]> {
-        Ok(&[0u8; 0]) 
+        if let Some(id) = self.current_stream_id {
+            if let Some(body) = self.req_body_map.get(&id) {
+                return Ok(body);
+            }
+        }
+        Err(std::io::Error::new(std::io::ErrorKind::NotFound, "No h3 request body available"))
     }
 
     fn status_code(&mut self, status: Status) -> &mut Self {
@@ -169,6 +176,8 @@ pub(crate) fn new_session(peer_addr: SocketAddr, conn: quiche::Connection) -> H3
         conn,
         http3_conn: None,
         req_headers: None,
+        req_body_map: HashMap::new(),
+        current_stream_id: None,
         rsp_headers,
         rsp_body: Vec::new(),
         partial_responses: HashMap::new(),
