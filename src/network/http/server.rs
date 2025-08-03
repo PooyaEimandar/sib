@@ -607,7 +607,7 @@ pub trait HFactory: Send + Sized + 'static {
                                                 }
                                                 Err(quiche::h3::Error::Done) => break,
                                                 Err(e) => {
-                                                    eprintln!("recv_body failed: {:?}", e);
+                                                    eprintln!("recv_body failed: {e:?}");
                                                     break;
                                                 }
                                             }
@@ -621,7 +621,7 @@ pub trait HFactory: Send + Sized + 'static {
                                                     handle_h3_request(stream_id, session, &mut service);
                                                 },
                                                 Err(_) => {
-                                                    eprintln!("Invalid stream id: {}", stream_id);
+                                                    eprintln!("Invalid stream id: {stream_id}");
                                                 }
                                             };
                                             session.current_stream_id = None;
