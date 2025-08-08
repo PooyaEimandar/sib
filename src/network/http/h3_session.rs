@@ -114,7 +114,14 @@ impl Session for H3Session {
     }
 
     fn header_str(&mut self, name: &str, value: &str) -> std::io::Result<&mut Self> {
-        self.rsp_headers.push(Header::new(name.as_bytes(), value.as_bytes()));
+        let name_bytes = name.as_bytes();
+        let value_bytes = value.as_bytes();
+
+        // If a header with the same name exists, remove it
+        if let Some(pos) = self.rsp_headers.iter().position(|h| h.name() == name_bytes) {
+            self.rsp_headers.remove(pos);
+        }
+        self.rsp_headers.push(Header::new(name_bytes, value_bytes));
         Ok(self)
     }
 
@@ -144,17 +151,20 @@ impl Session for H3Session {
     }
 
     fn body(&mut self, data: &Bytes) -> &mut Self {
-        self.rsp_body = data.to_vec();
+        self.rsp_body.clear();
+        self.rsp_body.extend_from_slice(data);
         self
     }
 
     fn body_slice(&mut self, body: &[u8]) -> &mut Self {
-        self.rsp_body = body.to_vec();
+        self.rsp_body.clear();
+        self.rsp_body.extend_from_slice(body);
         self
     }
 
     fn body_static(&mut self, body: &'static str) -> &mut Self {
-        self.rsp_body = body.as_bytes().to_vec();
+        self.rsp_body.clear();
+        self.rsp_body.extend_from_slice(body.as_bytes());
         self
     }
 
@@ -164,6 +174,7 @@ impl Session for H3Session {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn new_session(peer_addr: SocketAddr, conn: quiche::Connection) -> H3Session {
     const SERVER_NAME: &str =
             concat!("Sib ", env!("SIB_BUILD_VERSION"));
