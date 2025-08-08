@@ -230,10 +230,15 @@ pub fn serve<S: Session>(
         };
     }
 
-    let meta = if let Some(meta) = meta_opt {
-        meta
-    } else {
-        std::fs::metadata(&file_path).unwrap()
+    let meta = if let Some(m) = meta_opt { m } else {
+        match std::fs::metadata(&file_path) {
+            Ok(m) => m,
+            Err(err) => {
+                eprintln!("Failed to stat {}: {err}", file_path.display());
+                session.status_code(Status::InternalServerError).headers_vec(rsp_headers)?.body_static("").eom();
+                return Ok(())
+            }
+        }
     };
     let total_size = meta.len();
 
@@ -283,7 +288,7 @@ pub fn serve<S: Session>(
         (Status::Ok, 0, total_size)
     };
 
-    if session.req_method() == Some("Head") {
+    if session.req_method() == Some("HEAD") {
         session.status_code(status).headers_vec(rsp_headers)?.body_static("").eom();
         return Ok(());
     }
