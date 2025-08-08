@@ -617,8 +617,12 @@ pub trait HFactory: Send + Sized + 'static {
                                         if session.current_stream_id == Some(stream_id) {
                                             match stream_id.try_into() {
                                                 Ok(id) => {
+                                                    //let sess_ptr = session as *mut H3Session; 
+                                                    //let sess = unsafe { &mut *sess_ptr };
                                                     let mut service = self.service(id);
-                                                    handle_h3_request(stream_id, session, &mut service);
+                                                    //may::go!(move || {
+                                                        handle_h3_request(stream_id, session, &mut service);
+                                                    //});
                                                 },
                                                 Err(_) => {
                                                     eprintln!("Invalid stream id: {stream_id}");
@@ -919,10 +923,6 @@ fn handle_h3_request<T: HService>(stream_id: u64, session: &mut super::h3_sessio
 
         session.partial_responses.insert(stream_id, response);
     }
-
-
-    println!("headers are {:?}", session.rsp_headers);
-    println!("body is {:?}", session.rsp_body);
     
 }
 

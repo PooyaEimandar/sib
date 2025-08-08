@@ -169,8 +169,11 @@ impl Session for H3Session {
     }
 
     fn eom(&mut self) {
-        // #[cfg(debug_assertions)]
-        // eprintln!("sent: {:?}", self);
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("h3 headers are {:?}", self.rsp_headers);
+            eprintln!("h3 body is {:?}", self.rsp_body);
+        }
     }
 }
 
