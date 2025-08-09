@@ -123,13 +123,16 @@ pub trait HFactory: Send + Sized + 'static {
         tls_builder.set_max_proto_version(ssl.max_version.to_boring())?;
         tls_builder.set_alpn_protos(b"\x08http/1.1")?;
 
-        // tls_builder.set_servername_callback(|ssl_ref, _| {
-        //     if ssl_ref.servername(boring::ssl::NameType::HOST_NAME).is_none() {
-        //         eprintln!("SNI not provided, rejecting connection");
-        //         return Err(boring::ssl::SniError::ALERT_FATAL);
-        //     }
-        //     Ok(())
-        // });
+        #[cfg(not(debug_assertions))]
+        {
+            tls_builder.set_servername_callback(|ssl_ref, _| {
+                if ssl_ref.servername(boring::ssl::NameType::HOST_NAME).is_none() {
+                    eprintln!("SNI not provided, rejecting connection");
+                    return Err(boring::ssl::SniError::ALERT_FATAL);
+                }
+                Ok(())
+            });
+        }
 
         let stacksize = if stack_size > 0 {
             stack_size
@@ -343,7 +346,6 @@ where
     let blocked = read(stream, req_buf)?;
     loop {
         // create a new session
-
         use crate::network::http::h1_session;
         let mut headers = [MaybeUninit::uninit(); h1_session::MAX_HEADERS];
         let mut sess =
@@ -356,6 +358,9 @@ where
             if e.kind() == std::io::ErrorKind::ConnectionAborted {
                 return Err(e);
             }
+        }
+        else {
+            break;
         }
     }
     // send the response back to client
@@ -1021,7 +1026,7 @@ mod tests {
     use crate::network::http::{
         server::{HFactory, HService},
         session::Session,
-        util::Status,
+        util::{Status, SSLVersion},
     };
     use may::net::TcpStream;
     use std::{
@@ -1079,6 +1084,7 @@ mod tests {
         (cert.pem(), key_pair.serialize_pem())
     }
 
+    #[cfg(feature = "net-h1-server")]
     #[test]
     fn test_h1_gracefull_shutdown() {
         const NUMBER_OF_WORKERS: usize = 1;
@@ -1095,8 +1101,9 @@ mod tests {
         client_handler.join().expect("client handler failed");
     }
 
+    #[cfg(feature = "net-h1-server")]
     #[test]
-    fn test_h1_server_response() {
+    fn test_h1_server_get_response() {
         const NUMBER_OF_WORKERS: usize = 1;
         crate::init(NUMBER_OF_WORKERS, 2 * 1024 * 1024);
 
@@ -1118,7 +1125,7 @@ mod tests {
             let response = std::str::from_utf8(&buf[..n]).unwrap();
 
             assert!(response.contains("/test"));
-            print!("Response: {response}");
+            eprintln!("\r\nH1 GET Response: {response}");
         });
 
         may::join!(server_handle, client_handler);
@@ -1126,7 +1133,45 @@ mod tests {
         std::thread::sleep(Duration::from_secs(2));
     }
 
-    #[cfg(feature = "sys-boring-ssl")]
+    #[cfg(feature = "net-h1-server")]
+    #[test]
+    fn test_h1_server_post_response() {
+        const NUMBER_OF_WORKERS: usize = 1;
+        crate::init(NUMBER_OF_WORKERS, 2 * 1024 * 1024);
+
+        let addr = "127.0.0.1:8080";
+        let server_handle = EchoServer.start_h1(addr, 0).expect("h1 start server");
+
+        let client_handler = may::go!(move || {
+            use std::io::{Read, Write};
+            may::coroutine::sleep(Duration::from_millis(100));
+
+            let mut stream = TcpStream::connect(addr).expect("connect");
+
+            let body = b"hello=world";
+            let req = format!(
+                "POST /submit HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            );
+
+            stream.write_all(req.as_bytes()).unwrap();
+            stream.write_all(body).unwrap();
+
+            let mut buf = [0u8; 1024];
+            let n = stream.read(&mut buf).unwrap();
+            let response = std::str::from_utf8(&buf[..n]).unwrap();
+
+            // Should include method, path, and echoed body contents
+            assert!(response.contains("POST"));
+            assert!(response.contains("/submit"));
+            eprintln!("\r\nH1 POST Response: {response}");
+        });
+
+        may::join!(server_handle, client_handler);
+        std::thread::sleep(Duration::from_secs(2));
+    }
+
+    #[cfg(all(feature = "sys-boring-ssl", feature = "net-h1-server"))]
     #[test]
     fn test_tls_h1_gracefull_shutdown() {
         const NUMBER_OF_WORKERS: usize = 1;
@@ -1137,8 +1182,8 @@ mod tests {
             cert_pem: cert_pem.as_bytes(),
             key_pem: key_pem.as_bytes(),
             chain_pem: None,
-            min_version: crate::network::http::util::SSLVersion::TLS1_2,
-            max_version: crate::network::http::util::SSLVersion::TLS1_3,
+            min_version: SSLVersion::TLS1_2,
+            max_version: SSLVersion::TLS1_3,
             io_timeout: std::time::Duration::from_secs(10),
         };
         let addr = "127.0.0.1:8080";
@@ -1154,20 +1199,32 @@ mod tests {
         client_handler.join().expect("client handler failed");
     }
 
-    // #[test]
-    // fn test_tls_h1_server_response() {
-    //     let (cert_pem, key_pem) = create_self_signed_tls_pems();
-    //     // Pick a port and start the server
-    //     let addr = "127.0.0.1:8080";
-    //     let server_handle = H1Server(EchoService)
-    //         .start_tls(addr, cert_pem.as_bytes(), key_pem.as_bytes())
-    //         .expect("h1 start server");
+    #[cfg(all(feature = "sys-boring-ssl", feature = "net-h1-server"))]
+    #[test]
+    fn test_tls_h1_server_response() {
+        const NUMBER_OF_WORKERS: usize = 1;
+        crate::init(NUMBER_OF_WORKERS, 2 * 1024 * 1024);
+        let (cert_pem, key_pem) = create_self_signed_tls_pems();
+        let ssl = crate::network::http::util::SSL {
+            cert_pem: cert_pem.as_bytes(),
+            key_pem: key_pem.as_bytes(),
+            chain_pem: None,
+            min_version: SSLVersion::TLS1_2,
+            max_version: SSLVersion::TLS1_3,
+            io_timeout: std::time::Duration::from_secs(10),
+        };
+        // Pick a port and start the server
+        let addr = "127.0.0.1:8080";
+        let server_handle = EchoServer
+            .start_h1_tls(addr, &ssl, 0, None)
+            .expect("h1 start server");
 
-    //     may::join!(server_handle);
+        may::join!(server_handle);
 
-    //     std::thread::sleep(Duration::from_secs(200));
-    // }
+        std::thread::sleep(Duration::from_secs(3));
+    }
 
+    #[cfg(feature = "net-h3-server")]
     #[tokio::test]
     async fn test_quiche_server_response() -> Result<(), Box<dyn std::error::Error>> {
         const NUMBER_OF_WORKERS: usize = 1;
