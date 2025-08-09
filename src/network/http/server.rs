@@ -441,7 +441,7 @@ fn serve<T: HService>(stream: &mut TcpStream, mut service: T) -> io::Result<()> 
 type ConnKey = [u8; quiche::MAX_CONN_ID_LEN];
 
 #[cfg(feature = "net-h3-server")]
-enum CtrlMsg {
+enum H3CtrlMsg {
     BindAddr(std::net::SocketAddr, may::sync::mpsc::Sender<Datagram>),
     UnbindAddr(std::net::SocketAddr),
 }
@@ -687,26 +687,29 @@ fn quic_dispatcher<S, F>(
     let mut by_addr: HashMap<SocketAddr, WorkerTx> = HashMap::new();
 
     // control channel
-    let (ctrl_tx, ctrl_rx) = may::sync::mpsc::channel::<CtrlMsg>();
+    let (ctrl_tx, ctrl_rx) = may::sync::mpsc::channel::<H3CtrlMsg>();
 
+    // allocate a big buffer
+    let mut buf = BytesMut::with_capacity(65535);
+    buf.resize(65535, 0);
+
+    // allocate out buffer
     let mut out = [0u8; MAX_DATAGRAM_SIZE];
 
     loop {
-        // 1) opportunistically drain control messages (non-blocking)
+        // drain control messages
         while let Ok(msg) = ctrl_rx.try_recv() {
             match msg {
-                CtrlMsg::BindAddr(addr, tx) => {
+                H3CtrlMsg::BindAddr(addr, tx) => {
                     by_addr.insert(addr, tx);
                 }
-                CtrlMsg::UnbindAddr(addr) => {
+                H3CtrlMsg::UnbindAddr(addr) => {
                     by_addr.remove(&addr);
                 }
             }
         }
 
-        // 2) read a UDP datagram
-        let mut buf = BytesMut::with_capacity(65535);
-        buf.resize(65535, 0);
+        // read a UDP datagram
         let (n, from) = match socket.recv_from(&mut buf) {
             Ok(v) => v,
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -720,7 +723,7 @@ fn quic_dispatcher<S, F>(
         };
         buf.truncate(n);
 
-        // 3) parse QUIC header (we need DCID to route)
+        // parse QUIC header
         let hdr = match quiche::Header::from_slice(&mut buf, quiche::MAX_CONN_ID_LEN) {
             Ok(h) => h,
             Err(e) => {
@@ -731,7 +734,7 @@ fn quic_dispatcher<S, F>(
 
         let dcid_key = key_from_cid(&hdr.dcid);
 
-        // 4) fast path: known DCID → route to worker
+        // fast path: known DCID → route to worker
         if let Some(tx) = by_cid.get(&dcid_key) {
             let _ = tx.send(Datagram {
                 buf: buf.to_vec(),
@@ -741,7 +744,7 @@ fn quic_dispatcher<S, F>(
             continue;
         }
 
-        // 5) fallback path: known address → route and learn new DCID
+        // fallback path: known address → route and learn new DCID
         if let Some(tx) = by_addr.get(&from) {
             let _ = tx.send(Datagram {
                 buf: buf.to_vec(),
@@ -753,7 +756,7 @@ fn quic_dispatcher<S, F>(
             continue;
         }
 
-        // 6) new connection handling
+        // new connection handling
         if hdr.ty != quiche::Type::Initial {
             // version negotiation if needed
             if !quiche::version_is_supported(hdr.version) {
@@ -851,7 +854,7 @@ fn handle_quic_connection<S: HService + 'static>(
     from: SocketAddr,
     rx: may::sync::mpsc::Receiver<Datagram>,
     tx: may::sync::mpsc::Sender<Datagram>,
-    ctrl_tx: may::sync::mpsc::Sender<CtrlMsg>,
+    ctrl_tx: may::sync::mpsc::Sender<H3CtrlMsg>,
     mut service: S,
 ) {
     use crate::network::http::h3_session;
@@ -859,10 +862,9 @@ fn handle_quic_connection<S: HService + 'static>(
     let mut session = h3_session::new_session(from, conn);
 
     // Tell dispatcher we own this addr
-    let _ = ctrl_tx.send(CtrlMsg::BindAddr(from, tx.clone()));
-
-    // Also register the current DCID the client is using to reach us now.
-    // (We can’t see it in the worker; dispatcher already inserted it. No-op if duplicated.)
+    // We can’t see current DCID in the worker; dispatcher already inserted it. 
+    // No-op if duplicated.
+    let _ = ctrl_tx.send(H3CtrlMsg::BindAddr(from, tx.clone()));
 
     let mut out = [0u8; MAX_DATAGRAM_SIZE];
     let h3_config = match quiche::h3::Config::new() {
@@ -980,7 +982,7 @@ fn handle_quic_connection<S: HService + 'static>(
 
         if session.conn.is_closed() {
             // cleanup
-            let _ = ctrl_tx.send(CtrlMsg::UnbindAddr(from));
+            let _ = ctrl_tx.send(H3CtrlMsg::UnbindAddr(from));
             // If you tracked specific DCIDs in the worker, RemoveCid them here as well.
             break;
         }
