@@ -359,9 +359,6 @@ where
                 return Err(e);
             }
         }
-        else {
-            break;
-        }
     }
     // send the response back to client
     write(stream, rsp_buf)?;
