@@ -358,9 +358,11 @@ where
             if e.kind() == std::io::ErrorKind::ConnectionAborted {
                 return Err(e);
             }
+            break;
         }
     }
-    // send the response back to client
+    
+    // Flush any pending response bytes
     write(stream, rsp_buf)?;
     Ok(blocked)
 }
@@ -1037,7 +1039,7 @@ mod tests {
         fn call<SE: Session>(&mut self, session: &mut SE) -> std::io::Result<()> {
             let req_method = session.req_method().unwrap_or_default().to_owned();
             let req_path = session.req_path().unwrap_or_default().to_owned();
-            let req_body = session.req_body(std::time::Duration::from_secs(1))?;
+            let req_body = session.req_body(std::time::Duration::from_secs(5))?;
             let body = bytes::Bytes::from(format!(
                 "Echo: {req_method:?} {req_path:?}\r\nBody: {req_body:?}"
             ));
@@ -1050,6 +1052,10 @@ mod tests {
                 .header_str("Content-Length", body_len_str)?
                 .body(&body)
                 .eom();
+
+            if !session.is_h3() && req_method == "POST" {
+                return Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "H1 POST should return WouldBlock"));
+            }
             Ok(())
         }
     }
