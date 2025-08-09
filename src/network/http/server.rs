@@ -444,6 +444,8 @@ type ConnKey = [u8; quiche::MAX_CONN_ID_LEN];
 enum H3CtrlMsg {
     BindAddr(std::net::SocketAddr, may::sync::mpsc::Sender<Datagram>),
     UnbindAddr(std::net::SocketAddr),
+    AddCid(ConnKey, may::sync::mpsc::Sender<Datagram>),
+    RemoveCid(ConnKey),
 }
 #[cfg(feature = "net-h3-server")]
 #[derive(Debug)]
@@ -680,11 +682,14 @@ fn quic_dispatcher<S, F>(
     F: FnMut(usize) -> S + Send + 'static,
 {
     use std::collections::HashMap;
+    use std::time::{Duration, Instant};
 
     type WorkerTx = may::sync::mpsc::Sender<Datagram>;
+    struct AddrEntry { tx: WorkerTx, expires: Instant }
 
     let mut by_cid: HashMap<ConnKey, WorkerTx> = HashMap::new();
-    let mut by_addr: HashMap<SocketAddr, WorkerTx> = HashMap::new();
+    let mut by_addr: HashMap<SocketAddr, AddrEntry> = HashMap::new();
+    const BY_ADDR_TTL: Duration = Duration::from_secs(10);
 
     // control channel
     let (ctrl_tx, ctrl_rx) = may::sync::mpsc::channel::<H3CtrlMsg>();
@@ -696,13 +701,22 @@ fn quic_dispatcher<S, F>(
         while let Ok(msg) = ctrl_rx.try_recv() {
             match msg {
                 H3CtrlMsg::BindAddr(addr, tx) => {
-                    by_addr.insert(addr, tx);
+                    by_addr.insert(addr, AddrEntry { tx, expires: Instant::now() + BY_ADDR_TTL });
                 }
                 H3CtrlMsg::UnbindAddr(addr) => {
                     by_addr.remove(&addr);
+                },
+                H3CtrlMsg::AddCid(cid, tx) => { 
+                    by_cid.insert(cid, tx); 
+                }
+                H3CtrlMsg::RemoveCid(cid) => { 
+                    by_cid.remove(&cid); 
                 }
             }
         }
+
+        let now = Instant::now();
+        by_addr.retain(|_, v| v.expires > now);
 
         // read a UDP datagram
         let mut buf = BytesMut::with_capacity(65535);
@@ -742,13 +756,9 @@ fn quic_dispatcher<S, F>(
         }
 
         // fallback path: known address → route and learn new DCID
-        if let Some(tx) = by_addr.get(&from) {
-            let _ = tx.send(Datagram {
-                buf: buf.to_vec(),
-                from,
-                to: local_addr,
-            });
-            // Also bind the new DCID to this worker for next packets.
+        if let Some(entry) = by_addr.get(&from) {
+            let tx = &entry.tx;  // <- use entry.tx
+            let _ = tx.send(Datagram { buf: buf.to_vec(), from, to: local_addr });
             by_cid.insert(dcid_key, tx.clone());
             continue;
         }
@@ -816,7 +826,8 @@ fn quic_dispatcher<S, F>(
         // spawn worker
         let (tx, rx) = may::sync::mpsc::channel::<Datagram>();
         // We bind by address immediately; the worker will also AddCid as needed.
-        by_addr.insert(from, tx.clone());
+        by_addr.insert(from, AddrEntry { tx: tx.clone(), expires: Instant::now() + BY_ADDR_TTL });
+
         // Bind the current DCID too (client is using hdr.dcid now)
         by_cid.insert(dcid_key, tx.clone());
 
@@ -838,6 +849,7 @@ fn quic_dispatcher<S, F>(
                 rx,
                 tx.clone(),
                 ctrl_tx_cloned,
+                dcid_key,
                 service,
             );
         });
@@ -852,16 +864,24 @@ fn handle_quic_connection<S: HService + 'static>(
     rx: may::sync::mpsc::Receiver<Datagram>,
     tx: may::sync::mpsc::Sender<Datagram>,
     ctrl_tx: may::sync::mpsc::Sender<H3CtrlMsg>,
+    initial_dcid: ConnKey,
     mut service: S,
 ) {
+    use std::collections::HashSet;
     use crate::network::http::h3_session;
+
+    let mut dcids: HashSet<ConnKey> = HashSet::new();
 
     let mut session = h3_session::new_session(from, conn);
 
     // Tell dispatcher we own this addr
-    // We can’t see current DCID in the worker; dispatcher already inserted it. 
-    // No-op if duplicated.
     let _ = ctrl_tx.send(H3CtrlMsg::BindAddr(from, tx.clone()));
+
+    // Register the initial DCID as the primary key for routing
+    if dcids.insert(initial_dcid)
+    {
+        let _ = ctrl_tx.send(H3CtrlMsg::AddCid(initial_dcid, tx.clone()));
+    }
 
     let mut out = [0u8; MAX_DATAGRAM_SIZE];
     let h3_config = match quiche::h3::Config::new() {
@@ -903,6 +923,12 @@ fn handle_quic_connection<S: HService + 'static>(
         if (session.conn.is_in_early_data() || session.conn.is_established())
             && session.http3_conn.is_none()
         {
+            for sc in session.conn.source_ids() {
+                let k = key_from_cid(&sc);
+                if dcids.insert(k) {
+                    let _ = ctrl_tx.send(H3CtrlMsg::AddCid(k, tx.clone()));
+                }
+            }
             match quiche::h3::Connection::with_transport(&mut session.conn, &h3_config) {
                 Ok(h3) => session.http3_conn = Some(h3),
                 Err(e) => eprintln!("with_transport: {e}"),
@@ -980,7 +1006,9 @@ fn handle_quic_connection<S: HService + 'static>(
         if session.conn.is_closed() {
             // cleanup
             let _ = ctrl_tx.send(H3CtrlMsg::UnbindAddr(from));
-            // If you tracked specific DCIDs in the worker, RemoveCid them here as well.
+            for cid in dcids.drain() {
+                let _ = ctrl_tx.send(H3CtrlMsg::RemoveCid(cid));
+            }
             break;
         }
 
@@ -989,6 +1017,7 @@ fn handle_quic_connection<S: HService + 'static>(
         }
     }
 }
+
 #[cfg(test)]
 mod tests {
     use crate::network::http::{
