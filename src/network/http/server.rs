@@ -846,8 +846,7 @@ fn quic_dispatcher<S, F>(
                 socket_cloned,
                 conn,
                 from,
-                rx,
-                tx.clone(),
+                (rx, tx.clone()),
                 ctrl_tx_cloned,
                 dcid_key,
                 service,
@@ -861,8 +860,7 @@ fn handle_quic_connection<S: HService + 'static>(
     socket: std::sync::Arc<may::net::UdpSocket>,
     conn: quiche::Connection,
     from: SocketAddr,
-    rx: may::sync::mpsc::Receiver<Datagram>,
-    tx: may::sync::mpsc::Sender<Datagram>,
+    (rx, tx): (may::sync::mpsc::Receiver<Datagram>, may::sync::mpsc::Sender<Datagram>),
     ctrl_tx: may::sync::mpsc::Sender<H3CtrlMsg>,
     initial_dcid: ConnKey,
     mut service: S,
@@ -924,7 +922,7 @@ fn handle_quic_connection<S: HService + 'static>(
             && session.http3_conn.is_none()
         {
             for sc in session.conn.source_ids() {
-                let k = key_from_cid(&sc);
+                let k = key_from_cid(sc);
                 if dcids.insert(k) {
                     let _ = ctrl_tx.send(H3CtrlMsg::AddCid(k, tx.clone()));
                 }
