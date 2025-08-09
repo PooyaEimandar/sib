@@ -689,11 +689,6 @@ fn quic_dispatcher<S, F>(
     // control channel
     let (ctrl_tx, ctrl_rx) = may::sync::mpsc::channel::<H3CtrlMsg>();
 
-    // allocate a big buffer
-    let mut buf = BytesMut::with_capacity(65535);
-    buf.resize(65535, 0);
-
-    // allocate out buffer
     let mut out = [0u8; MAX_DATAGRAM_SIZE];
 
     loop {
@@ -710,6 +705,8 @@ fn quic_dispatcher<S, F>(
         }
 
         // read a UDP datagram
+        let mut buf = BytesMut::with_capacity(65535);
+        buf.resize(65535, 0);
         let (n, from) = match socket.recv_from(&mut buf) {
             Ok(v) => v,
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
