@@ -220,6 +220,7 @@ pub trait HFactory: Send + Sized + 'static {
         cert_pem_file_path: &str,
         key_pem_file_path: &str,
         stack_size: usize,
+        verify_peer: bool
     ) -> std::io::Result<()> {
         // create the UDP listening socket.
         let socket = std::sync::Arc::new(may::net::UdpSocket::bind(addr)?);
@@ -255,7 +256,7 @@ pub trait HFactory: Send + Sized + 'static {
         config.set_initial_max_streams_bidi(100);
         config.set_initial_max_streams_uni(100);
         config.set_disable_active_migration(true);
-        config.verify_peer(false);
+        config.verify_peer(verify_peer);
         config.enable_early_data();
 
         let stacksize = if stack_size > 0 {
@@ -1242,7 +1243,7 @@ mod tests {
         std::thread::spawn(|| {
             println!("Starting H3 server...");
             EchoServer
-                .start_h3_tls("0.0.0.0:8080", "/tmp/cert.pem", "/tmp/key.pem", 0)
+                .start_h3_tls("0.0.0.0:8080", "/tmp/cert.pem", "/tmp/key.pem", 0, false)
                 .expect("h3 start server");
         });
 
