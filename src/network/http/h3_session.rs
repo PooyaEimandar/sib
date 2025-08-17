@@ -27,8 +27,7 @@ impl Session for H3Session {
         &self.peer_addr
     }
 
-    fn is_h3(&self) -> bool
-    {
+    fn is_h3(&self) -> bool {
         self.http3_conn.is_some()
     }
 
@@ -183,7 +182,8 @@ pub(crate) fn new_session(peer_addr: SocketAddr, conn: quiche::Connection) -> H3
             concat!("Sib ", env!("SIB_BUILD_VERSION"));
     let rsp_headers = vec![
         Header::new(b":status", b"200"),
-        Header::new(b"server", SERVER_NAME.as_bytes())
+        Header::new(b"server", SERVER_NAME.as_bytes()),
+        Header::new(b"date", super::util::CURRENT_DATE.load().as_bytes()),
     ];
     H3Session {
         peer_addr,

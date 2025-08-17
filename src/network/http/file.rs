@@ -580,6 +580,9 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "net-h3-server")]
+    impl crate::network::http::session::HServiceWebTransport for FileService {}
+
     impl HFactory for FileServer<FileService> {
         type Service = FileService;
 
@@ -652,7 +655,7 @@ mod tests {
             let id = std::thread::current().id();
             println!("Starting H3 server on {addr} with thread: {id:?}");
             FileServer(FileService)
-                .start_h3_tls(addr, cert_path, key_path, STACK_SIZE, false)
+                .start_h3_tls(addr, cert_path, key_path, false, STACK_SIZE, None)
                 .unwrap_or_else(|_| panic!("file server failed to start for thread {id:?}"));
         });
         threads.push(h3_handle);

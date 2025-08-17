@@ -7,7 +7,7 @@ pub(crate) static CURRENT_DATE: once_cell::sync::Lazy<Arc<ArcSwap<Arc<str>>>> = 
     let now = httpdate::HttpDate::from(std::time::SystemTime::now()).to_string();
     let swap = Arc::new(ArcSwap::from_pointee(Arc::from(now.into_boxed_str())));
 
-    let swap_clone = Arc::clone(&swap);
+    let swap_clone : Arc<ArcSwap<Arc<str>>> = Arc::clone(&swap);
     may::go!(move || loop {
         let now = std::time::SystemTime::now();
         let subsec = now

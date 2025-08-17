@@ -1,3 +1,6 @@
+#[cfg(feature = "net-h3-server")]
+use crate::network::http::session::HServiceWebTransport;
+
 use crate::network::http::session::HService;
 use bytes::{BufMut, BytesMut};
 use may::{
@@ -35,8 +38,16 @@ macro_rules! mc {
 }
 
 pub trait HFactory: Send + Sized + 'static {
-    type Service: HService + Send;
 
+    cfg_if::cfg_if! {
+        if #[cfg(any(feature = "net-h3-server"))] {
+            type Service: HService + HServiceWebTransport + Send;
+        }
+        else {
+            type Service: HService + Send;
+        }
+    }
+ 
     // create a new http service for each connection
     fn service(&self, id: usize) -> Self::Service;
 
@@ -219,8 +230,9 @@ pub trait HFactory: Send + Sized + 'static {
         addr: L,
         cert_pem_file_path: &str,
         key_pem_file_path: &str,
+        verify_peer: bool,
         stack_size: usize,
-        verify_peer: bool
+        dgram_size: Option<(usize, usize)>
     ) -> std::io::Result<()> {
         // create the UDP listening socket.
         let socket = std::sync::Arc::new(may::net::UdpSocket::bind(addr)?);
@@ -259,6 +271,13 @@ pub trait HFactory: Send + Sized + 'static {
         config.verify_peer(verify_peer);
         config.enable_early_data();
 
+        let extend_connect = if let Some((r_len, s_len)) = dgram_size{
+            config.enable_dgram(true, r_len, s_len);
+            true
+        } else {
+            false
+        };
+
         let stacksize = if stack_size > 0 {
             stack_size
         } else {
@@ -270,7 +289,7 @@ pub trait HFactory: Send + Sized + 'static {
                 .name("H3ServiceFactory".to_owned())
                 .stack_size(stacksize),
             move || {
-                quic_dispatcher(socket, config, local_addr, move |id| self.service(id));
+                quic_dispatcher(socket, config, local_addr, extend_connect, move |id| self.service(id));
             }
         );
         Ok(())
@@ -681,9 +700,10 @@ fn quic_dispatcher<S, F>(
     socket: std::sync::Arc<may::net::UdpSocket>,
     mut config: quiche::Config,
     local_addr: SocketAddr,
+    extend_connect: bool,
     mut call_service: F,
 ) where
-    S: HService + Send + 'static,
+    S: HService + HServiceWebTransport + Send + 'static,
     F: FnMut(usize) -> S + Send + 'static,
 {
     use std::collections::HashMap;
@@ -740,7 +760,7 @@ fn quic_dispatcher<S, F>(
         buf.truncate(n);
 
         // parse QUIC header
-        let hdr = match quiche::Header::from_slice(&mut buf, quiche::MAX_CONN_ID_LEN) {
+        let hdr = match quiche::Header::from_slice(&mut buf[..], quiche::MAX_CONN_ID_LEN) {
             Ok(h) => h,
             Err(e) => {
                 eprintln!("Header parse failed: {e:?}");
@@ -761,8 +781,9 @@ fn quic_dispatcher<S, F>(
         }
 
         // fallback path: known address → route and learn new DCID
-        if let Some(entry) = by_addr.get(&from) {
-            let tx = &entry.tx;  // <- use entry.tx
+        if let Some(entry) = by_addr.get_mut(&from) {
+            entry.expires = Instant::now() + BY_ADDR_TTL; // refresh the ttl
+            let tx = &entry.tx;
             let _ = tx.send(Datagram { buf: buf.to_vec(), from, to: local_addr });
             by_cid.insert(dcid_key, tx.clone());
             continue;
@@ -853,7 +874,7 @@ fn quic_dispatcher<S, F>(
                 from,
                 (rx, tx.clone()),
                 ctrl_tx_cloned,
-                dcid_key,
+                (dcid_key, extend_connect),
                 service,
             );
         });
@@ -861,19 +882,23 @@ fn quic_dispatcher<S, F>(
 }
 
 #[cfg(feature = "net-h3-server")]
-fn handle_quic_connection<S: HService + 'static>(
+fn handle_quic_connection<S: HService + HServiceWebTransport + 'static>(
     socket: std::sync::Arc<may::net::UdpSocket>,
     conn: quiche::Connection,
     from: SocketAddr,
     (rx, tx): (may::sync::mpsc::Receiver<Datagram>, may::sync::mpsc::Sender<Datagram>),
     ctrl_tx: may::sync::mpsc::Sender<H3CtrlMsg>,
-    initial_dcid: ConnKey,
+    (initial_dcid, extend_connect): (ConnKey, bool),
     mut service: S,
 ) {
-    use std::collections::HashSet;
+    use std::collections::{HashSet, HashMap};
     use crate::network::http::h3_session;
 
     let mut dcids: HashSet<ConnKey> = HashSet::new();
+    let mut wt_connect_streams: HashSet<u64> = HashSet::new();
+    let mut wt_quarter_to_connect: HashMap<u64, u64> = HashMap::new();
+    let mut wt_stream_owner: HashMap<u64, u64> = HashMap::new();
+    let mut wt_assoc_hdr_buf: HashMap<u64, Vec<u8>> = HashMap::new();
 
     let mut session = h3_session::new_session(from, conn);
 
@@ -887,13 +912,20 @@ fn handle_quic_connection<S: HService + 'static>(
     }
 
     let mut out = [0u8; MAX_DATAGRAM_SIZE];
-    let h3_config = match quiche::h3::Config::new() {
+    let mut h3_config = match quiche::h3::Config::new() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("h3 Config new: {e}");
             return;
         }
     };
+
+    if extend_connect {
+        h3_config.set_qpack_max_table_capacity(64 * 1024);
+        h3_config.set_qpack_blocked_streams(100);
+        h3_config.set_max_field_section_size(64 * 1024);
+        h3_config.enable_extended_connect(true);
+    }
 
     loop {
         let timeout = session
@@ -943,39 +975,159 @@ fn handle_quic_connection<S: HService + 'static>(
                 handle_writable(&mut session, stream_id);
             }
 
-            while let Some(h3_conn) = session.http3_conn.as_mut() {
-                match h3_conn.poll(&mut session.conn) {
+            loop {
+                // Poll once with a short-lived borrow of h3_conn.
+                let polled = {
+                    let Some(h3) = session.http3_conn.as_mut() else { break };
+                    h3.poll(&mut session.conn)
+                };
+
+                match polled {
                     Ok((sid, quiche::h3::Event::Headers { list, .. })) => {
-                        session.req_headers = Some(list);
-                        session.current_stream_id = Some(sid);
+                        
+                        if extend_connect {
+                            use quiche::h3::NameValue;
+
+                            let has_connect = list
+                                .iter()
+                                .find(|h| h.name() == b":method")
+                                .map(|h| h.value().eq_ignore_ascii_case(b"CONNECT"))
+                                .unwrap_or(false);
+
+                            let has_webtransport = list
+                                .iter()
+                                .find(|h| h.name() == b":protocol")
+                                .map(|h| h.value().eq_ignore_ascii_case(b"webtransport"))
+                                .unwrap_or(false);
+
+                            session.req_headers = Some(list);
+                            session.current_stream_id = Some(sid);
+
+                            if has_connect && has_webtransport {
+                                let peer_ok = match session.http3_conn.as_mut() {
+                                    Some(h3) => h3.extended_connect_enabled_by_peer(),
+                                    None => false,
+                                };
+
+                                if !peer_ok {
+                                    let _ = {
+                                        let Some(h3) = session.http3_conn.as_mut() else { continue };
+                                        let rsp = [quiche::h3::Header::new(b":status", b"421")];
+                                        h3.send_response(&mut session.conn, sid, &rsp, true)
+                                    };
+                                    continue;
+                                }
+
+                                {
+                                    let Some(h3) = session.http3_conn.as_mut() else { continue };
+                                    let rsp = [quiche::h3::Header::new(b":status", b"200")];
+                                    match h3.send_response(&mut session.conn, sid, &rsp, false) {
+                                        Ok(_) => {
+                                            wt_connect_streams.insert(sid);
+                                            service.on_wt_open(&mut session, sid);
+                                            wt_quarter_to_connect.insert(wt_quarter_id(sid), sid);
+                                        },
+                                        Err(e) => {
+                                            eprintln!("WT 200 send failed on sid {sid}: {e:?}");
+                                        }
+                                    }
+                                }
+
+                                continue;
+                            }
+                        }
+                        else {
+                            session.req_headers = Some(list);
+                            session.current_stream_id = Some(sid);
+                        }
                     }
                     Ok((sid, quiche::h3::Event::Data)) => {
-                        let mut tmp = [0u8; 4096];
-                        loop {
-                            match h3_conn.recv_body(&mut session.conn, sid, &mut tmp) {
-                                Ok(n) => session
-                                    .req_body_map
-                                    .entry(sid)
-                                    .or_default()
-                                    .extend_from_slice(&tmp[..n]),
-                                Err(quiche::h3::Error::Done) => break,
-                                Err(e) => {
-                                    eprintln!("recv_body: {e:?}");
-                                    break;
+                        // WT CONNECT streams shouldn't carry HTTP DATA frames; if they do, drain & ignore capsules.
+                        if extend_connect && wt_connect_streams.contains(&sid) {
+                            let mut tmp = [0u8; 4096];
+                            loop {
+                                let res = {
+                                    let Some(h3) = session.http3_conn.as_mut() else { break };
+                                    h3.recv_body(&mut session.conn, sid, &mut tmp)
+                                };
+                                match res {
+                                    Ok(_n) => { /* ignore capsules */ }
+                                    Err(quiche::h3::Error::Done) => break,
+                                    Err(e) => {
+                                        eprintln!("WT CONNECT data recv err: {e:?}");
+                                        break;
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+
+                        // For normal streams, read into a local Vec while h3 is borrowed…
+                        let mut collected: Vec<u8> = Vec::new();
+                        {
+                            let mut tmp = [0u8; 4096];
+                            loop {
+                                let res = {
+                                    let Some(h3) = session.http3_conn.as_mut() else { break };
+                                    h3.recv_body(&mut session.conn, sid, &mut tmp)
+                                };
+                                match res {
+                                    Ok(n) => collected.extend_from_slice(&tmp[..n]),
+                                    Err(quiche::h3::Error::Done) => break,
+                                    Err(e) => {
+                                        eprintln!("recv_body: {e:?}");
+                                        break;
+                                    }
                                 }
                             }
                         }
+                        // …then append to session after the borrow ends.
+                        if !collected.is_empty() {
+                            session
+                                .req_body_map
+                                .entry(sid)
+                                .or_default()
+                                .extend_from_slice(&collected);
+                        }
                     }
                     Ok((sid, quiche::h3::Event::Finished)) => {
+                        // No h3 borrow needed to handle service & maps.
+                        if extend_connect && wt_connect_streams.remove(&sid) {
+                            service.on_wt_close(&mut session, sid);
+                            wt_quarter_to_connect.remove(&wt_quarter_id(sid));
+                            wt_stream_owner.retain(|_, owner| *owner != sid);
+                            session.req_body_map.remove(&sid);
+                            if session.current_stream_id == Some(sid) {
+                                session.current_stream_id = None;
+                            }
+                            continue;
+                        }
+
                         if session.current_stream_id == Some(sid) {
                             handle_h3_request(sid, &mut session, &mut service);
                             session.current_stream_id = None;
                         }
                         session.req_body_map.remove(&sid);
                     }
-                    Ok((_sid, quiche::h3::Event::Reset { .. })) => {}
-                    Ok((_id, quiche::h3::Event::PriorityUpdate)) => {}
-                    Ok((_id, quiche::h3::Event::GoAway)) => {}
+                    Ok((sid, quiche::h3::Event::Reset { .. })) => {
+                        if extend_connect && wt_connect_streams.remove(&sid) {
+                            service.on_wt_close(&mut session, sid);
+                            wt_quarter_to_connect.remove(&wt_quarter_id(sid));
+                            wt_stream_owner.retain(|_, owner| *owner != sid);
+                            if session.current_stream_id == Some(sid) {
+                                session.current_stream_id = None;
+                            }
+                        }
+                    }
+                    Ok((_id, quiche::h3::Event::PriorityUpdate)) => { /* ignore */ }
+                    Ok((_id, quiche::h3::Event::GoAway)) => {
+                        if extend_connect {
+                            // Close any WT sessions
+                            for sid in wt_connect_streams.drain() {
+                                service.on_wt_close(&mut session, sid);
+                            }
+                        }
+                    }
                     Err(quiche::h3::Error::Done) => break,
                     Err(e) => {
                         eprintln!("{} h3 error: {e:?}", session.conn.trace_id());
@@ -985,7 +1137,133 @@ fn handle_quic_connection<S: HService + 'static>(
             }
         }
 
-        // Drain sends
+        if extend_connect {
+            // WebTransport UNI/BIDI
+            if session.http3_conn.is_some() {
+                // Iterate QUIC transport streams that are readable this tick
+                for sid in session.conn.readable() {
+                    // Drain as much as we can this tick. We may not be associated yet.
+                    let mut fin_seen = false;
+                    let is_uni = (sid & 0x02) != 0;
+                    loop {
+                        // Reuse a stack buffer for this recv
+                        let mut tmp = [0u8; 4096];
+                        let (n, fin) = match session.conn.stream_recv(sid, &mut tmp) {
+                            Ok(v) => v,
+                            Err(quiche::Error::Done) => break, // nothing more for now
+                            Err(e) => {
+                                eprintln!("{} WT stream_recv err on {sid}: {e:?}", session.conn.trace_id());
+                                break;
+                            }
+                        };
+
+                        if n == 0 && !fin {
+                            // No bytes and not FIN — nothing else to do now
+                            break;
+                        }
+
+                        fin_seen |= fin;
+
+                        // Are we already associated to a CONNECT stream?
+                        if let Some(&owner) = wt_stream_owner.get(&sid) {
+                            // Deliver bytes as data
+                            if n > 0 {
+                                if is_uni {
+                                    service.on_wt_unistream_data(&mut session, owner, sid, &tmp[..n]);
+                                } else {
+                                    service.on_wt_bistream_data(&mut session, owner, sid, &tmp[..n]);
+                                }
+                            }
+                            continue;
+                        }
+
+                        // Not associated yet — accumulate header bytes until we can parse.
+                        let buf = wt_assoc_hdr_buf.entry(sid).or_default();
+                        if n > 0 {
+                            buf.extend_from_slice(&tmp[..n]);
+                        }
+
+                        // Try to parse the association header from the accumulated buffer.
+                        // parse_wt_stream_assoc expects the header starting at offset 0.
+                        if let Some((connect_sid, header_len, is_uni)) = parse_wt_stream_assoc(sid, &buf[..]) {
+                            // Only accept association if this CONNECT stream is actually a WT session we opened.
+                            if !wt_connect_streams.contains(&connect_sid) {
+                                // Not a known WT CONNECT owner — treat as non-WT; drop header buffer.
+                                wt_assoc_hdr_buf.remove(&sid);
+                                continue;
+                            }
+
+                            // Record owner and fire the "open" callback once.
+                            wt_stream_owner.insert(sid, connect_sid);
+                            if is_uni {
+                                service.on_wt_unistream_open(&mut session, connect_sid, sid);
+                            } else {
+                                service.on_wt_bistream_open(&mut session, connect_sid, sid);
+                            }
+
+                            // Deliver any payload bytes that followed the header in the same packets.
+                            if buf.len() > header_len {
+                                let first_payload = &buf[header_len..];
+                                if is_uni {
+                                    service.on_wt_unistream_data(&mut session, connect_sid, sid, first_payload);
+                                } else {
+                                    service.on_wt_bistream_data(&mut session, connect_sid, sid, first_payload);
+                                }
+                            }
+
+                            // Clear the header buffer now that we’re associated.
+                            wt_assoc_hdr_buf.remove(&sid);
+                        } else {
+                            // Header still incomplete. If FIN arrives before association, we'll drop below.
+                        }
+                    } // end inner drain loop
+
+                    // Cleanup on stream FIN
+                    if fin_seen {
+                        wt_stream_owner.remove(&sid);
+                        wt_assoc_hdr_buf.remove(&sid);
+                    }
+                }
+            }
+
+
+            // handle dgram
+            if let Some(h3_conn) = session.http3_conn.as_ref() && h3_conn.dgram_enabled_by_peer(&session.conn) {
+                // Limit per-tick datagrams
+                const MAX_DGRAMS_PER_TICK: usize = 1024;
+                let mut drained = 0;
+                // scratch buffer for a single QUIC DATAGRAM
+                let mut dgram_buf = [0u8; MAX_DATAGRAM_SIZE];
+                loop {
+                    if drained >= MAX_DGRAMS_PER_TICK { break; }
+                    match session.conn.dgram_recv(&mut dgram_buf) {
+                        Ok(len) => {
+                            let bytes = &dgram_buf[..len];
+                            // H3 DATAGRAM format: [quarter-id(varint)][optional ctx(varint)][payload...]
+                            if let Some((quarter_id, ctx, payload)) = parse_wt_dgram(bytes) {
+                                if let Some(&connect_sid) = wt_quarter_to_connect.get(&quarter_id) {
+                                    // Call your service hook
+                                    service.on_wt_datagram(&mut session, connect_sid, ctx, payload);
+                                } else {
+                                    // We haven't seen the CONNECT stream yet
+                                    eprintln!("Unknown quarter-id {quarter_id}, len={}", payload.len());
+                                }
+                            } else {
+                                eprintln!("Malformed H3 DATAGRAM");
+                            }
+                        }
+                        Err(quiche::Error::Done) => break,
+                        Err(e) => {
+                            eprintln!("{} QUIC dgram_recv error: {e:?}", session.conn.trace_id());
+                            break;
+                        }
+                    }
+                    drained += 1;
+                }
+            }
+        }
+
+        // drain sends
         loop {
             match session.conn.send(&mut out) {
                 Ok((n, send_info)) => {
@@ -1007,6 +1285,12 @@ fn handle_quic_connection<S: HService + 'static>(
         }
 
         if session.conn.is_closed() {
+            if extend_connect {
+                // best-effort close callbacks for any remaining WT sessions
+                for sid in wt_connect_streams.drain() {
+                    service.on_wt_close(&mut session, sid);
+                }
+            }
             // cleanup
             let _ = ctrl_tx.send(H3CtrlMsg::UnbindAddr(from));
             for cid in dcids.drain() {
@@ -1020,6 +1304,65 @@ fn handle_quic_connection<S: HService + 'static>(
         }
     }
 }
+
+/// Parses a QUIC varint from `buf`
+#[cfg(feature = "net-h3-server")]
+#[inline]
+fn read_quic_varint(buf: &[u8]) -> Option<(u64, usize)> {
+    if buf.is_empty() { return None; }
+    let b0 = buf[0];
+    // Two most significant bits determine length:
+    let (_prefix, len) = match b0 >> 6 {
+        0b00 => (0, 1),
+        0b01 => (1, 2),
+        0b10 => (2, 4),
+        0b11 => (3, 8),
+        _ => unreachable!(),
+    };
+    if buf.len() < len { return None; }
+
+    let mut value = (b0 & 0x3f) as u64;
+    for &b in &buf[1..len] {
+        value = (value << 8) | (b as u64);
+    }
+
+    Some((value, len))
+}
+
+#[cfg(feature = "net-h3-server")]
+#[inline]
+fn wt_quarter_id(connect_sid: u64) -> u64 { connect_sid / 4 }
+
+#[cfg(feature = "net-h3-server")]
+#[inline]
+fn parse_wt_dgram(b: &[u8]) -> Option<(u64 /*quarter*/, Option<u64> /*ctx*/, &[u8]/*payload*/)> {
+    let (qid, n1) = read_quic_varint(b)?;
+    if n1 == b.len() { return Some((qid, None, &[])); }
+    // Try read context id; if it fails, treat as no ctx and payload = rest
+    if let Some((ctx, n2)) = read_quic_varint(&b[n1..]) {
+        Some((qid, Some(ctx), &b[n1 + n2..]))
+    } else {
+        Some((qid, None, &b[n1..]))
+    }
+}
+
+#[cfg(feature = "net-h3-server")]
+#[inline]
+fn parse_wt_stream_assoc(stream_id: u64, buf: &[u8]) -> Option<(u64 /*connect_sid*/, usize /*hdr_len*/, bool /*is_uni*/)> {
+    const WT_UNI_STREAM_TYPE: u64 = 0x54; // draft-ietf-webtrans-http3
+    if (stream_id & 0x02) != 0 {
+        // uni
+        let (ty, n1) = read_quic_varint(buf)?;
+        if ty != WT_UNI_STREAM_TYPE { return None; }
+        let (connect_sid, n2) = read_quic_varint(&buf[n1..])?;
+        Some((connect_sid, n1 + n2, true))
+    } else {
+        // bi
+        let (connect_sid, n1) = read_quic_varint(buf)?;
+        Some((connect_sid, n1, false))
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -1061,6 +1404,16 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "net-h3-server")]
+    impl crate::network::http::session::HServiceWebTransport for EchoServer {
+        fn on_wt_open<SE: Session>(&mut self, _session: &mut SE, _connect_sid: u64) {
+            eprintln!("Hi Webtransport");
+        }
+        fn on_wt_close<SE: Session>(&mut self, _session: &mut SE, _connect_sid: u64) {
+            eprintln!("Bye Webtransport");
+        }
+    }
+
     impl HFactory for EchoServer {
         type Service = EchoServer;
 
@@ -1069,24 +1422,70 @@ mod tests {
         }
     }
 
+    // #[cfg(feature = "sys-boring-ssl")]
+    // fn create_self_signed_tls_pems() -> (String, String) {
+    //     use rcgen::{
+    //         CertificateParams, DistinguishedName, DnType, KeyPair, SanType, date_time_ymd,
+    //     };
+    //     let mut params: CertificateParams = Default::default();
+    //     params.not_before = rcgen::date_time_ymd(1975, 1, 1);
+    //     params.not_after = date_time_ymd(4096, 1, 1);
+    //     params.distinguished_name = DistinguishedName::new();
+    //     params
+    //         .distinguished_name
+    //         .push(DnType::OrganizationName, "Sib");
+    //     params.distinguished_name.push(DnType::CommonName, "Sib");
+    //     params.subject_alt_names = vec![
+    //         SanType::DnsName("localhost".try_into().unwrap()),
+    //         SanType::IpAddress("127.0.0.1".parse().unwrap()),
+    //         SanType::IpAddress("::1".parse().unwrap()),
+    //     ];
+    //     let key_pair = KeyPair::generate().unwrap();
+    //     let cert = params.self_signed(&key_pair).unwrap();
+    //     (cert.pem(), key_pair.serialize_pem())
+    // }
+
     #[cfg(feature = "sys-boring-ssl")]
     fn create_self_signed_tls_pems() -> (String, String) {
         use rcgen::{
             CertificateParams, DistinguishedName, DnType, KeyPair, SanType, date_time_ymd,
         };
+        use sha2::{Digest, Sha256};
+        use base64::{engine::general_purpose::STANDARD as b64, Engine as _};
+
         let mut params: CertificateParams = Default::default();
-        params.not_before = rcgen::date_time_ymd(1975, 1, 1);
+        params.not_before = date_time_ymd(1975, 1, 1);
         params.not_after = date_time_ymd(4096, 1, 1);
         params.distinguished_name = DistinguishedName::new();
-        params
-            .distinguished_name
-            .push(DnType::OrganizationName, "Sib");
+        params.distinguished_name.push(DnType::OrganizationName, "Sib");
         params.distinguished_name.push(DnType::CommonName, "Sib");
         params.subject_alt_names = vec![SanType::DnsName("localhost".try_into().unwrap())];
+
         let key_pair = KeyPair::generate().unwrap();
         let cert = params.self_signed(&key_pair).unwrap();
-        (cert.pem(), key_pair.serialize_pem())
+
+        // Get PEM strings
+        let cert_pem = cert.pem();
+        let key_pem = key_pair.serialize_pem();
+
+        // Convert PEM -> DER by stripping header/footer and base64-decoding
+        let mut der_b64 = String::with_capacity(cert_pem.len());
+        for line in cert_pem.lines() {
+            if !line.starts_with("-----") {
+                der_b64.push_str(line.trim());
+            }
+        }
+        let cert_der = b64.decode(der_b64).expect("PEM base64 decode");
+
+        // SHA-256 over DER, base64 encode result
+        let hash = Sha256::digest(&cert_der);
+        let base64_hash = b64.encode(hash);
+
+        println!("BASE64_SHA256_OF_DER_CERT: {}", base64_hash);
+
+        (cert_pem, key_pem)
     }
+
 
     #[cfg(feature = "net-h1-server")]
     #[test]
@@ -1243,12 +1642,12 @@ mod tests {
         std::thread::spawn(|| {
             println!("Starting H3 server...");
             EchoServer
-                .start_h3_tls("0.0.0.0:8080", "/tmp/cert.pem", "/tmp/key.pem", 0, false)
+                .start_h3_tls("0.0.0.0:8080", "/tmp/cert.pem", "/tmp/key.pem", true, 0, Some((1350, 1350)))
                 .expect("h3 start server");
         });
 
         // Wait for the server to be ready
-        std::thread::sleep(std::time::Duration::from_millis(1000));
+        std::thread::sleep(std::time::Duration::from_millis(100000));
 
         let client = reqwest::Client::builder()
             .http3_prior_knowledge()

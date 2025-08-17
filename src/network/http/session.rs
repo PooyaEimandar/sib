@@ -31,3 +31,14 @@ pub trait Session {
 pub trait HService {
     fn call<SE: Session>(&mut self, session: &mut SE) -> std::io::Result<()>;
 }
+
+#[cfg(feature = "net-h3-server")]
+pub trait HServiceWebTransport {
+    fn on_wt_open<SE: Session>(&mut self, _session: &mut SE, _connect_sid: u64) {}
+    fn on_wt_close<SE: Session>(&mut self, _session: &mut SE, _connect_sid: u64) {}
+    fn on_wt_datagram<SE: Session>(&mut self, _session: &mut SE, _connect_sid: u64, _ctx: Option<u64>, _payload: &[u8]) {}
+    fn on_wt_unistream_open<SE: Session>(&mut self, _session: &mut SE, _connect_sid: u64, _stream_id: u64) {}
+    fn on_wt_unistream_data<SE: Session>(&mut self, _session: &mut SE, _connect_sid: u64, _stream_id: u64, _chunk: &[u8]) {}
+    fn on_wt_bistream_open<SE: Session>(&mut self, _session: &mut SE, _connect_sid: u64, _stream_id: u64) {}
+    fn on_wt_bistream_data<SE: Session>(&mut self, _session: &mut SE, _connect_sid: u64, _stream_id: u64, _chunk: &[u8]) {}
+}

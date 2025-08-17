@@ -1,10 +1,11 @@
 - [x] HTTP1.1
 - [x] TLS based on boringSSL
-- [x] Http3 server based on Quiche (https://github.com/stunnel/static-curl)
+- [x] Http3 server based on Quiche (tested via https://github.com/stunnel/static-curl and browsers)
 - [x] FDB connection pool based on may
 - [x] Ratelimit
 - [x] gstreamer
 - [x] Static file server
 - [] io_uring
+- [] Webtransport server
 - [] Websocket server
 - [] Log with clickhouse

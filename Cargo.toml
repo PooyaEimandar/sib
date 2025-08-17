@@ -81,12 +81,16 @@ net-h1-server = [
     "once_cell",
 ]
 net-h3-server = [
+    "arc-swap",
     "bytes",
     "dashmap",
     "heapless",
+    "httpdate",
+    "httparse",
     "may",
     "mime",
     "mime_guess",
+    "once_cell",
     "quiche",
     "ring",
 ]
@@ -102,6 +106,8 @@ rcgen = { version = "0.14.3" }
 reqwest = { version = "0.12.22", default-features = false, features = [
     "http3",
 ] }
+sha2 = { version = "0.10.9" }
+base64 = { version = "0.22.1" }
 tokio = { version = "1.47.0", default-features = false, features = [
     "macros",
     "rt",
