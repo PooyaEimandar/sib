@@ -26,8 +26,8 @@ echo "🛠️ Applying high concurrency network tuning for '${SERVICE}'..."
 # 1. Apply sysctl tuning
 cat <<EOF | sudo tee /etc/sysctl.d/99-high-scale.conf > /dev/null
 fs.file-max = 2097152
-net.ipv4.tcp_max_syn_backlog = 16384
-net.core.somaxconn = 16384
+net.core.somaxconn = 65535
+net.ipv4.tcp_max_syn_backlog = 262144
 net.ipv4.tcp_tw_reuse = 1
 net.ipv4.tcp_fin_timeout = 10
 net.ipv4.tcp_keepalive_time = 60
@@ -39,10 +39,12 @@ net.core.rmem_max = 16777216
 net.core.wmem_max = 16777216
 net.core.rmem_default = 262144
 net.core.wmem_default = 262144
-net.core.netdev_max_backlog = 16384
+net.core.default_qdisc = fq
+net.core.netdev_max_backlog = 250000
 net.ipv4.tcp_rmem = 4096 87380 16777216
 net.ipv4.tcp_wmem = 4096 65536 16777216
 net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_congestion_control = bbr
 EOF
 
 sudo sysctl --system
