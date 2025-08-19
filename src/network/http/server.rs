@@ -37,19 +37,7 @@ macro_rules! mc {
     };
 }
 
-struct Pending {
-    stream: TcpStream,
-    peer_addr: SocketAddr,
-    expires_at: std::time::Instant,
-    id: usize,
-}
-
-// Global H1 pending stream
-static H1_PENDING_STREAM: once_cell::sync::Lazy<(may::sync::mpmc::Sender<Pending>, may::sync::mpmc::Receiver<Pending>)> = once_cell::sync::Lazy::new(|| {
-    may::sync::mpmc::channel::<Pending>()
-});
-
-pub trait HFactory: Send + Sync + Sized + 'static {
+pub trait HFactory: Send + Sized + 'static {
 
     cfg_if::cfg_if! {
         if #[cfg(any(feature = "net-h3-server"))] {
@@ -114,53 +102,6 @@ pub trait HFactory: Send + Sync + Sized + 'static {
     }
 
     #[cfg(feature = "sys-boring-ssl")]
-    fn h1_tls_worker<F, S>(
-        factory: std::sync::Arc<F>,
-        tls_acceptor: std::sync::Arc<boring::ssl::SslAcceptor>,
-        io_timeout: std::time::Duration,
-    ) where
-        F: HFactory + Send + Sync + 'static,
-        S: HService + 'static,
-    {
-        use std::net::Shutdown;
-
-        loop {
-            let pending = match H1_PENDING_STREAM.1.recv() {
-                Ok(p) => p,
-                Err(_) => break, // channel closed; exit worker
-            };
-
-            // Drop expired sockets (e.g., if queue got congested)
-            if std::time::Instant::now() > pending.expires_at {
-                let _ = pending.stream.shutdown(Shutdown::Both);
-                continue;
-            }
-
-            // Do TLS handshake
-            match tls_acceptor.accept(pending.stream) {
-                Ok(mut tls_stream) => {
-                    // If you need per-conn timeouts after handshake:
-                    let _ = tls_stream.get_mut().set_read_timeout(Some(io_timeout));
-                    let _ = tls_stream.get_mut().set_write_timeout(Some(io_timeout));
-
-                    // Build a fresh service for this connection
-                    let service = factory.service(pending.id);
-                    if let Err(e) = serve_tls(&mut tls_stream, pending.peer_addr, service) {
-                        // Best-effort shutdown on error
-                        let _ = tls_stream.get_mut().shutdown(Shutdown::Both);
-                        eprintln!("serve_tls failed: {e} from {}", pending.peer_addr);
-                    }
-                }
-                Err(e) => {
-                    eprintln!("TLS handshake failed: {e} from {}", pending.peer_addr);
-                    // We don't have the original TcpStream here after .accept() consumes it on success.
-                    // On failure, `accept()` already cleaned up its state; nothing else to do.
-                }
-            }
-        }
-    }
-
-    #[cfg(feature = "sys-boring-ssl")]
     fn start_h1_tls<L: ToSocketAddrs>(
         self,
         addr: L,
@@ -182,6 +123,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         tls_builder.set_private_key(&pkey)?;
         tls_builder.set_certificate(&cert)?;
         if let Some(chain) = ssl.chain_pem {
+            // add chain
             for extra in boring::x509::X509::stack_from_pem(chain).map_err(|e| {
                 io::Error::new(io::ErrorKind::InvalidInput, format!("Chain error: {e}"))
             })? {
@@ -192,39 +134,28 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         tls_builder.set_max_proto_version(ssl.max_version.to_boring())?;
         tls_builder.set_alpn_protos(b"\x08http/1.1")?;
 
-        let stacksize = if stack_size > 0 { stack_size } else { 2 * 1024 * 1024 };
-        let io_timeout = ssl.io_timeout;
-        let tls_acceptor = std::sync::Arc::new(tls_builder.build());
-        let listener = may::net::TcpListener::bind(addr)?;
-
-        // Wrap the factory so multiple workers can build services concurrently
-        let factory = std::sync::Arc::new(self);
-
-        // Spawn a worker pool (one per CPU is a good start; tune as needed)
-        let workers = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4);
-
-        for i in 0..workers {
-            let tls_acceptor_cloned = tls_acceptor.clone();
-            let factory_cloned = factory.clone();
-
-            // Smaller stacks are fine for per-conn I/O coroutines; adjust if needed
-            let w_stack = stacksize / 2;
-
-            let _ = may::go!(
-                may::coroutine::Builder::new()
-                    .name(format!("H1TLSWorker#{i}"))
-                    .stack_size(w_stack),
-                move || {
-                    Self::h1_tls_worker::<Self, Self::Service>(factory_cloned, tls_acceptor_cloned, io_timeout);
+        #[cfg(not(debug_assertions))]
+        {
+            tls_builder.set_servername_callback(|ssl_ref, _| {
+                if ssl_ref.servername(boring::ssl::NameType::HOST_NAME).is_none() {
+                    eprintln!("SNI not provided, rejecting connection");
+                    return Err(boring::ssl::SniError::ALERT_FATAL);
                 }
-            );
+                Ok(())
+            });
         }
 
-        // Accept loop: enqueue sockets quickly to keep accept hot
-        may::go!(
-            may::coroutine::Builder::new()
+        let stacksize = if stack_size > 0 {
+            stack_size
+        } else {
+            2 * 1024 * 1024
+        };
+        let io_timeout = ssl.io_timeout;
+        let tls_acceptor = std::sync::Arc::new(tls_builder.build());
+        let listener = TcpListener::bind(addr)?;
+
+        go!(
+            coroutine::Builder::new()
                 .name("H1TLSFactory".to_owned())
                 .stack_size(stacksize),
             move || {
@@ -244,12 +175,14 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                     });
                     let ip = peer_addr.ip();
 
-                    if let Some(rl) = &rate_limiter && !ip.is_unspecified(){
-                        use super::ratelimit::RateLimiter;
-                        let result = rl.check(ip.to_string().into());
-                        if !result.allowed {
-                            let _ = stream.shutdown(Shutdown::Both);
-                            continue;
+                    if let Some(rl) = &rate_limiter {
+                        if !ip.is_unspecified() {
+                            use super::ratelimit::RateLimiter;
+                            let result = rl.check(ip.to_string().into());
+                            if !result.allowed {
+                                let _ = stream.shutdown(Shutdown::Both);
+                                continue;
+                            }
                         }
                     }
 
@@ -258,26 +191,34 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                     #[cfg(windows)]
                     let id = stream.as_raw_socket() as usize;
 
+                    let builder = may::coroutine::Builder::new().id(id);
+                    let service = self.service(id);
                     let stream_cloned = stream.try_clone();
-                    if let Err(e) = H1_PENDING_STREAM.0.send(Pending {
-                            stream,
-                            peer_addr,
-                            expires_at: std::time::Instant::now() + std::time::Duration::from_secs(60),
-                            id,
-                    }) {
-                        eprintln!("Failed to send pending stream: {e}");
-                        match stream_cloned {
-                            Ok(stream_owned) => {
-                                stream_owned.shutdown(Shutdown::Both).ok();
+                    let tls_acceptor_cloned = tls_acceptor.clone();
+
+                    let _ = go!(builder, move || {
+                        match tls_acceptor_cloned.accept(stream) {
+                            Ok(mut tls_stream) => {
+                                if let Err(e) = serve_tls(&mut tls_stream, peer_addr, service) {
+                                    tls_stream.get_mut().shutdown(Shutdown::Both).ok();
+                                    eprintln!("serve_tls failed with error: {e} from {peer_addr}");
+                                }
                             }
                             Err(e) => {
-                                eprintln!(
-                                    "Failed to shut down the stream after TLS handshake failure: {e} from {peer_addr}"
-                                );
+                                eprintln!("TLS handshake failed {e} from {peer_addr}");
+                                match stream_cloned {
+                                    Ok(stream_owned) => {
+                                        stream_owned.shutdown(Shutdown::Both).ok();
+                                    }
+                                    Err(e) => {
+                                        eprintln!(
+                                            "Failed to shut down the stream after TLS handshake failure: {e} from {peer_addr}"
+                                        );
+                                    }
+                                };
                             }
-                        };
-                        continue;
-                    }
+                        }
+                    });
                 }
             }
         )
@@ -1706,7 +1647,7 @@ mod tests {
         });
 
         // Wait for the server to be ready
-        std::thread::sleep(std::time::Duration::from_millis(100000));
+        std::thread::sleep(std::time::Duration::from_millis(1000));
 
         let client = reqwest::Client::builder()
             .http3_prior_knowledge()
