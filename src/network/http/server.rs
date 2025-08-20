@@ -316,7 +316,7 @@ fn read(stream: &mut impl Read, buf: &mut BytesMut) -> io::Result<bool> {
 
     let mut io_slice = [std::io::IoSliceMut::new(read_buf)];
     let n = match stream.read_vectored(&mut io_slice) {
-        Ok(0) => return Err(io::Error::new(io::ErrorKind::BrokenPipe, "read closed")),
+        Ok(0) => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "peer closed")),
         Ok(n) => n,
         Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(false),
         Err(e) => return Err(e),
@@ -342,7 +342,7 @@ fn write(stream: &mut impl std::io::Write, rsp_buf: &mut BytesMut) -> io::Result
         match stream.write_vectored(std::slice::from_ref(&slice)) {
             Ok(0) => return Err(io::Error::new(io::ErrorKind::BrokenPipe, "write closed")),
             Ok(n) => write_cnt += n,
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break, // outer loop will wait_io()
             Err(e) => return Err(e),
         }
     }
@@ -383,8 +383,12 @@ where
     }
     
     // Flush any pending response bytes
-    write(stream, rsp_buf)?;
-    Ok(blocked)
+    let _ = write(stream, rsp_buf)?;
+
+    // If write didn’t drain, we must wait for writable
+    let write_blocked = !rsp_buf.is_empty();
+
+    Ok(blocked || write_blocked)
 }
 
 #[cfg(unix)]
@@ -397,8 +401,17 @@ fn serve<T: HService>(
     let mut rsp_buf = BytesMut::with_capacity(BUF_LEN);
 
     loop {
-        if read_write(stream, &peer_addr, &mut req_buf, &mut rsp_buf, &mut service)? {
-            stream.wait_io();
+        match read_write(stream, &peer_addr, &mut req_buf, &mut rsp_buf, &mut service) {
+            Ok(should_wait) => {
+                if should_wait {
+                    stream.wait_io(); // waits for read or write readiness
+                }
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                // graceful peer close: finish quietly
+                return Ok(());
+            }
+            Err(e) => return Err(e),
         }
     }
 }
@@ -413,8 +426,16 @@ fn serve_tls<T: HService>(
     let mut rsp_buf = BytesMut::with_capacity(BUF_LEN);
 
     loop {
-        if read_write(stream, &peer_addr, &mut req_buf, &mut rsp_buf, &mut service)? {
-            stream.get_mut().wait_io();
+        match read_write(stream, &peer_addr, &mut req_buf, &mut rsp_buf, &mut service) {
+            Ok(should_wait) => {
+                if should_wait {
+                    stream.get_mut().wait_io(); // wait on the underlying TcpStream
+                }
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                return Ok(()); // graceful close
+            }
+            Err(e) => return Err(e),
         }
     }
 }
