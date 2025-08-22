@@ -132,6 +132,8 @@ pub trait HFactory: Send + Sized + 'static {
         }
         tls_builder.set_min_proto_version(ssl.min_version.to_boring())?;
         tls_builder.set_max_proto_version(ssl.max_version.to_boring())?;
+        tls_builder.set_options(boring::ssl::SslOptions::NO_TICKET);
+        tls_builder.set_session_id_context(b"sib\0")?;
         tls_builder.set_alpn_protos(b"\x08http/1.1")?;
 
         #[cfg(not(debug_assertions))]
@@ -330,24 +332,26 @@ fn read(stream: &mut impl Read, buf: &mut BytesMut) -> io::Result<bool> {
 
 #[cfg(unix)]
 #[inline]
-fn write(stream: &mut impl std::io::Write, rsp_buf: &mut BytesMut) -> io::Result<usize> {
+fn write(stream: &mut impl std::io::Write, rsp_buf: &mut BytesMut) -> io::Result<(usize, bool)> {
     use bytes::Buf;
     use std::io::IoSlice;
 
     let write_buf = rsp_buf.chunk();
     let len = write_buf.len();
     let mut write_cnt = 0;
+    let mut blocked = false;
+
     while write_cnt < len {
         let slice = IoSlice::new(unsafe { write_buf.get_unchecked(write_cnt..) });
         match stream.write_vectored(std::slice::from_ref(&slice)) {
             Ok(0) => return Err(io::Error::new(io::ErrorKind::BrokenPipe, "write closed")),
             Ok(n) => write_cnt += n,
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => { blocked = true; break;},
             Err(e) => return Err(e),
         }
     }
     rsp_buf.advance(write_cnt);
-    Ok(write_cnt)
+    Ok((write_cnt, blocked))
 }
 
 #[cfg(unix)]
@@ -383,8 +387,8 @@ where
     }
     
     // Flush any pending response bytes
-    write(stream, rsp_buf)?;
-    Ok(blocked)
+    let (_, wblocked) = write(stream, rsp_buf)?;
+    Ok(blocked || wblocked)
 }
 
 #[cfg(unix)]
