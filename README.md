@@ -40,6 +40,16 @@ it is designed for **real-time networking**, **low-latency streaming**, and **sc
 | 4096        | 5,890,631     | 5.11 ms       | 719.07 MB/s  |
 | 16384       | 5,038,547     | 19.11 ms      | 615.06 MB/s  |
 
+# ⚙️ Build note
+
+When building with the `sys-boring-ssl` feature enabled, you’ll need to set up the LLVM toolchain and related libraries first.
+
+## 📦 Prerequisites (Ubuntu/Debian)
+
+```bash
+sudo apt install -y clang lld llvm libclang-dev
+```
+
 ## 📚 Documentation
 
 - 📦 [Crate](https://crates.io/crates/sib)
