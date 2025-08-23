@@ -366,29 +366,44 @@ where
     S: Read + io::Write,
     T: HService,
 {
-    // read the socket for requests
-    let blocked = read(stream, req_buf)?;
+    // Prioritize draining any pending response bytes
+    let mut blocked = false;
+    if !rsp_buf.is_empty() {
+        let (_, wblocked) = write(stream, rsp_buf)?;
+        blocked |= wblocked;
+        if !rsp_buf.is_empty() {
+            return Ok(true); // will call wait_io()
+        }
+    }
+
+    // Now read a fresh request
+    let rblocked = read(stream, req_buf)?;
+    blocked |= rblocked;
+
+    // Serve as many requests as are fully buffered
     loop {
-        // create a new session
         use crate::network::http::h1_session;
         let mut headers = [MaybeUninit::uninit(); h1_session::MAX_HEADERS];
-        let mut sess =
-            match h1_session::new_session(stream, peer_addr, &mut headers, req_buf, rsp_buf)? {
-                Some(sess) => sess,
-                None => break,
-            };
-        // call the service with the session
+        let mut sess = match h1_session::new_session(stream, peer_addr, &mut headers, req_buf, rsp_buf)? {
+            Some(sess) => sess,
+            None => break,
+        };
+
         if let Err(e) = service.call(&mut sess) {
             if e.kind() == std::io::ErrorKind::ConnectionAborted {
+                // only abort if the service explicitly wants hard close
                 return Err(e);
             }
+            // Any other error just break
             break;
         }
     }
     
-    // Flush any pending response bytes
-    let (_, wblocked) = write(stream, rsp_buf)?;
-    Ok(blocked || wblocked)
+    // final flush
+    let (_, wblocked2) = write(stream, rsp_buf)?;
+    blocked |= wblocked2;
+
+    Ok(blocked)
 }
 
 #[cfg(unix)]
