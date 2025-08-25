@@ -2,7 +2,6 @@ use crate::network::http::util::HttpHeader;
 
 pub trait Session {
     fn peer_addr(&self) -> &std::net::SocketAddr;
-
     fn is_h3(&self) -> bool;
     fn req_method(&self) -> Option<&str>;
     fn req_path(&self) -> Option<&str>;

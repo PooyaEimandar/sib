@@ -52,6 +52,7 @@ pub trait HFactory: Send + Sized + 'static {
     fn service(&self, id: usize) -> Self::Service;
 
     /// Start the http service
+    #[cfg(feature = "net-h1-server")]
     fn start_h1<L: ToSocketAddrs>(
         self,
         addr: L,
@@ -101,7 +102,7 @@ pub trait HFactory: Send + Sized + 'static {
         )
     }
 
-    #[cfg(feature = "sys-boring-ssl")]
+    #[cfg(all(feature = "net-h1-server", feature = "sys-boring-ssl"))]
     fn start_h1_tls<L: ToSocketAddrs>(
         self,
         addr: L,
@@ -298,6 +299,7 @@ pub trait HFactory: Send + Sized + 'static {
     }
 }
 
+#[cfg(feature = "net-h1-server")]
 #[inline]
 pub(crate) fn reserve_buf(buf: &mut BytesMut) {
     let rem = buf.capacity() - buf.len();
@@ -306,7 +308,7 @@ pub(crate) fn reserve_buf(buf: &mut BytesMut) {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "net-h1-server"))]
 #[inline]
 fn read(stream: &mut impl Read, buf: &mut BytesMut) -> io::Result<bool> {
     reserve_buf(buf);
@@ -330,7 +332,7 @@ fn read(stream: &mut impl Read, buf: &mut BytesMut) -> io::Result<bool> {
     Ok(n < len)
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "net-h1-server"))]
 #[inline]
 fn write(stream: &mut impl std::io::Write, rsp_buf: &mut BytesMut) -> io::Result<(usize, bool)> {
     use bytes::Buf;
@@ -354,7 +356,7 @@ fn write(stream: &mut impl std::io::Write, rsp_buf: &mut BytesMut) -> io::Result
     Ok((write_cnt, blocked))
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "net-h1-server"))]
 fn read_write<S, T>(
     stream: &mut S,
     peer_addr: &SocketAddr,
@@ -406,7 +408,7 @@ where
     Ok(blocked)
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "net-h1-server"))]
 fn serve<T: HService>(
     stream: &mut TcpStream,
     peer_addr: SocketAddr,
@@ -654,7 +656,7 @@ fn handle_h3_request<S: HService>(
     session: &mut super::h3_session::H3Session,
     service: &mut S,
 ) {
-    use super::h3_session::PartialResponse;
+    use super::h3_session::{self, PartialResponse};
 
     // We decide the response based on headers alone, so stop reading the request body.
     if let Err(e) = session.conn.stream_shutdown(stream_id, quiche::Shutdown::Read, 0) {
@@ -664,6 +666,8 @@ fn handle_h3_request<S: HService>(
         }
     }
 
+    // initialize init_session
+    h3_session::init_session(session);
     // Run the service to populate rsp_headers / rsp_body on `session`.
     let _ = service.call(session);
 

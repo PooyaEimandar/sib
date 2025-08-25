@@ -22,7 +22,6 @@ pub(crate) struct H3Session {
 }
 
 impl Session for H3Session {
-    
     fn peer_addr(&self) -> &SocketAddr {
         &self.peer_addr
     }
@@ -176,15 +175,23 @@ impl Session for H3Session {
     }
 }
 
-#[allow(dead_code)]
-pub(crate) fn new_session(peer_addr: SocketAddr, conn: quiche::Connection) -> H3Session {
-    const SERVER_NAME: &str =
-            concat!("Sib ", env!("SIB_BUILD_VERSION"));
-    let rsp_headers = vec![
+fn default_headers() -> Vec<Header> {
+    let server_name = concat!("Sib ", env!("SIB_BUILD_VERSION"));
+    vec![
         Header::new(b":status", b"200"),
-        Header::new(b"server", SERVER_NAME.as_bytes()),
+        Header::new(b"server", server_name.as_bytes()),
         Header::new(b"date", super::util::CURRENT_DATE.load().as_bytes()),
-    ];
+    ]
+}
+
+pub(crate) fn init_session(session: &mut H3Session) {
+    if session.rsp_headers.is_empty() {
+        let headers = default_headers();
+        session.rsp_headers.extend_from_slice(&headers);
+    }
+}
+
+pub(crate) fn new_session(peer_addr: SocketAddr, conn: quiche::Connection) -> H3Session {
     H3Session {
         peer_addr,
         conn,
@@ -192,7 +199,7 @@ pub(crate) fn new_session(peer_addr: SocketAddr, conn: quiche::Connection) -> H3
         req_headers: None,
         req_body_map: HashMap::new(),
         current_stream_id: None,
-        rsp_headers,
+        rsp_headers: default_headers(),
         rsp_body: Vec::new(),
         partial_responses: HashMap::new(),
     }
