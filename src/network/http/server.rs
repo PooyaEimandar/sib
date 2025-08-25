@@ -604,9 +604,11 @@ fn handle_writable(session: &mut super::h3_session::H3Session, stream_id: u64) {
         match http3_conn.send_response(conn, stream_id, headers, false) {
             Ok(_) => (),
             Err(quiche::h3::Error::StreamBlocked) => {
+                // can't send now; try again when writable
                 return;
             }
             Err(e) => {
+                session.partial_responses.remove(&stream_id);
                 eprintln!("{} stream send failed {:?}", conn.trace_id(), e);
                 return;
             }
@@ -616,12 +618,9 @@ fn handle_writable(session: &mut super::h3_session::H3Session, stream_id: u64) {
     resp.headers = None;
 
     let body = &resp.body[resp.written..];
-
     let written = match http3_conn.send_body(conn, stream_id, body, true) {
         Ok(v) => v,
-
         Err(quiche::h3::Error::Done) => 0,
-
         Err(e) => {
             session.partial_responses.remove(&stream_id);
             eprintln!("{} stream send failed {:?}", conn.trace_id(), e);
@@ -677,14 +676,12 @@ fn handle_h3_request<S: HService>(
 
     match http3_conn.send_response(&mut session.conn, stream_id, &session.rsp_headers, false) {
         Ok(v) => v,
-
         Err(quiche::h3::Error::StreamBlocked) => {
             let response = PartialResponse {
                 headers: Some(session.rsp_headers.clone()),
                 body: session.rsp_body.clone(),
                 written: 0,
             };
-
             session.partial_responses.insert(stream_id, response);
             return;
         }
@@ -711,10 +708,10 @@ fn handle_h3_request<S: HService>(
             body: session.rsp_body.clone(),
             written,
         };
-
         session.partial_responses.insert(stream_id, response);
     }
 }
+
 #[cfg(feature = "net-h3-server")]
 fn quic_dispatcher<S, F>(
     socket: std::sync::Arc<may::net::UdpSocket>,
@@ -1147,6 +1144,8 @@ fn handle_quic_connection<S: HService + HServiceWebTransport + 'static>(
                                 session.current_stream_id = None;
                             }
                         }
+                        // also drop any pending HTTP response state for that stream
+                        session.partial_responses.remove(&sid);
                     }
                     Ok((_id, quiche::h3::Event::PriorityUpdate)) => { /* ignore */ }
                     Ok((_id, quiche::h3::Event::GoAway)) => {
@@ -1157,7 +1156,12 @@ fn handle_quic_connection<S: HService + HServiceWebTransport + 'static>(
                             }
                         }
                     }
-                    Err(quiche::h3::Error::Done) => break,
+                    Err(quiche::h3::Error::Done) => break, // no more events this tick
+                    Err(quiche::h3::Error::TransportError(quiche::Error::StreamStopped(_))) |
+                    Err(quiche::h3::Error::TransportError(quiche::Error::StreamReset(_))) => {
+                        // per-stream transport issues, don't kill the whole connection worker
+                        continue;
+                    }
                     Err(e) => {
                         eprintln!("{} h3 error: {e:?}", session.conn.trace_id());
                         break;
