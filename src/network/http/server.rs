@@ -232,6 +232,7 @@ pub trait HFactory: Send + Sized + 'static {
         addr: L,
         cert_pem_file_path: &str,
         key_pem_file_path: &str,
+        io_timeout: std::time::Duration,
         verify_peer: bool,
         stack_size: usize,
         dgram_size: Option<(usize, usize)>
@@ -260,7 +261,7 @@ pub trait HFactory: Send + Sized + 'static {
                 std::io::Error::other(format!("Failed to set application protos: {e:?}"))
             })?;
 
-        config.set_max_idle_timeout(5000);
+        config.set_max_idle_timeout(io_timeout.as_millis() as u64);
         config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
         config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
         config.set_initial_max_data(10_000_000);
@@ -768,11 +769,11 @@ fn quic_dispatcher<S, F>(
         let (n, from) = match socket.recv_from(&mut buf) {
             Ok(v) => v,
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                may::coroutine::yield_now();
                 continue;
             }
             Err(e) => {
                 eprintln!("recv_from error: {e:?}");
+                may::coroutine::yield_now();
                 continue;
             }
         };
@@ -950,29 +951,38 @@ fn handle_quic_connection<S: HService + HServiceWebTransport + 'static>(
         let timeout = session
             .conn
             .timeout()
-            .unwrap_or_else(|| std::time::Duration::from_secs(5));
+            .unwrap_or_else(|| std::time::Duration::from_millis(50));
         let mut got_packet = false;
 
-        let _ = may::select! {
-            pkt = rx.recv() => {
-                match pkt {
-                    Ok(mut data) => {
+        // try to nonblocking-drain any backlog quickly
+        let mut drained = 0usize;
+        while drained < 64 {
+            match rx.try_recv() {
+                Ok(mut data) => {
+                    let recv_info = quiche::RecvInfo { to: data.to, from: data.from };
+                    if session.conn.recv(&mut data.buf, recv_info).is_ok() {
+                        got_packet = true;
+                    }
+                    drained += 1;
+                }
+                Err(_) => break,
+            }
+        }
+
+        // if we still didn’t get anything, block up to the QUIC timeout for ONE packet
+        if !got_packet {
+            let _ = may::select! {
+                pkt = rx.recv() => {
+                    if let Ok(mut data) = pkt {
                         let recv_info = quiche::RecvInfo { to: data.to, from: data.from };
-                        if let Err(e) = session.conn.recv(&mut data.buf, recv_info) {
-                            if e != quiche::Error::Done {
-                                eprintln!("{} recv failed: {e:?}", session.conn.trace_id());
-                            }
-                        } else {
+                        if session.conn.recv(&mut data.buf, recv_info).is_ok() {
                             got_packet = true;
                         }
                     }
-                    Err(_) => return, // channel closed
-                }
-            },
-            _ = may::coroutine::sleep(timeout) => {
-                session.conn.on_timeout();
-            }
-        };
+                },
+                _ = may::coroutine::sleep(timeout) => { session.conn.on_timeout(); }
+            };
+        }
 
         if (session.conn.is_in_early_data() || session.conn.is_established())
             && session.http3_conn.is_none()
@@ -1661,7 +1671,7 @@ mod tests {
         std::thread::spawn(|| {
             println!("Starting H3 server...");
             EchoServer
-                .start_h3_tls("0.0.0.0:8080", "/tmp/cert.pem", "/tmp/key.pem", true, 0, Some((1350, 1350)))
+                .start_h3_tls("0.0.0.0:8080", "/tmp/cert.pem", "/tmp/key.pem", std::time::Duration::from_secs(10), true, 0, Some((1350, 1350)))
                 .expect("h3 start server");
         });
 

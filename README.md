@@ -18,7 +18,7 @@ it is designed for **real-time networking**, **low-latency streaming**, and **sc
 
 ## 📊 Benchmarks
 
-### 🔬 [HTTP 1.1 TechEmpower Plaintext Benchmark](https://github.com/TechEmpower/FrameworkBenchmarks/tree/master/frameworks/Rust/sib)
+### 🔬 [HTTP/1.1 TechEmpower Plaintext Benchmark](https://github.com/TechEmpower/FrameworkBenchmarks/tree/master/frameworks/Rust/sib)
 
 **Environment:**
 
@@ -26,7 +26,7 @@ it is designed for **real-time networking**, **low-latency streaming**, and **sc
 - 🧮 32 GB RAM
 - 🐳 Docker container
 - ⚙️ `target-cpu=native` on Apple Macbook Pro M2 Max 2023
-- Sib HTTP1.1 uses:
+- Sib HTTP/1.1 uses:
   - [`may`](https://github.com/Xudong-Huang/may) for coroutine scheduling.
   - [`bytes`](https://github.com/tokio-rs/bytes) for zero-copy HTTP parser.
   - [`mimalloc`](https://github.com/microsoft/mimalloc) a compact general purpose allocator with excellent performance.
@@ -39,6 +39,29 @@ it is designed for **real-time networking**, **low-latency streaming**, and **sc
 | 1024        | **6,112,892** | 1.71 ms       | 746.20 MB/s  |
 | 4096        | 5,890,631     | 5.11 ms       | 719.07 MB/s  |
 | 16384       | 5,038,547     | 19.11 ms      | 615.06 MB/s  |
+
+### 🔬 [HTTP/3 Stress Test Benchmark](https://github.com/PooyaEimandar/sib/tree/main//bench/h3_test.py)
+
+**Environment:**
+
+- 🧠 12-core CPU
+- 🧮 96 GB RAM
+- 💻 Apple Macbook Pro M2 Max 2023
+- Sib HTTP/3 uses:
+  - [`may`](https://github.com/Xudong-Huang/may) for coroutine scheduling.
+  - [`quiche`](https://github.com/cloudflare/quiche) for QUIC + HTTP/3 transport.
+  - [`bytes`](https://github.com/tokio-rs/bytes) for zero-copy buffer management.
+  - [`mimalloc`](https://github.com/microsoft/mimalloc) compact high-performance allocator.
+
+**Test setup:**
+
+- Download [binary of curl built with HTTP/3](https://github.com/stunnel/static-curl) and place it inside bench folder
+- Run the Python script from the bench folder `python3 ./h3_test.py --url https://localhost:8080 --curl-path ./curl --requests 10000 --concurrency 10000 --http3 --insecure`
+- 10K requests launched all at once, each over its own QUIC/TLS handshake. This is a hammer test and purpose is validate the stability and tail latency under handshake pressure.
+
+| Total Requests | Concurrency | Success Rate | Avg Latency | Min Latency | Max Latency | Wall-clock (total) |
+| -------------- | ----------- | ------------ | ----------- | ----------- | ----------- | ------------------ |
+| 10,000         | 10,000      | **99.97%**   | **1.00 s**  | 72 ms       | 30.2 s      | 105.7 s            |
 
 # ⚙️ Build note
 

@@ -1,6 +1,6 @@
 - [x] HTTP1.1
 - [x] TLS based on boringSSL
-- [x] Http3 server based on Quiche (tested via https://github.com/stunnel/static-curl and browsers)
+- [x] Http3 server based on Quic
 - [x] FDB connection pool based on may
 - [x] Ratelimit
 - [x] gstreamer
