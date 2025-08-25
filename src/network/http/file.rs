@@ -655,7 +655,7 @@ mod tests {
             let id = std::thread::current().id();
             println!("Starting H3 server on {addr} with thread: {id:?}");
             FileServer(FileService)
-                .start_h3_tls(addr, cert_path, key_path, std::time::Duration::from_secs(10), false, STACK_SIZE, None)
+                .start_h3_tls(addr, (cert_path, key_path), std::time::Duration::from_secs(10), false, STACK_SIZE, None)
                 .unwrap_or_else(|_| panic!("file server failed to start for thread {id:?}"));
         });
         threads.push(h3_handle);

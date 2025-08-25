@@ -230,8 +230,7 @@ pub trait HFactory: Send + Sized + 'static {
     fn start_h3_tls<L: ToSocketAddrs>(
         self,
         addr: L,
-        cert_pem_file_path: &str,
-        key_pem_file_path: &str,
+        (cert_pem_file_path, key_pem_file_path): (&str, &str),
         io_timeout: std::time::Duration,
         verify_peer: bool,
         stack_size: usize,
@@ -1163,6 +1162,7 @@ fn handle_quic_connection<S: HService + HServiceWebTransport + 'static>(
                         continue;
                     }
                     Err(e) => {
+                        let _ = session.conn.close(true, 0x1, b"h3 fatal");
                         eprintln!("{} h3 error: {e:?}", session.conn.trace_id());
                         break;
                     }
@@ -1675,7 +1675,7 @@ mod tests {
         std::thread::spawn(|| {
             println!("Starting H3 server...");
             EchoServer
-                .start_h3_tls("0.0.0.0:8080", "/tmp/cert.pem", "/tmp/key.pem", std::time::Duration::from_secs(10), true, 0, Some((1350, 1350)))
+                .start_h3_tls("0.0.0.0:8080", ("/tmp/cert.pem", "/tmp/key.pem"), std::time::Duration::from_secs(10), true, 0, Some((1350, 1350)))
                 .expect("h3 start server");
         });
 
