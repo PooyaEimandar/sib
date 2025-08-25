@@ -19,7 +19,7 @@ use std::net::{SocketAddr, ToSocketAddrs};
 use may::io::WaitIo;
 
 #[cfg(feature = "net-h3-server")]
-const MAX_DATAGRAM_SIZE: usize = 1200;
+const MAX_DATAGRAM_SIZE: usize = 1350;
 
 const MIN_BUF_LEN: usize = 1024;
 const MAX_BODY_LEN: usize = 4096;
@@ -830,7 +830,7 @@ fn quic_dispatcher<S, F>(
         // stateless retry if no/invalid token
         let token = hdr.token.as_deref().unwrap_or(&[]);
         let odcid_opt = if token.is_empty() {
-            Some(quiche::ConnectionId::from_ref(&hdr.dcid))
+            None
         } else {
             validate_token(&from, token)
         };
