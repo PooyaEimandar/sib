@@ -570,66 +570,80 @@ fn validate_token<'a>(
 #[cfg(feature = "net-h3-server")]
 fn handle_writable(session: &mut super::h3_session::H3Session, stream_id: u64) {
     let conn = &mut session.conn;
-    let http3_conn = &mut match session.http3_conn.as_mut() {
+
+    let http3_conn = match session.http3_conn.as_mut() {
         Some(v) => v,
         None => {
-            eprintln!(
-                "{} HTTP/3 connection is not initialized while checking handle_writable",
-                conn.trace_id()
-            );
+            eprintln!("{} handle_writable with no h3_conn", conn.trace_id());
             return;
         }
     };
 
-    //s_debug!("{} stream {} is writable", conn.trace_id(), stream_id);
-
-    if !session.partial_responses.contains_key(&stream_id) {
+    let Some(resp) = session.partial_responses.get_mut(&stream_id) else {
+        // Nothing pending for this stream.
         return;
-    }
-
-    let resp = match session.partial_responses.get_mut(&stream_id) {
-        Some(v) => v,
-        None => {
-            eprintln!(
-                "{} no partial response for stream id {}",
-                conn.trace_id(),
-                stream_id
-            );
-            return;
-        }
     };
 
+    // Try sending headers first (if any remain).
     if let Some(ref headers) = resp.headers {
         match http3_conn.send_response(conn, stream_id, headers, false) {
-            Ok(_) => (),
-            Err(quiche::h3::Error::StreamBlocked) => {
-                // can't send now; try again when writable
+            Ok(_) => { /* headers sent, continue to body */ }
+            Err(quiche::h3::Error::StreamBlocked)
+            | Err(quiche::h3::Error::Done) => {
+                return;
+            }
+            Err(quiche::h3::Error::RequestCancelled)
+            | Err(quiche::h3::Error::TransportError(quiche::Error::StreamStopped(_)))
+            | Err(quiche::h3::Error::TransportError(quiche::Error::StreamReset(_))) => {
+                // Peer cancelled / stopped this stream. Stop writing and drop state.
+                session.partial_responses.remove(&stream_id);
+                let _ = conn.stream_shutdown(stream_id, quiche::Shutdown::Write, 0);
                 return;
             }
             Err(e) => {
+                // Any other failure: drop state for this stream and log.
                 session.partial_responses.remove(&stream_id);
-                eprintln!("{} stream send failed {:?}", conn.trace_id(), e);
+                eprintln!("{} send_response failed on {}: {:?}", conn.trace_id(), stream_id, e);
                 return;
             }
         }
+        // Mark headers done so we only send body next time.
+        resp.headers = None;
     }
 
-    resp.headers = None;
-
+    // Send body (final = true). If we can't finish now, we'll store progress.
     let body = &resp.body[resp.written..];
+    if body.is_empty() {
+        // Nothing to send; we're done.
+        session.partial_responses.remove(&stream_id);
+        return;
+    }
+
     let written = match http3_conn.send_body(conn, stream_id, body, true) {
-        Ok(v) => v,
-        Err(quiche::h3::Error::Done) => 0,
+        Ok(n) => n,
+        Err(quiche::h3::Error::Done)
+        | Err(quiche::h3::Error::StreamBlocked) => {
+            // Flow control / credit limited; try again when writable.
+            return;
+        }
+        Err(quiche::h3::Error::RequestCancelled)
+        | Err(quiche::h3::Error::TransportError(quiche::Error::StreamStopped(_)))
+        | Err(quiche::h3::Error::TransportError(quiche::Error::StreamReset(_))) => {
+            session.partial_responses.remove(&stream_id);
+            let _ = conn.stream_shutdown(stream_id, quiche::Shutdown::Write, 0);
+            return;
+        }
         Err(e) => {
             session.partial_responses.remove(&stream_id);
-            eprintln!("{} stream send failed {:?}", conn.trace_id(), e);
+            eprintln!("{} send_body failed on {}: {:?}", conn.trace_id(), stream_id, e);
             return;
         }
     };
 
     resp.written += written;
 
-    if resp.written == resp.body.len() {
+    if resp.written >= resp.body.len() {
+        // All bytes flushed; clear tracking.
         session.partial_responses.remove(&stream_id);
     }
 }
@@ -642,72 +656,79 @@ fn handle_h3_request<S: HService>(
 ) {
     use super::h3_session::PartialResponse;
 
-    // We decide the response based on headers alone, so stop reading the
-    // request stream so that any body is ignored and pointless Data events
-    // are not generated.
-    match session
-        .conn
-        .stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
-    {
-        Ok(_) => (),
-        Err(e) => {
-            eprintln!(
-                "{} stream shutdown failed: {:?}",
-                session.conn.trace_id(),
-                e
-            );
-            return;
+    // We decide the response based on headers alone, so stop reading the request body.
+    if let Err(e) = session.conn.stream_shutdown(stream_id, quiche::Shutdown::Read, 0) {
+        // It's normal to get Done if peer already closed read side; don't bail the handler.
+        if !matches!(e, quiche::Error::Done) {
+            eprintln!("{} sid={} stream_shutdown(Read) non-fatal: {:?}", session.conn.trace_id(), stream_id, e);
         }
     }
 
+    // Run the service to populate rsp_headers / rsp_body on `session`.
     let _ = service.call(session);
 
     let http3_conn = match session.http3_conn.as_mut() {
         Some(v) => v,
         None => {
-            eprintln!(
-                "{} HTTP/3 connection is not initialized while handling request",
-                session.conn.trace_id()
-            );
+            eprintln!("{} HTTP/3 connection not initialized in handle_h3_request", session.conn.trace_id());
             return;
         }
     };
 
+    // Try to send headers first.
     match http3_conn.send_response(&mut session.conn, stream_id, &session.rsp_headers, false) {
-        Ok(v) => v,
+        Ok(_) => { /* proceed to send body */ }
         Err(quiche::h3::Error::StreamBlocked) => {
-            let response = PartialResponse {
-                headers: Some(session.rsp_headers.clone()),
-                body: session.rsp_body.clone(),
+            // We'll finish in handle_writable later.
+            use std::mem::take;
+            session.partial_responses.insert(stream_id, PartialResponse {
+                headers: Some(take(&mut session.rsp_headers)),
+                body: take(&mut session.rsp_body),
                 written: 0,
-            };
-            session.partial_responses.insert(stream_id, response);
+            });
             return;
         }
-
+        Err(quiche::h3::Error::RequestCancelled)
+        | Err(quiche::h3::Error::TransportError(quiche::Error::StreamStopped(_))) => {
+            // Peer cancelled; stop writing and drop state.
+            session.partial_responses.remove(&stream_id);
+            let _ = session.conn.stream_shutdown(stream_id, quiche::Shutdown::Write, 0);
+            return;
+        }
         Err(e) => {
-            eprintln!("{} stream send failed {:?}", session.conn.trace_id(), e);
+            // Any other error: drop state for this stream and return.
+            session.partial_responses.remove(&stream_id);
+            eprintln!("{} send_response failed: {:?}", session.conn.trace_id(), e);
             return;
         }
     }
 
-    let written = match http3_conn.send_body(&mut session.conn, stream_id, &session.rsp_body, true)
-    {
-        Ok(v) => v,
-        Err(quiche::h3::Error::Done) => 0,
+    // Send body
+    let written = match http3_conn.send_body(&mut session.conn, stream_id, &session.rsp_body, true) {
+        Ok(n) => n,
+        Err(quiche::h3::Error::Done) | Err(quiche::h3::Error::StreamBlocked) => 0,
+        Err(quiche::h3::Error::RequestCancelled)
+        | Err(quiche::h3::Error::TransportError(quiche::Error::StreamStopped(_))) => {
+            session.partial_responses.remove(&stream_id);
+            let _ = session.conn.stream_shutdown(stream_id, quiche::Shutdown::Write, 0);
+            return;
+        }
         Err(e) => {
-            eprintln!("{} stream send failed {:?}", session.conn.trace_id(), e);
+            session.partial_responses.remove(&stream_id);
+            eprintln!("{} send_body failed: {:?}", session.conn.trace_id(), e);
             return;
         }
     };
 
+    // If we couldn't finish the body, stash the remainder for handle_writable.
     if written < session.rsp_body.len() {
-        let response = PartialResponse {
+        use std::mem::take;
+        let body = take(&mut session.rsp_body); // move out once we know we’re deferring
+        session.partial_responses.insert(stream_id, PartialResponse {
             headers: None,
-            body: session.rsp_body.clone(),
+            body,
             written,
-        };
-        session.partial_responses.insert(stream_id, response);
+        });
     }
 }
 
@@ -1064,6 +1085,9 @@ fn handle_quic_connection<S: HService + HServiceWebTransport + 'static>(
                         else {
                             session.req_headers = Some(list);
                             session.current_stream_id = Some(sid);
+                            // respond immediately
+                            handle_h3_request(sid, &mut session, &mut service);
+                            session.current_stream_id = None;
                         }
                     }
                     Ok((sid, quiche::h3::Event::Data)) => {
@@ -1087,32 +1111,18 @@ fn handle_quic_connection<S: HService + HServiceWebTransport + 'static>(
                             continue;
                         }
 
-                        // For normal streams, read into a local Vec while h3 is borrowed…
-                        let mut collected: Vec<u8> = Vec::new();
-                        {
-                            let mut tmp = [0u8; 4096];
-                            loop {
-                                let res = {
-                                    let Some(h3) = session.http3_conn.as_mut() else { break };
-                                    h3.recv_body(&mut session.conn, sid, &mut tmp)
-                                };
-                                match res {
-                                    Ok(n) => collected.extend_from_slice(&tmp[..n]),
-                                    Err(quiche::h3::Error::Done) => break,
-                                    Err(e) => {
-                                        eprintln!("recv_body: {e:?}");
-                                        break;
-                                    }
-                                }
+                        // For normal HTTP: we already stream_shutdown(Read), just drain & drop.
+                        let mut tmp = [0u8; 4096];
+                        loop {
+                            let res = {
+                                let Some(h3) = session.http3_conn.as_mut() else { break };
+                                h3.recv_body(&mut session.conn, sid, &mut tmp)
+                            };
+                            match res {
+                                Ok(_n) => {} // drop
+                                Err(quiche::h3::Error::Done) => break,
+                                Err(e) => { eprintln!("recv_body(drop): {e:?}"); break; }
                             }
-                        }
-                        // …then append to session after the borrow ends.
-                        if !collected.is_empty() {
-                            session
-                                .req_body_map
-                                .entry(sid)
-                                .or_default()
-                                .extend_from_slice(&collected);
                         }
                     }
                     Ok((sid, quiche::h3::Event::Finished)) => {
@@ -1128,11 +1138,11 @@ fn handle_quic_connection<S: HService + HServiceWebTransport + 'static>(
                             continue;
                         }
 
+                        session.req_body_map.remove(&sid);
                         if session.current_stream_id == Some(sid) {
-                            handle_h3_request(sid, &mut session, &mut service);
+                            // If you keep current_stream_id for another reason, clear it.
                             session.current_stream_id = None;
                         }
-                        session.req_body_map.remove(&sid);
                     }
                     Ok((sid, quiche::h3::Event::Reset { .. })) => {
                         if extend_connect && wt_connect_streams.remove(&sid) {
@@ -1156,7 +1166,7 @@ fn handle_quic_connection<S: HService + HServiceWebTransport + 'static>(
                         }
                     }
                     Err(quiche::h3::Error::Done) => break, // no more events this tick
-                    Err(quiche::h3::Error::TransportError(quiche::Error::StreamStopped(_))) |
+                    Err(quiche::h3::Error::RequestCancelled) | Err(quiche::h3::Error::TransportError(quiche::Error::StreamStopped(_))) |
                     Err(quiche::h3::Error::TransportError(quiche::Error::StreamReset(_))) => {
                         // per-stream transport issues, don't kill the whole connection worker
                         continue;
