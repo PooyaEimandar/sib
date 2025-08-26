@@ -20,6 +20,10 @@ use may::io::WaitIo;
 
 #[cfg(feature = "net-h3-server")]
 const MAX_DATAGRAM_SIZE: usize = 1350;
+#[cfg(feature = "net-h3-server")]
+const H3_CHUNK_SIZE: usize = 128 * 1024; // 128 KB
+#[cfg(feature = "net-h3-server")]
+const H3_MAX_BYTES_PER_TICK: usize = 512 * 1024; //cap per tick
 
 const MIN_BUF_LEN: usize = 1024;
 const MAX_BODY_LEN: usize = 4096;
@@ -579,7 +583,7 @@ fn handle_writable(session: &mut super::h3_session::H3Session, stream_id: u64) {
 
     let Some(resp) = session.partial_responses.get_mut(&stream_id) else { return; };
 
-    // Send headers if still pending
+    // Flush headers if still pending
     if let Some(ref headers) = resp.headers {
         match http3_conn.send_response(conn, stream_id, headers, false) {
             Ok(_) => {}
@@ -597,22 +601,26 @@ fn handle_writable(session: &mut super::h3_session::H3Session, stream_id: u64) {
                 return;
             }
         }
-        // headers done
         resp.headers = None;
     }
 
-    // Push as many body bytes as transport allows (fin=false while there is data).
-    while resp.written < resp.body.len() {
-        let chunk = &resp.body[resp.written..];
+    // Stream body in bounded chunks while we have credit.
+    let mut budget = H3_MAX_BYTES_PER_TICK
+        .min(resp.body.len().saturating_sub(resp.written));
+
+    while resp.written < resp.body.len() && budget > 0 {
+        let end = (resp.written + H3_CHUNK_SIZE).min(resp.body.len());
+        let chunk = &resp.body[resp.written..end];
+
         match http3_conn.send_body(conn, stream_id, chunk, false) {
             Ok(n) if n > 0 => {
                 resp.written += n;
+                budget = budget.saturating_sub(n);
             }
             Ok(_) | Err(quiche::h3::Error::Done) | Err(quiche::h3::Error::StreamBlocked) => {
-                // No more credit right now; try again later.
-                return;
+                return; // try again on next writable tick
             }
-            Err(quiche::h3::Error::RequestCancelled) 
+            Err(quiche::h3::Error::RequestCancelled)
             | Err(quiche::h3::Error::TransportError(quiche::Error::StreamStopped(_)))
             | Err(quiche::h3::Error::TransportError(quiche::Error::StreamReset(_))) => {
                 session.partial_responses.remove(&stream_id);
@@ -627,21 +635,15 @@ fn handle_writable(session: &mut super::h3_session::H3Session, stream_id: u64) {
         }
     }
 
-    // All bytes queued, send with FIN
-    match http3_conn.send_body(conn, stream_id, &[], true) {
-        Ok(_) | Err(quiche::h3::Error::Done) => { /* FIN queued/sent */ }
-        Err(quiche::h3::Error::StreamBlocked) => {
-            // keep entry and we’ll try again next writable tick.
-            return;
+    // If fully written, send FIN and clean up
+    if resp.written >= resp.body.len() {
+        match http3_conn.send_body(conn, stream_id, &[], true) {
+            Ok(_) | Err(quiche::h3::Error::Done) => {}
+            Err(quiche::h3::Error::StreamBlocked) => return, // FIN will be retried later
+            Err(e) => eprintln!("{} send FIN failed on {}: {:?}", conn.trace_id(), stream_id, e),
         }
-        Err(e) => {
-            eprintln!("{} send FIN failed on {}: {:?}", conn.trace_id(), stream_id, e);
-            // Drop the state.
-        }
+        session.partial_responses.remove(&stream_id);
     }
-
-    // Finished successfully.
-    session.partial_responses.remove(&stream_id);
 }
 
 #[cfg(feature = "net-h3-server")]
@@ -652,20 +654,17 @@ fn handle_h3_request<S: HService>(
 ) {
     use super::h3_session::{self, PartialResponse};
 
-    // We decide the response based on headers alone, so stop reading the request body.
+    // Decide response on headers only; stop reading request body.
     if let Err(e) = session.conn.stream_shutdown(stream_id, quiche::Shutdown::Read, 0) {
-        // It's normal to get Done if peer already closed read side; don't bail the handler.
         if !matches!(e, quiche::Error::Done) {
             eprintln!("{} sid={} stream_shutdown(Read) non-fatal: {:?}", session.conn.trace_id(), stream_id, e);
         }
     }
 
-    // initialize init_session
+    // Prepare the session & run the service to fill rsp_headers / rsp_body.
     h3_session::init_session(session);
-    // Run the service to populate rsp_headers / rsp_body on `session`.
     if let Err(e) = service.call(session) {
         if e.kind() == std::io::ErrorKind::ConnectionAborted {
-            // only abort if the service explicitly wants hard close
             session.partial_responses.remove(&stream_id);
             let _ = session.conn.stream_shutdown(stream_id, quiche::Shutdown::Write, 0);
             return;
@@ -674,72 +673,75 @@ fn handle_h3_request<S: HService>(
 
     let http3_conn = match session.http3_conn.as_mut() {
         Some(v) => v,
-        None => {
-            eprintln!("{} HTTP/3 connection not initialized in handle_h3_request", session.conn.trace_id());
-            return;
-        }
+        None => { eprintln!("{} HTTP/3 connection not initialized", session.conn.trace_id()); return; }
     };
 
-    // Try to send headers first.
+    // Send headers first (or defer if blocked)
     match http3_conn.send_response(&mut session.conn, stream_id, &session.rsp_headers, false) {
-        Ok(_) => { /* proceed to send body */ }
+        Ok(_) => {}
         Err(quiche::h3::Error::StreamBlocked) => {
-            // We'll finish in handle_writable later.
             use std::mem::take;
             session.partial_responses.insert(stream_id, PartialResponse {
                 headers: Some(take(&mut session.rsp_headers)),
-                body: take(&mut session.rsp_body),
+                body:   take(&mut session.rsp_body),
                 written: 0,
             });
             return;
         }
         Err(quiche::h3::Error::RequestCancelled)
-        | Err(quiche::h3::Error::TransportError(quiche::Error::StreamStopped(_))) => {
-            // Peer cancelled; stop writing and drop state.
+        | Err(quiche::h3::Error::TransportError(quiche::Error::StreamStopped(_)))
+        | Err(quiche::h3::Error::TransportError(quiche::Error::StreamReset(_))) => {
             session.partial_responses.remove(&stream_id);
             let _ = session.conn.stream_shutdown(stream_id, quiche::Shutdown::Write, 0);
             return;
         }
         Err(e) => {
-            // Any other error: drop state for this stream and return.
             session.partial_responses.remove(&stream_id);
             eprintln!("{} send_response failed: {:?}", session.conn.trace_id(), e);
             return;
         }
     }
 
-    // Send body
+    // Send body in bounded chunks; if blocked, stash state for handle_writable().
     let total = session.rsp_body.len();
     let mut written = 0usize;
+    let mut budget = H3_MAX_BYTES_PER_TICK.min(total);
 
-    let written_now = match http3_conn.send_body(&mut session.conn, stream_id, &session.rsp_body, /*fin=*/ false) {
-        Ok(n) => n,
-        Err(quiche::h3::Error::Done) | Err(quiche::h3::Error::StreamBlocked) => 0,
-        Err(quiche::h3::Error::RequestCancelled)
-        | Err(quiche::h3::Error::TransportError(quiche::Error::StreamStopped(_))) => {
-            session.partial_responses.remove(&stream_id);
-            let _ = session.conn.stream_shutdown(stream_id, quiche::Shutdown::Write, 0);
-            return;
+    while written < total && budget > 0 {
+        let end = (written + H3_CHUNK_SIZE).min(total);
+        let chunk = &session.rsp_body[written..end];
+
+        match http3_conn.send_body(&mut session.conn, stream_id, chunk, /*fin=*/ false) {
+            Ok(n) if n > 0 => {
+                written += n;
+                budget  = budget.saturating_sub(n);
+            }
+            Ok(_) | Err(quiche::h3::Error::Done) | Err(quiche::h3::Error::StreamBlocked) => {
+                break; // defer to handle_writable()
+            }
+            Err(quiche::h3::Error::RequestCancelled)
+            | Err(quiche::h3::Error::TransportError(quiche::Error::StreamStopped(_)))
+            | Err(quiche::h3::Error::TransportError(quiche::Error::StreamReset(_))) => {
+                let _ = session.conn.stream_shutdown(stream_id, quiche::Shutdown::Write, 0);
+                return;
+            }
+            Err(e) => {
+                eprintln!("{} send_body failed: {:?}", session.conn.trace_id(), e);
+                return;
+            }
         }
-        Err(e) => {
-            session.partial_responses.remove(&stream_id);
-            eprintln!("{} send_body failed: {:?}", session.conn.trace_id(), e);
-            return;
-        }
-    };
-    written += written_now;
+    }
 
     if written < total {
         use std::mem::take;
-        let body = take(&mut session.rsp_body);
+        let body = take(&mut session.rsp_body); // move without cloning
         session.partial_responses.insert(stream_id, PartialResponse {
-            headers: None,// headers already sent
+            headers: None, // already sent
             body,
             written,
         });
     } else {
-        // now we can end the stream by sending FIN.
-        let _ = http3_conn.send_body(&mut session.conn, stream_id, &[], true);
+        let _ = http3_conn.send_body(&mut session.conn, stream_id, &[], true); // FIN
     }
 }
 
