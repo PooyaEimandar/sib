@@ -3,9 +3,56 @@ use crate::network::http::{session::Session, util::{HttpHeader, Status}};
 use bytes::Bytes;
 use quiche::h3::{Header, NameValue};
 
+#[derive(Default)]
+pub enum BodySource {
+    #[default]
+    Empty,
+    Bytes(bytes::Bytes),
+    
+    #[cfg(feature = "net-file-server")]
+    Mmap { map: std::sync::Arc<memmap2::Mmap>, lo: usize, hi: usize },
+}
+
+impl BodySource {
+    #[inline] 
+    pub fn len(&self) -> usize {
+        match self {
+            BodySource::Empty => 0,
+            BodySource::Bytes(b) => b.len(),
+
+            #[cfg(feature = "net-file-server")]
+            BodySource::Mmap { lo, hi, .. } => hi.saturating_sub(*lo),
+        }
+    }
+
+    #[inline] 
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    #[inline] 
+    pub fn chunk_at(&self, off: usize, cap: usize) -> &[u8] {
+        match self {
+            BodySource::Empty => &[],
+            BodySource::Bytes(b) => {
+                let end = (off + cap).min(b.len());
+                if off >= end { &[] } else { &b[off..end] }
+            }
+
+            #[cfg(feature = "net-file-server")]
+            BodySource::Mmap { map, lo, hi } => {
+                let base = *lo + off;
+                if base >= *hi { return &[]; }
+                let end = (base + cap).min(*hi);
+                &map[base..end]
+            }
+        }
+    }
+}
+
 pub(crate) struct PartialResponse {
     pub headers: Option<Vec<quiche::h3::Header>>,
-    pub body: Vec<u8>,
+    pub body: BodySource,
     pub written: usize,
 }
 
@@ -17,19 +64,22 @@ pub(crate) struct H3Session {
     pub req_body_map: HashMap<u64, Vec<u8>>,
     pub current_stream_id: Option<u64>,
     pub rsp_headers: Vec<quiche::h3::Header>,
-    pub rsp_body: Vec<u8>,
+    pub rsp_body: BodySource, 
     pub partial_responses: HashMap<u64, PartialResponse>,
 }
 
 impl Session for H3Session {
+    #[inline]
     fn peer_addr(&self) -> &SocketAddr {
         &self.peer_addr
     }
 
+    #[inline]
     fn is_h3(&self) -> bool {
         self.http3_conn.is_some()
     }
 
+    #[inline]
     fn req_method(&self) -> Option<&str> {
         if let Some(headers) = &self.req_headers {
             headers.iter().find(|h| h.name() == b":method").and_then(|h| std::str::from_utf8(h.value()).ok())
@@ -38,6 +88,7 @@ impl Session for H3Session {
         }
     }
 
+    #[inline]
     fn req_path(&self) -> Option<&str> {
         if let Some(headers) = &self.req_headers {
             headers.iter().find(|h| h.name() == b":path").and_then(|h| std::str::from_utf8(h.value()).ok())
@@ -46,16 +97,19 @@ impl Session for H3Session {
         }
     }
 
+    #[inline]
     fn req_http_version(&self) -> Option<u8> {
         Some(3)
     }
 
     /// HTTP/3 headers are not compatible with httparse::Header, use req_headers_vec instead
+    #[inline]
     fn req_headers(&self) -> &[httparse::Header<'_>] {
         //assert!(false, "HTTP/3 headers are not compatible with httparse::Header, use req_headers_vec instead");
         &[]
     }
 
+    #[inline]
     fn req_headers_vec(&self) -> Vec<httparse::Header<'_>> {
         if let Some(headers) = &self.req_headers {
             headers
@@ -77,10 +131,12 @@ impl Session for H3Session {
         }
     }
 
+    #[inline]
     fn req_header(&self, header: &HttpHeader) -> std::io::Result<&str> {
         self.req_header_str(header.as_str())
     }
 
+    #[inline]
     fn req_header_str(&self, name: &str) -> std::io::Result<&str> {
         if let Some(headers) = &self.req_headers {
             let name_bytes = name.as_bytes();
@@ -96,6 +152,7 @@ impl Session for H3Session {
         }
     }
 
+    #[inline]
     fn req_body(&mut self, _timeout: Duration) -> std::io::Result<&[u8]> {
         if let Some(id) = self.current_stream_id {
             if let Some(body) = self.req_body_map.get(&id) {
@@ -105,12 +162,14 @@ impl Session for H3Session {
         Err(std::io::Error::new(std::io::ErrorKind::NotFound, "No h3 request body available"))
     }
 
+    #[inline]
     fn status_code(&mut self, status: Status) -> &mut Self {
         let (code, _reason) = status.as_parts();
         self.rsp_headers[0] = Header::new(b":status", code.as_bytes());
         self
     }
 
+    #[inline]
     fn header_str(&mut self, name: &str, value: &str) -> std::io::Result<&mut Self> {
         let name_bytes = name.as_bytes();
         let value_bytes = value.as_bytes();
@@ -123,6 +182,7 @@ impl Session for H3Session {
         Ok(self)
     }
 
+    #[inline]
     fn headers_str(&mut self, header_val: &[(&str, &str)]) -> std::io::Result<&mut Self> {
         for (n, v) in header_val {
             self.header_str(n, v)?;
@@ -130,10 +190,12 @@ impl Session for H3Session {
         Ok(self)
     }
 
+    #[inline]
     fn header(&mut self, name: &HttpHeader, value: &str) -> std::io::Result<&mut Self> {
         self.header_str(name.as_str(), value)
     }
 
+    #[inline]
     fn headers(&mut self, header_val: &[(HttpHeader, &str)]) -> std::io::Result<&mut Self> {
         for (n, v) in header_val {
             self.header(n, v)?;
@@ -141,6 +203,7 @@ impl Session for H3Session {
         Ok(self)
     }
 
+    #[inline]
     fn headers_vec(&mut self, header_val: &[(HttpHeader, String)]) -> std::io::Result<&mut Self> {
         for (n, v) in header_val {
             self.header(n, v)?;
@@ -148,30 +211,38 @@ impl Session for H3Session {
         Ok(self)
     }
 
+    #[inline]
     fn body(&mut self, data: &Bytes) -> &mut Self {
-        self.rsp_body.clear();
-        self.rsp_body.extend_from_slice(data);
+        self.rsp_body = BodySource::Bytes(data.clone());
         self
     }
 
+    #[inline]
     fn body_slice(&mut self, body: &[u8]) -> &mut Self {
-        self.rsp_body.clear();
-        self.rsp_body.extend_from_slice(body);
+        self.rsp_body = BodySource::Bytes(Bytes::copy_from_slice(body));
         self
     }
 
+    #[inline]
     fn body_static(&mut self, body: &'static str) -> &mut Self {
-        self.rsp_body.clear();
-        self.rsp_body.extend_from_slice(body.as_bytes());
+        self.rsp_body = BodySource::Bytes(Bytes::from_static(body.as_bytes()));
         self
     }
 
+    #[cfg(feature = "net-file-server")]
+    #[inline]
+    fn body_mmap(&mut self, map: std::sync::Arc<memmap2::Mmap>, lo: usize, hi: usize) -> &mut Self {
+        self.rsp_body = BodySource::Mmap { map, lo, hi };
+        self
+    }
+
+    #[inline]
     fn eom(&mut self) {
-        #[cfg(debug_assertions)]
-        {
-            eprintln!("h3 headers are {:?}", self.rsp_headers);
-            eprintln!("h3 body is {:?}", self.rsp_body);
-        }
+        //#[cfg(debug_assertions)]
+        //{
+            // eprintln!("h3 headers are {:?}", self.rsp_headers);
+            // eprintln!("h3 body is {:?}", self.rsp_body);
+        //}
     }
 }
 
@@ -200,7 +271,7 @@ pub(crate) fn new_session(peer_addr: SocketAddr, conn: quiche::Connection) -> H3
         req_body_map: HashMap::new(),
         current_stream_id: None,
         rsp_headers: default_headers(),
-        rsp_body: Vec::new(),
+        rsp_body: BodySource::Empty,
         partial_responses: HashMap::new(),
     }
 }

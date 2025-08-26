@@ -605,12 +605,12 @@ fn handle_writable(session: &mut super::h3_session::H3Session, stream_id: u64) {
     }
 
     // Stream body in bounded chunks while we have credit.
-    let mut budget = H3_MAX_BYTES_PER_TICK
-        .min(resp.body.len().saturating_sub(resp.written));
+    let mut budget = H3_MAX_BYTES_PER_TICK.min(resp.body.len().saturating_sub(resp.written));
 
     while resp.written < resp.body.len() && budget > 0 {
-        let end = (resp.written + H3_CHUNK_SIZE).min(resp.body.len());
-        let chunk = &resp.body[resp.written..end];
+        let want = (H3_CHUNK_SIZE).min(budget);
+        let chunk = resp.body.chunk_at(resp.written, want);
+        if chunk.is_empty() { break; }
 
         match http3_conn.send_body(conn, stream_id, chunk, false) {
             Ok(n) if n > 0 => {
@@ -618,7 +618,7 @@ fn handle_writable(session: &mut super::h3_session::H3Session, stream_id: u64) {
                 budget = budget.saturating_sub(n);
             }
             Ok(_) | Err(quiche::h3::Error::Done) | Err(quiche::h3::Error::StreamBlocked) => {
-                return; // try again on next writable tick
+                return;
             }
             Err(quiche::h3::Error::RequestCancelled)
             | Err(quiche::h3::Error::TransportError(quiche::Error::StreamStopped(_)))
@@ -683,7 +683,7 @@ fn handle_h3_request<S: HService>(
             use std::mem::take;
             session.partial_responses.insert(stream_id, PartialResponse {
                 headers: Some(take(&mut session.rsp_headers)),
-                body:   take(&mut session.rsp_body),
+                body: take(&mut session.rsp_body),
                 written: 0,
             });
             return;
@@ -702,58 +702,47 @@ fn handle_h3_request<S: HService>(
         }
     }
 
-    // Send body in bounded chunks; if blocked, stash state for handle_writable().
+    // Send body in bounded chunks
     let total = session.rsp_body.len();
     let mut written = 0usize;
     let mut budget = H3_MAX_BYTES_PER_TICK.min(total);
 
     while written < total && budget > 0 {
-        let end = (written + H3_CHUNK_SIZE).min(total);
-        let chunk = &session.rsp_body[written..end];
+        let want  = (H3_CHUNK_SIZE).min(budget);
+        let chunk = session.rsp_body.chunk_at(written, want);
 
-        match http3_conn.send_body(&mut session.conn, stream_id, chunk, /*fin=*/ false) {
-            Ok(n) if n > 0 => {
-                written += n;
-                budget  = budget.saturating_sub(n);
-            }
-            Ok(_) | Err(quiche::h3::Error::Done) | Err(quiche::h3::Error::StreamBlocked) => {
-                break; // defer to handle_writable()
-            }
+        match http3_conn.send_body(&mut session.conn, stream_id, chunk, false) {
+            Ok(n) if n > 0 => { written += n; budget = budget.saturating_sub(n); }
+            Ok(_) | Err(quiche::h3::Error::Done) | Err(quiche::h3::Error::StreamBlocked) => { break; }
             Err(quiche::h3::Error::RequestCancelled)
             | Err(quiche::h3::Error::TransportError(quiche::Error::StreamStopped(_)))
             | Err(quiche::h3::Error::TransportError(quiche::Error::StreamReset(_))) => {
                 let _ = session.conn.stream_shutdown(stream_id, quiche::Shutdown::Write, 0);
                 return;
             }
-            Err(e) => {
-                eprintln!("{} send_body failed: {:?}", session.conn.trace_id(), e);
-                return;
-            }
+            Err(e) => { eprintln!("{} send_body failed: {:?}", session.conn.trace_id(), e); return; }
         }
     }
 
     if written < total {
         use std::mem::take;
-        let body = take(&mut session.rsp_body); // move without cloning
+        let body_src = take(&mut session.rsp_body);
         session.partial_responses.insert(stream_id, PartialResponse {
-            headers: None, // already sent
-            body,
+            headers: None,
+            body: body_src,
             written,
         });
     } else {
-        // FIN may be blocked—keep a sentinel so handle_writable() can retry
         match http3_conn.send_body(&mut session.conn, stream_id, &[], true) {
             Ok(_) | Err(quiche::h3::Error::Done) => {}
             Err(quiche::h3::Error::StreamBlocked) => {
                 session.partial_responses.insert(stream_id, PartialResponse {
                     headers: None,
-                    body: Default::default(), // only FIN remains
+                    body: h3_session::BodySource::Empty,
                     written: 0,
                 });
             }
-            Err(e) => {
-                eprintln!("{} send FIN failed: {:?}", session.conn.trace_id(), e);
-            }
+            Err(e) => eprintln!("{} send FIN failed: {:?}", session.conn.trace_id(), e),
         }
     }
 }

@@ -294,43 +294,28 @@ pub fn serve<S: Session>(
         return Ok(());
     }
 
-    // #[cfg(target_os = "linux")]
-    // {
-    //     match read_file_uring_range(file_path.to_str().unwrap(), start, (end - start) as usize) {
-    //         Ok(buf) => {
-    //             session.status_code(status)
-    //                 .headers_vec(&rsp_headers)?
-    //                 .body_slice(&buf)
-    //                 .eom();
-    //         }
-    //         Err(e) => {
-    //             eprintln!("io_uring read failed: {e}");
-    //             session.status_code(Status::InternalServerError)
-    //                 .headers_vec(&rsp_headers)?
-    //                 .body_static("")
-    //                 .eom();
-    //         }
-    //     }
-    // }
-    // #[cfg(not(target_os = "linux"))]
-    // {
-        let mmap = match std::fs::File::open(&file_path) {
-            Ok(std_file) => match unsafe { memmap2::Mmap::map(&std_file) } {
-                Ok(mmap) => mmap,
-                Err(e) => {
-                    eprintln!("Failed to memory-map file: {}: {}", file_path.display(), e);
-                    session.status_code(Status::InternalServerError).headers_vec(rsp_headers)?.body_static("").eom();
-                    return Ok(());
-                }
-            },
+    let mmap = match std::fs::File::open(&file_path) {
+        Ok(std_file) => match unsafe { memmap2::Mmap::map(&std_file) } {
+            Ok(mmap) => mmap,
             Err(e) => {
-                eprintln!("Failed to open file: {}: {}", file_path.display(), e);
+                eprintln!("Failed to memory-map file: {}: {}", file_path.display(), e);
                 session.status_code(Status::InternalServerError).headers_vec(rsp_headers)?.body_static("").eom();
                 return Ok(());
-            }
-        };
+             }
+        },
+        Err(e) => {
+            eprintln!("Failed to open file: {}: {}", file_path.display(), e);
+            session.status_code(Status::InternalServerError).headers_vec(rsp_headers)?.body_static("").eom();
+            return Ok(());
+        }
+    };
+
+    if session.is_h3() {
+        session.status_code(status).headers_vec(rsp_headers)?.body_mmap(std::sync::Arc::new(mmap), start as usize, end as usize).eom();
+    } else {
         session.status_code(status).headers_vec(rsp_headers)?.body_slice(&mmap[start as usize..end as usize]).eom();
-    // }
+    }
+
     Ok(())
 }
 

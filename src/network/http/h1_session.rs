@@ -28,38 +28,47 @@ impl<'buf, 'header, 'stream, S> Session for H1Session<'buf, 'header, 'stream, S>
 where
     S: Read + Write,
 {
+    #[inline]
     fn peer_addr(&self) -> &std::net::SocketAddr {
         self.peer_addr
     }
 
+    #[inline]
     fn is_h3(&self) -> bool {
         false
     }
 
+    #[inline]
     fn req_method(&self) -> Option<&str> {
         self.req.method
     }
 
+    #[inline]
     fn req_path(&self) -> Option<&str> {
         self.req.path
     }
 
+    #[inline]
     fn req_http_version(&self) -> Option<u8> {
         self.req.version
     }
 
+    #[inline]
     fn req_headers(&self) -> &[httparse::Header<'_>] {
         self.req.headers
     }
 
+    #[inline]
     fn req_headers_vec(&self) -> Vec<httparse::Header<'_>> {
         self.req.headers.to_vec()
     }
 
+    #[inline]
     fn req_header(&self, header: &HttpHeader) -> std::io::Result<&str> {
         self.req_header_str(&header.to_string())
     }
 
+    #[inline]
     fn req_header_str(&self, header: &str) -> std::io::Result<&str> {
         for h in self.req.headers.iter() {
             if h.name.eq_ignore_ascii_case(header) {
@@ -73,6 +82,7 @@ where
         ))
     }
 
+    #[inline]
     fn req_body(&mut self, timeout: std::time::Duration) -> io::Result<&[u8]> {
         let content_length = self
             .req
@@ -235,6 +245,14 @@ where
     fn body_static(&mut self, body: &'static str) -> &mut Self {
         self.rsp_buf.extend_from_slice(b"\r\n");
         self.rsp_buf.extend_from_slice(body.as_bytes());
+        self
+    }
+
+    #[cfg(feature = "net-file-server")]
+    #[inline]
+    fn body_mmap(&mut self, map: std::sync::Arc<memmap2::Mmap>, lo: usize, hi: usize) -> &mut Self {
+        self.rsp_buf.extend_from_slice(b"\r\n");
+        self.rsp_buf.extend_from_slice(&map[lo..hi]);
         self
     }
 

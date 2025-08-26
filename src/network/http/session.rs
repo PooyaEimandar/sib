@@ -23,6 +23,8 @@ pub trait Session {
     fn body(&mut self, data: &bytes::Bytes) -> &mut Self;
     fn body_slice(&mut self, body: &[u8]) -> &mut Self;
     fn body_static(&mut self, body: &'static str) -> &mut Self;
+    #[cfg(feature = "net-file-server")]
+    fn body_mmap(&mut self, map: std::sync::Arc<memmap2::Mmap>, lo: usize, hi: usize) -> &mut Self;
     
     fn eom(&mut self);
 }
