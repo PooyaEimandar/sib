@@ -679,7 +679,7 @@ fn handle_h3_request<S: HService>(
     // Send headers first (or defer if blocked)
     match http3_conn.send_response(&mut session.conn, stream_id, &session.rsp_headers, false) {
         Ok(_) => {}
-        Err(quiche::h3::Error::StreamBlocked) => {
+        Err(quiche::h3::Error::StreamBlocked) | Err(quiche::h3::Error::Done) => {
             use std::mem::take;
             session.partial_responses.insert(stream_id, PartialResponse {
                 headers: Some(take(&mut session.rsp_headers)),
@@ -741,7 +741,20 @@ fn handle_h3_request<S: HService>(
             written,
         });
     } else {
-        let _ = http3_conn.send_body(&mut session.conn, stream_id, &[], true); // FIN
+        // FIN may be blocked—keep a sentinel so handle_writable() can retry
+        match http3_conn.send_body(&mut session.conn, stream_id, &[], true) {
+            Ok(_) | Err(quiche::h3::Error::Done) => {}
+            Err(quiche::h3::Error::StreamBlocked) => {
+                session.partial_responses.insert(stream_id, PartialResponse {
+                    headers: None,
+                    body: Default::default(), // only FIN remains
+                    written: 0,
+                });
+            }
+            Err(e) => {
+                eprintln!("{} send FIN failed: {:?}", session.conn.trace_id(), e);
+            }
+        }
     }
 }
 
