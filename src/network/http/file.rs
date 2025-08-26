@@ -287,6 +287,7 @@ pub fn serve<S: Session>(
         ));
         (Status::Ok, 0, total_size)
     };
+    rsp_headers.push((HttpHeader::AcceptRanges, "bytes".to_string()));
 
     if session.req_method() == Some("HEAD") {
         session.status_code(status).headers_vec(rsp_headers)?.body_static("").eom();
