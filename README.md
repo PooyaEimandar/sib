@@ -59,9 +59,9 @@ it is designed for **real-time networking**, **low-latency streaming**, and **sc
 - Run the Python script from the bench folder `python3 ./h3_test.py --url https://localhost:8080 --curl-path ./curl --requests 10000 --concurrency 10000 --http3 --insecure`
 - 10K requests launched all at once, each over its own QUIC/TLS handshake. This is a hammer test and purpose is validate the stability and tail latency under handshake pressure.
 
-| Total Requests | Concurrency | Success Rate | Avg Latency | Min Latency | Max Latency | Wall-clock (total) |
-| -------------- | ----------- | ------------ | ----------- | ----------- | ----------- | ------------------ |
-| 10,000         | 10,000      | **99.97%**   | **1.00 s**  | 72 ms       | 30.2 s      | 105.7 s            |
+| Total Requests | Concurrency | Success Rate | Avg Latency 
+| -------------- | ----------- | ------------ | ----------- 
+| 10,000         | 10,000      | **99.97%**   | **1.00 s**   
 
 # ⚙️ Build note
 
