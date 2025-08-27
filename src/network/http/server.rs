@@ -21,9 +21,9 @@ use may::io::WaitIo;
 #[cfg(feature = "net-h3-server")]
 const MAX_DATAGRAM_SIZE: usize = 1350;
 #[cfg(feature = "net-h3-server")]
-const H3_CHUNK_SIZE: usize = 128 * 1024; // 128 KB
+const H3_CHUNK_SIZE: usize = 64 * 1024; // 64 KB
 #[cfg(feature = "net-h3-server")]
-const H3_MAX_BYTES_PER_TICK: usize = 512 * 1024; //cap per tick
+const H3_MAX_BYTES_PER_TICK: usize = 8 * 1024 * 1024; //cap per tick
 
 const MIN_BUF_LEN: usize = 1024;
 const MAX_BODY_LEN: usize = 4096;
@@ -428,7 +428,7 @@ fn serve<T: HService>(
     }
 }
 
-#[cfg(all(unix, feature = "sys-boring-ssl"))]
+#[cfg(all(unix, feature = "net-h1-server", feature = "sys-boring-ssl"))]
 fn serve_tls<T: HService>(
     stream: &mut boring::ssl::SslStream<may::net::TcpStream>,
     peer_addr: SocketAddr,
@@ -608,9 +608,12 @@ fn handle_writable(session: &mut super::h3_session::H3Session, stream_id: u64) {
     let mut budget = H3_MAX_BYTES_PER_TICK.min(resp.body.len().saturating_sub(resp.written));
 
     while resp.written < resp.body.len() && budget > 0 {
-        let want = (H3_CHUNK_SIZE).min(budget);
+        let cap = quic_conn_stream_capacity(conn, stream_id);
+        if cap == 0 { return; } // we’ll be called again when writable
+
+        let want = H3_CHUNK_SIZE.min(budget).min(cap);
         let chunk = resp.body.chunk_at(resp.written, want);
-        if chunk.is_empty() { break; }
+        if chunk.is_empty() { return; }
 
         match http3_conn.send_body(conn, stream_id, chunk, false) {
             Ok(n) if n > 0 => {
@@ -708,7 +711,9 @@ fn handle_h3_request<S: HService>(
     let mut budget = H3_MAX_BYTES_PER_TICK.min(total);
 
     while written < total && budget > 0 {
-        let want  = (H3_CHUNK_SIZE).min(budget);
+        let cap = quic_conn_stream_capacity(&session.conn, stream_id);
+        if cap == 0 { break; } // wait for writable()
+        let want  = H3_CHUNK_SIZE.min(budget).min(cap);
         let chunk = session.rsp_body.chunk_at(written, want);
 
         match http3_conn.send_body(&mut session.conn, stream_id, chunk, false) {
@@ -733,6 +738,8 @@ fn handle_h3_request<S: HService>(
             written,
         });
     } else {
+        let cap = quic_conn_stream_capacity(&session.conn, stream_id);
+        if cap == 0 { return; } // retry FIN later
         match http3_conn.send_body(&mut session.conn, stream_id, &[], true) {
             Ok(_) | Err(quiche::h3::Error::Done) => {}
             Err(quiche::h3::Error::StreamBlocked) => {
@@ -796,23 +803,15 @@ fn quic_dispatcher<S, F>(
         by_addr.retain(|_, v| v.expires > now);
 
         // read a UDP datagram
-        let mut buf = BytesMut::with_capacity(65535);
-        buf.resize(65535, 0);
-        let (n, from) = match socket.recv_from(&mut buf) {
+        let mut stack_buf = [0u8; 65535];
+        let (n, from) = match socket.recv_from(&mut stack_buf) {
             Ok(v) => v,
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                continue;
-            }
-            Err(e) => {
-                eprintln!("recv_from error: {e:?}");
-                may::coroutine::yield_now();
-                continue;
-            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+            Err(e) => { eprintln!("recv_from error: {e:?}"); may::coroutine::yield_now(); continue; }
         };
-        buf.truncate(n);
 
         // parse QUIC header
-        let hdr = match quiche::Header::from_slice(&mut buf[..], quiche::MAX_CONN_ID_LEN) {
+        let hdr = match quiche::Header::from_slice(&mut stack_buf[..], quiche::MAX_CONN_ID_LEN) {
             Ok(h) => h,
             Err(e) => {
                 eprintln!("Header parse failed: {e:?}");
@@ -822,10 +821,13 @@ fn quic_dispatcher<S, F>(
 
         let dcid_key = key_from_cid(&hdr.dcid);
 
+        let mut buf = Vec::with_capacity(n);
+        buf.extend_from_slice(&stack_buf[..n]);
+
         // fast path: known DCID → route to worker
         if let Some(tx) = by_cid.get(&dcid_key) {
             let _ = tx.send(Datagram {
-                buf: buf.to_vec(),
+                buf,
                 from,
                 to: local_addr,
             });
@@ -1421,6 +1423,11 @@ fn parse_wt_stream_assoc(stream_id: u64, buf: &[u8]) -> Option<(u64 /*connect_si
     }
 }
 
+#[cfg(feature = "net-h3-server")]
+#[inline]
+fn quic_conn_stream_capacity(conn: &quiche::Connection, sid: u64) -> usize {
+    conn.stream_capacity(sid).unwrap_or(0) as usize
+}
 
 #[cfg(test)]
 mod tests {
