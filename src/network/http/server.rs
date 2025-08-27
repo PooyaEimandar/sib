@@ -491,8 +491,6 @@ type ConnKey = [u8; quiche::MAX_CONN_ID_LEN];
 
 #[cfg(feature = "net-h3-server")]
 enum H3CtrlMsg {
-    BindAddr(std::net::SocketAddr, may::sync::mpsc::Sender<Datagram>),
-    UnbindAddr(std::net::SocketAddr),
     AddCid(ConnKey, may::sync::mpsc::Sender<Datagram>),
     RemoveCid(ConnKey),
 }
@@ -769,83 +767,64 @@ fn quic_dispatcher<S, F>(
     use std::time::{Duration, Instant};
 
     type WorkerTx = may::sync::mpsc::Sender<Datagram>;
+    let mut by_cid:  HashMap<ConnKey, WorkerTx> = HashMap::new();
+
+    // NEW: short-lived addr map to cover CID switch race
     struct AddrEntry { tx: WorkerTx, expires: Instant }
-
-    let mut by_cid: HashMap<ConnKey, WorkerTx> = HashMap::new();
     let mut by_addr: HashMap<SocketAddr, AddrEntry> = HashMap::new();
-    const BY_ADDR_TTL: Duration = Duration::from_secs(10);
+    const BY_ADDR_TTL: Duration = Duration::from_secs(5);
 
-    // control channel
     let (ctrl_tx, ctrl_rx) = may::sync::mpsc::channel::<H3CtrlMsg>();
-
     let mut out = [0u8; MAX_DATAGRAM_SIZE];
 
     loop {
         // drain control messages
         while let Ok(msg) = ctrl_rx.try_recv() {
             match msg {
-                H3CtrlMsg::BindAddr(addr, tx) => {
-                    by_addr.insert(addr, AddrEntry { tx, expires: Instant::now() + BY_ADDR_TTL });
-                }
-                H3CtrlMsg::UnbindAddr(addr) => {
-                    by_addr.remove(&addr);
-                },
-                H3CtrlMsg::AddCid(cid, tx) => { 
-                    by_cid.insert(cid, tx); 
-                }
-                H3CtrlMsg::RemoveCid(cid) => { 
-                    by_cid.remove(&cid); 
-                }
+                H3CtrlMsg::AddCid(cid, tx) => { by_cid.insert(cid, tx); }
+                H3CtrlMsg::RemoveCid(cid)  => { by_cid.remove(&cid); }
             }
         }
-
+        // expire old addr bindings
         let now = Instant::now();
-        by_addr.retain(|_, v| v.expires > now);
+        by_addr.retain(|_, e| e.expires > now);
 
-        // read a UDP datagram
-        let mut stack_buf = [0u8; 65535];
-        let (n, from) = match socket.recv_from(&mut stack_buf) {
+        // recv one datagram
+        let mut scratch = [0u8; 65535];
+        let (n, from) = match socket.recv_from(&mut scratch) {
             Ok(v) => v,
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
             Err(e) => { eprintln!("recv_from error: {e:?}"); may::coroutine::yield_now(); continue; }
         };
 
-        // parse QUIC header
-        let hdr = match quiche::Header::from_slice(&mut stack_buf[..], quiche::MAX_CONN_ID_LEN) {
+        // parse header using n
+        let hdr = match quiche::Header::from_slice(&mut scratch[..n], quiche::MAX_CONN_ID_LEN) {
             Ok(h) => h,
-            Err(e) => {
-                eprintln!("Header parse failed: {e:?}");
-                continue;
-            }
+            Err(e) => { eprintln!("Header parse failed: {e:?}"); continue; }
         };
-
         let dcid_key = key_from_cid(&hdr.dcid);
 
-        let mut buf = Vec::with_capacity(n);
-        buf.extend_from_slice(&stack_buf[..n]);
-
-        // fast path: known DCID → route to worker
+        // fast path: known DCID
         if let Some(tx) = by_cid.get(&dcid_key) {
-            let _ = tx.send(Datagram {
-                buf,
-                from,
-                to: local_addr,
-            });
+            let mut v = Vec::with_capacity(n);
+            v.extend_from_slice(&scratch[..n]);
+            let _ = tx.send(Datagram { buf: v, from, to: local_addr });
             continue;
         }
 
-        // fallback path: known address → route and learn new DCID
+        // NEW: fallback by remote address; also "learn" the new DCID
         if let Some(entry) = by_addr.get_mut(&from) {
-            entry.expires = Instant::now() + BY_ADDR_TTL; // refresh the ttl
+            entry.expires = Instant::now() + BY_ADDR_TTL;
             let tx = &entry.tx;
-            let _ = tx.send(Datagram { buf: buf.to_vec(), from, to: local_addr });
+            let mut v = Vec::with_capacity(n);
+            v.extend_from_slice(&scratch[..n]);
+            let _ = tx.send(Datagram { buf: v, from, to: local_addr });
             by_cid.insert(dcid_key, tx.clone());
             continue;
         }
 
-        // new connection handling
+        // unknown DCID and no addr binding → handle Initial / VN
         if hdr.ty != quiche::Type::Initial {
-            // version negotiation if needed
             if !quiche::version_is_supported(hdr.version) {
                 if let Ok(len) = quiche::negotiate_version(&hdr.scid, &hdr.dcid, &mut out) {
                     let _ = socket.send_to(&out[..len], from);
@@ -854,7 +833,6 @@ fn quic_dispatcher<S, F>(
             continue;
         }
 
-        // VN again for robustness
         if !quiche::version_is_supported(hdr.version) {
             if let Ok(len) = quiche::negotiate_version(&hdr.scid, &hdr.dcid, &mut out) {
                 let _ = socket.send_to(&out[..len], from);
@@ -862,61 +840,41 @@ fn quic_dispatcher<S, F>(
             continue;
         }
 
-        // stateless retry if no/invalid token
+        // retry if needed
         let token = hdr.token.as_deref().unwrap_or(&[]);
-        let odcid_opt = if token.is_empty() {
-            None
-        } else {
-            validate_token(&from, token)
-        };
+        let odcid_opt = if token.is_empty() { None } else { validate_token(&from, token) };
         if odcid_opt.is_none() {
             use ring::rand::{SecureRandom, SystemRandom};
             let rng = SystemRandom::new();
-
-            // make a server CID (any random bytes up to MAX_CONN_ID_LEN)
             let cid_len = hdr.dcid.len().min(quiche::MAX_CONN_ID_LEN);
             let mut scid_bytes = [0u8; quiche::MAX_CONN_ID_LEN];
             rng.fill(&mut scid_bytes[..cid_len]).expect("rng");
             let scid = quiche::ConnectionId::from_ref(&scid_bytes[..cid_len]);
-
             let new_token = mint_token(&hdr, &from);
-            if let Ok(len) = quiche::retry(
-                &hdr.scid,
-                &hdr.dcid,
-                &scid,
-                &new_token,
-                hdr.version,
-                &mut out,
-            ) {
+            if let Ok(len) = quiche::retry(&hdr.scid, &hdr.dcid, &scid, &new_token, hdr.version, &mut out) {
                 let _ = socket.send_to(&out[..len], from);
             }
             continue;
         }
 
-        // accept
-        let conn =
-            match quiche::accept(&hdr.dcid, odcid_opt.as_ref(), local_addr, from, &mut config) {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("accept failed: {e:?}");
-                    continue;
-                }
-            };
+        // accept new connection
+        let conn = match quiche::accept(&hdr.dcid, odcid_opt.as_ref(), local_addr, from, &mut config) {
+            Ok(c) => c,
+            Err(e) => { eprintln!("accept failed: {e:?}"); continue; }
+        };
 
-        // spawn worker
+        // spawn worker and seed first datagram
         let (tx, rx) = may::sync::mpsc::channel::<Datagram>();
-        // We bind by address immediately; the worker will also AddCid as needed.
+
+        // bind by address immediately (TTL)
         by_addr.insert(from, AddrEntry { tx: tx.clone(), expires: Instant::now() + BY_ADDR_TTL });
 
-        // Bind the current DCID too (client is using hdr.dcid now)
+        // bind current DCID immediately
         by_cid.insert(dcid_key, tx.clone());
 
-        // seed worker with the first datagram
-        let _ = tx.send(Datagram {
-            buf: buf.to_vec(),
-            from,
-            to: local_addr,
-        });
+        let mut v = Vec::with_capacity(n);
+        v.extend_from_slice(&scratch[..n]);
+        let _ = tx.send(Datagram { buf: v, from, to: local_addr });
 
         let socket_cloned = socket.clone();
         let ctrl_tx_cloned = ctrl_tx.clone();
@@ -934,6 +892,7 @@ fn quic_dispatcher<S, F>(
         });
     }
 }
+
 
 #[cfg(feature = "net-h3-server")]
 fn handle_quic_connection<S: HService + HServiceWebTransport + 'static>(
@@ -956,14 +915,12 @@ fn handle_quic_connection<S: HService + HServiceWebTransport + 'static>(
 
     let mut session = h3_session::new_session(from, conn);
 
-    // Tell dispatcher we own this addr
-    let _ = ctrl_tx.send(H3CtrlMsg::BindAddr(from, tx.clone()));
-
     // Register the initial DCID as the primary key for routing
-    if dcids.insert(initial_dcid)
-    {
+    if dcids.insert(initial_dcid) {
         let _ = ctrl_tx.send(H3CtrlMsg::AddCid(initial_dcid, tx.clone()));
     }
+    // register all server source CIDs
+    register_scids(&session.conn, &mut dcids, &ctrl_tx, &tx);
 
     let mut out = [0u8; MAX_DATAGRAM_SIZE];
     let mut h3_config = match quiche::h3::Config::new() {
@@ -1344,6 +1301,9 @@ fn handle_quic_connection<S: HService + HServiceWebTransport + 'static>(
             }
         }
 
+        register_scids(&session.conn, &mut dcids, &ctrl_tx, &tx);
+
+        // close handling
         if session.conn.is_closed() {
             if extend_connect {
                 // best-effort close callbacks for any remaining WT sessions
@@ -1352,7 +1312,6 @@ fn handle_quic_connection<S: HService + HServiceWebTransport + 'static>(
                 }
             }
             // cleanup
-            let _ = ctrl_tx.send(H3CtrlMsg::UnbindAddr(from));
             for cid in dcids.drain() {
                 let _ = ctrl_tx.send(H3CtrlMsg::RemoveCid(cid));
             }
@@ -1387,6 +1346,22 @@ fn read_quic_varint(buf: &[u8]) -> Option<(u64, usize)> {
     }
 
     Some((value, len))
+}
+
+#[cfg(feature = "net-h3-server")]
+#[inline]
+fn register_scids(
+    conn: &quiche::Connection,
+    dcids: &mut std::collections::HashSet<ConnKey>,
+    ctrl_tx: &may::sync::mpsc::Sender<H3CtrlMsg>,
+    tx: &may::sync::mpsc::Sender<Datagram>,
+) {
+    for sc in conn.source_ids() {
+        let k = key_from_cid(sc);
+        if dcids.insert(k) {
+            let _ = ctrl_tx.send(H3CtrlMsg::AddCid(k, tx.clone()));
+        }
+    }
 }
 
 #[cfg(feature = "net-h3-server")]
@@ -1426,7 +1401,7 @@ fn parse_wt_stream_assoc(stream_id: u64, buf: &[u8]) -> Option<(u64 /*connect_si
 #[cfg(feature = "net-h3-server")]
 #[inline]
 fn quic_conn_stream_capacity(conn: &quiche::Connection, sid: u64) -> usize {
-    conn.stream_capacity(sid).unwrap_or(0) as usize
+    conn.stream_capacity(sid).unwrap_or(0)
 }
 
 #[cfg(test)]
