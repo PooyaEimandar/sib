@@ -51,6 +51,7 @@ once_cell = { version = "1.21.3", optional = true, default-features = false, fea
 ] }
 quiche = { version = "0.24.5", optional = true, default-features = false }
 ring = { version = "0.17.14", optional = true, default-features = false }
+socket2 = { version = "0.6.0", optional = true }
 zstd = { version = "0.13.3", optional = true }
 
 # only for macOS or linux
@@ -93,6 +94,7 @@ net-h3-server = [
     "once_cell",
     "quiche",
     "ring",
+    "socket2",
 ]
 
 stm-sender = ["crossbeam", "glib", "gstreamer", "gstreamer-video"]
