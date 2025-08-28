@@ -243,6 +243,9 @@ pub trait HFactory: Send + Sized + 'static {
     ) -> std::io::Result<()> {
         // create the UDP listening socket.
         let socket = std::sync::Arc::new(may::net::UdpSocket::bind(addr)?);
+        socket.set_read_timeout(Some(io_timeout))?;
+        socket.set_write_timeout(Some(io_timeout))?;
+
         let local_addr = socket
             .local_addr()
             .map_err(|e| std::io::Error::other(format!("Failed to get local address: {e:?}")))?;
@@ -268,12 +271,12 @@ pub trait HFactory: Send + Sized + 'static {
         config.set_max_idle_timeout(io_timeout.as_millis() as u64);
         config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
         config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
-        config.set_initial_max_data(64 * 1024 * 1024);
-        config.set_initial_max_stream_data_bidi_local(8 * 1024 * 1024);
-        config.set_initial_max_stream_data_bidi_remote(16 * 1024 * 1024);
-        config.set_initial_max_stream_data_uni(8 * 1024 * 1024);
-        config.set_initial_max_streams_bidi(100);
-        config.set_initial_max_streams_uni(100);
+        config.set_initial_max_data(256 * 1024 * 1024);
+        config.set_initial_max_stream_data_bidi_local(64 * 1024 * 1024);
+        config.set_initial_max_stream_data_bidi_remote(64 * 1024 * 1024);
+        config.set_initial_max_stream_data_uni(64 * 1024 * 1024);
+        config.set_initial_max_streams_bidi(1024);
+        config.set_initial_max_streams_uni(1024);
         config.set_disable_active_migration(true);
         config.verify_peer(verify_peer);
         config.enable_early_data();
