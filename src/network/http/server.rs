@@ -279,7 +279,7 @@ pub trait HFactory: Send + Sized + 'static {
         config.set_initial_max_streams_uni(1024);
         config.set_disable_active_migration(true);
         config.verify_peer(verify_peer);
-        config.enable_early_data();
+        //config.enable_early_data();
 
         let extend_connect = if let Some((r_len, s_len)) = dgram_size{
             config.enable_dgram(true, r_len, s_len);
@@ -930,9 +930,9 @@ fn handle_quic_connection<S: HService + HServiceWebTransport + 'static>(
         }
     };
 
-    h3_config.set_qpack_max_table_capacity(64 * 1024);
-    h3_config.set_qpack_blocked_streams(100);
-    h3_config.set_max_field_section_size(64 * 1024);
+    // h3_config.set_qpack_max_table_capacity(64 * 1024);
+    // h3_config.set_qpack_blocked_streams(100);
+    // h3_config.set_max_field_section_size(64 * 1024);
     if extend_connect {
         h3_config.enable_extended_connect(true);
     }
@@ -980,8 +980,7 @@ fn handle_quic_connection<S: HService + HServiceWebTransport + 'static>(
             };
         }
 
-        if (session.conn.is_in_early_data() || session.conn.is_established())
-            && session.http3_conn.is_none()
+        if session.conn.is_established() && session.http3_conn.is_none()
         {
             for sc in session.conn.source_ids() {
                 let k = key_from_cid(sc);
