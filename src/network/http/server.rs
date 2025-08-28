@@ -866,19 +866,9 @@ fn quic_dispatcher<S, F>(
             Err(e) => { eprintln!("accept failed: {e:?}"); continue; }
         };
 
-        // spawn worker and seed first datagram
+        // create channel, spawn worker, then seed
         let (tx, rx) = may::sync::mpsc::channel::<Datagram>();
-
-        // bind by address immediately (TTL)
-        by_addr.insert(from, AddrEntry { tx: tx.clone(), expires: Instant::now() + BY_ADDR_TTL });
-
-        // bind current DCID immediately
-        by_cid.insert(dcid_key, tx.clone());
-
-        let mut v = Vec::with_capacity(n);
-        v.extend_from_slice(&scratch[..n]);
-        let _ = tx.send(Datagram { buf: v, from, to: local_addr });
-
+        let tx_cloned = tx.clone();
         let socket_cloned = socket.clone();
         let ctrl_tx_cloned = ctrl_tx.clone();
         let service = call_service(dcid_key[0] as usize);
@@ -887,12 +877,18 @@ fn quic_dispatcher<S, F>(
                 socket_cloned,
                 conn,
                 from,
-                (rx, tx.clone()),
+                (rx, tx),
                 ctrl_tx_cloned,
                 (dcid_key, extend_connect),
                 service,
             );
         });
+        
+        by_addr.insert(from, AddrEntry { tx: tx_cloned.clone(), expires: Instant::now() + BY_ADDR_TTL });
+        by_cid.insert(dcid_key, tx_cloned.clone());
+        let mut v = Vec::with_capacity(n);
+        v.extend_from_slice(&scratch[..n]);
+        let _ = tx_cloned.send(Datagram { buf: v, from, to: local_addr });
     }
 }
 
@@ -934,21 +930,27 @@ fn handle_quic_connection<S: HService + HServiceWebTransport + 'static>(
         }
     };
 
+    h3_config.set_qpack_max_table_capacity(64 * 1024);
+    h3_config.set_qpack_blocked_streams(100);
+    h3_config.set_max_field_section_size(64 * 1024);
     if extend_connect {
-        h3_config.set_qpack_max_table_capacity(64 * 1024);
-        h3_config.set_qpack_blocked_streams(100);
-        h3_config.set_max_field_section_size(64 * 1024);
         h3_config.enable_extended_connect(true);
     }
 
+    let mut pending: Option<(std::net::SocketAddr, Vec<u8>)> = None;
+    let mut next_deadline = std::time::Instant::now() + 
+        session.conn.timeout().unwrap_or(std::time::Duration::from_millis(50));
     loop {
-        let timeout = session
-            .conn
-            .timeout()
-            .unwrap_or_else(|| std::time::Duration::from_millis(50));
-        let mut got_packet = false;
+        // Fire QUIC timers if due
+        if std::time::Instant::now() >= next_deadline {
+            session.conn.on_timeout();
+            next_deadline = std::time::Instant::now() + 
+                session.conn.timeout().unwrap_or(std::time::Duration::from_millis(50));
+        }
+        let timeout = next_deadline.saturating_duration_since(std::time::Instant::now());
 
         // try to nonblocking-drain any backlog quickly
+        let mut got_packet = false;
         let mut drained = 0usize;
         while drained < 64 {
             match rx.try_recv() {
@@ -1283,15 +1285,37 @@ fn handle_quic_connection<S: HService + HServiceWebTransport + 'static>(
             }
         }
 
-        // drain sends
+        // drain sends (flush pending first)
         loop {
+            if let Some((to, pkt)) = pending.take() {
+                match socket.send_to(&pkt, to) {
+                    Ok(_) => { /* sent */ }
+                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        pending = Some((to, pkt));  // keep for next tick
+                        break;
+                    }
+                    Err(e) => {
+                        eprintln!("send failed (pending): {e:?}");
+                        session.conn.close(false, 0x1, b"send-pending-fail").ok();
+                        break;
+                    }
+                }
+                continue; // maybe more to send this tick
+            }
+
             match session.conn.send(&mut out) {
                 Ok((n, send_info)) => {
-                    if let Err(e) = socket.send_to(&out[..n], send_info.to) {
-                        if e.kind() != std::io::ErrorKind::WouldBlock {
+                    match socket.send_to(&out[..n], send_info.to) {
+                        Ok(_) => {}
+                        Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                            // keep a copy and retry next tick
+                            pending = Some((send_info.to, out[..n].to_vec()));
+                            break;
+                        }
+                        Err(e) => {
                             eprintln!("send failed: {e:?}");
-                        } else {
-                            may::coroutine::yield_now();
+                            session.conn.close(false, 0x1, b"send-fail").ok();
+                            break;
                         }
                     }
                 }
