@@ -1,15 +1,13 @@
-#[cfg(feature = "net-h3-server")]
-use crate::network::http::session::HServiceWebTransport;
-
 use crate::network::http::session::HService;
 use bytes::{BufMut, BytesMut};
 use may::{
     net::{TcpListener, TcpStream},
     {coroutine, go},
 };
+#[cfg(feature = "net-h3-server")]
 use std::{
     io::{self, Read},
-    mem::MaybeUninit,
+    mem::MaybeUninit, os::fd::FromRawFd,
 };
 
 #[cfg(unix)]
@@ -19,7 +17,7 @@ use std::net::{SocketAddr, ToSocketAddrs};
 use may::io::WaitIo;
 
 #[cfg(feature = "net-h3-server")]
-const MAX_DATAGRAM_SIZE: usize = 1200;
+const MAX_DATAGRAM_SIZE: usize = 1350;
 #[cfg(feature = "net-h3-server")]
 const H3_CHUNK_SIZE: usize = 64 * 1024; // 64 KB
 #[cfg(feature = "net-h3-server")]
@@ -41,11 +39,10 @@ macro_rules! mc {
     };
 }
 
-pub trait HFactory: Send + Sized + 'static {
-
+pub trait HFactory: Send + Sync + Sized + 'static {
     cfg_if::cfg_if! {
         if #[cfg(any(feature = "net-h3-server"))] {
-            type Service: HService + HServiceWebTransport + Send;
+            type Service: HService + Send;
         }
         else {
             type Service: HService + Send;
@@ -238,67 +235,48 @@ pub trait HFactory: Send + Sized + 'static {
         (cert_pem_file_path, key_pem_file_path): (&str, &str),
         io_timeout: std::time::Duration,
         verify_peer: bool,
-        stack_size: usize,
+        (stack_size, num_of_workers): (usize, usize),
         extend_connect: bool
     ) -> std::io::Result<()> {
-        // create the UDP listening socket.
-        let socket = std::sync::Arc::new(may::net::UdpSocket::bind(addr)?);
-        socket.set_read_timeout(Some(io_timeout))?;
-        socket.set_write_timeout(Some(io_timeout))?;
-
-        let local_addr = socket
-            .local_addr()
-            .map_err(|e| std::io::Error::other(format!("Failed to get local address: {e:?}")))?;
-
-        // create QUIC config
-        let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)
-            .map_err(|e| std::io::Error::other(format!("Quiche builder got an error: {e}")))?;
-
-        config
-            .load_cert_chain_from_pem_file(cert_pem_file_path)
-            .map_err(|e| std::io::Error::other(format!("Failed to load cert chain: {e:?}")))?;
-
-        config
-            .load_priv_key_from_pem_file(key_pem_file_path)
-            .map_err(|e| std::io::Error::other(format!("Failed to load private key: {e:?}")))?;
-
-        config
-            .set_application_protos(quiche::h3::APPLICATION_PROTOCOL)
-            .map_err(|e| {
-                std::io::Error::other(format!("Failed to set application protos: {e:?}"))
-            })?;
-
-        config.set_max_idle_timeout(io_timeout.as_millis() as u64);
-        config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
-        config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
-        config.set_initial_max_data(256 * 1024 * 1024);
-        config.set_initial_max_stream_data_bidi_local(64 * 1024 * 1024);
-        config.set_initial_max_stream_data_bidi_remote(64 * 1024 * 1024);
-        config.set_initial_max_stream_data_uni(64 * 1024 * 1024);
-        config.set_initial_max_streams_bidi(1024);
-        config.set_initial_max_streams_uni(1024);
-        config.set_disable_active_migration(true);
-        config.verify_peer(verify_peer);
-        config.enable_early_data();
-
-        if extend_connect{
-            config.enable_dgram(true, MAX_DATAGRAM_SIZE, MAX_DATAGRAM_SIZE);
-        }
-
         let stacksize = if stack_size > 0 {
             stack_size
         } else {
             2 * 1024 * 1024 // default to 2 MiB
         };
 
-        let _ = may::go!(
-            may::coroutine::Builder::new()
-                .name("H3ServiceFactory".to_owned())
-                .stack_size(stacksize),
-            move || {
-                quic_dispatcher(socket, config, local_addr, extend_connect, move |id| self.service(id));
-            }
-        );
+        // share a service factory safely across dispatchers
+        let factory: std::sync::Arc<dyn Fn(usize) -> Self::Service + Send + Sync> =
+            std::sync::Arc::new(move |id| self.service(id));
+
+        let address = addr
+            .to_socket_addrs()?
+            .next()
+            .ok_or_else(|| std::io::Error::other("Failed to get address info"))?;
+        let sockets = bind_udp_sockets(address, io_timeout, num_of_workers)?;
+        for socket in sockets {
+
+            let local_addr = socket
+            .local_addr()
+            .map_err(|e| std::io::Error::other(format!("Failed to get local address: {e:?}")))?;
+
+            let cfg = build_quiche_config(
+                cert_pem_file_path,
+                key_pem_file_path,
+                io_timeout,
+                verify_peer,
+                extend_connect,
+            )?;
+
+            let factory_cloned = factory.clone();
+            let _ = may::go!(
+                may::coroutine::Builder::new()
+                    .name("H3ServiceFactory".to_owned())
+                    .stack_size(stacksize),
+                move || {
+                    quic_dispatcher(socket, cfg, local_addr, extend_connect, factory_cloned);
+                }
+            );
+        }
         Ok(())
     }
 }
@@ -515,6 +493,77 @@ fn key_from_cid(cid: &quiche::ConnectionId<'_>) -> ConnKey {
     let s = cid.len().min(quiche::MAX_CONN_ID_LEN);
     k[..s].copy_from_slice(cid.as_ref());
     k
+}
+
+#[cfg(feature = "net-h3-server")]
+fn bind_udp_sockets(addr: SocketAddr, io_timeout: std::time::Duration, n: usize) -> io::Result<Vec<std::sync::Arc<may::net::UdpSocket>>> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    use std::os::fd::{IntoRawFd};
+
+    // Only fan out on Linux (REUSEPORT). On others, make a single socket.
+    let fanout = if cfg!(any(target_os = "linux", target_os = "android")) { n } else { 1 };
+
+    let mut v = Vec::with_capacity(fanout);
+    for _ in 0..fanout {
+        let s = Socket::new(Domain::for_address(addr), Type::DGRAM, Some(Protocol::UDP))?;
+        s.set_reuse_address(true)?;
+        s.set_read_timeout(Some(io_timeout))?;
+        s.set_write_timeout(Some(io_timeout))?;
+
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        s.set_reuse_port(true)?; // enable only on Linux/Android
+
+        s.bind(&addr.into())?;
+        s.set_recv_buffer_size(32 * 1024 * 1024)?;
+        s.set_send_buffer_size(32 * 1024 * 1024)?;
+        s.set_nonblocking(true)?;
+
+        // Transfer ownership of the FD to may::net::UdpSocket (no double close).
+        let fd = s.into_raw_fd();
+        let may_udp = unsafe { may::net::UdpSocket::from_raw_fd(fd) };
+        v.push(std::sync::Arc::new(may_udp));
+    }
+    Ok(v)
+}
+
+#[cfg(feature = "net-h3-server")]
+fn build_quiche_config(
+    cert_pem_file_path: &str,
+    key_pem_file_path: &str,
+    io_timeout: std::time::Duration,
+    verify_peer: bool,
+    extend_connect: bool,
+) -> io::Result<quiche::Config> {
+    let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)
+        .map_err(|e| io::Error::other(format!("Quiche builder got an error: {e}")))?;
+
+    config
+        .load_cert_chain_from_pem_file(cert_pem_file_path)
+        .map_err(|e| io::Error::other(format!("Failed to load cert chain: {e:?}")))?;
+    config
+        .load_priv_key_from_pem_file(key_pem_file_path)
+        .map_err(|e| io::Error::other(format!("Failed to load private key: {e:?}")))?;
+
+    config
+        .set_application_protos(quiche::h3::APPLICATION_PROTOCOL)
+        .map_err(|e| io::Error::other(format!("Failed to set application protos: {e:?}")))?;
+
+    config.set_max_idle_timeout(io_timeout.as_millis() as u64);
+    config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
+    config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
+    config.set_initial_max_data(256 * 1024 * 1024);
+    config.set_initial_max_stream_data_bidi_local(64 * 1024 * 1024);
+    config.set_initial_max_stream_data_bidi_remote(64 * 1024 * 1024);
+    config.set_initial_max_stream_data_uni(64 * 1024 * 1024);
+    config.set_initial_max_streams_bidi(1024);
+    config.set_initial_max_streams_uni(1024);
+    config.set_disable_active_migration(true);
+    config.verify_peer(verify_peer);
+    config.enable_early_data();
+    if extend_connect {
+        config.enable_dgram(true, MAX_DATAGRAM_SIZE, MAX_DATAGRAM_SIZE);
+    }
+    Ok(config)
 }
 
 /// Generate a stateless retry token.
@@ -767,16 +816,13 @@ fn handle_h3_request<S: HService>(
 }
 
 #[cfg(feature = "net-h3-server")]
-fn quic_dispatcher<S, F>(
+fn quic_dispatcher<S: HService + Send + 'static>(
     socket: std::sync::Arc<may::net::UdpSocket>,
     mut config: quiche::Config,
     local_addr: SocketAddr,
     extend_connect: bool,
-    mut call_service: F,
-) where
-    S: HService + HServiceWebTransport + Send + 'static,
-    F: FnMut(usize) -> S + Send + 'static,
-{
+    call_service: std::sync::Arc<dyn Fn(usize) -> S + Send + Sync>,
+) {
     use std::collections::HashMap;
     use std::time::{Duration, Instant};
 
@@ -807,8 +853,8 @@ fn quic_dispatcher<S, F>(
         let mut scratch = [0u8; 65535];
         let (n, from) = match socket.recv_from(&mut scratch) {
             Ok(v) => v,
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
-            Err(e) => { eprintln!("recv_from error: {e:?}"); may::coroutine::yield_now(); continue; }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {may::coroutine::yield_now(); continue;},
+            Err(e) => { eprintln!("recv_from error: {e:?}"); continue; }
         };
 
         // parse header using n
@@ -826,7 +872,7 @@ fn quic_dispatcher<S, F>(
             continue;
         }
 
-        // NEW: fallback by remote address; also "learn" the new DCID
+        // fallback by remote address; also "learn" the new DCID
         if let Some(entry) = by_addr.get_mut(&from) {
             entry.expires = Instant::now() + BY_ADDR_TTL;
             let tx = &entry.tx;
@@ -905,7 +951,7 @@ fn quic_dispatcher<S, F>(
 
 
 #[cfg(feature = "net-h3-server")]
-fn handle_quic_connection<S: HService + HServiceWebTransport + 'static>(
+fn handle_quic_connection<S: HService + 'static>(
     socket: std::sync::Arc<may::net::UdpSocket>,
     conn: quiche::Connection,
     from: SocketAddr,
@@ -914,15 +960,10 @@ fn handle_quic_connection<S: HService + HServiceWebTransport + 'static>(
     (initial_dcid, extend_connect): (ConnKey, bool),
     mut service: S,
 ) {
-    use std::collections::{HashSet, HashMap};
+    use std::collections::{HashSet};
     use crate::network::http::h3_session;
 
     let mut dcids: HashSet<ConnKey> = HashSet::new();
-    let mut wt_connect_streams: HashSet<u64> = HashSet::new();
-    let mut wt_quarter_to_connect: HashMap<u64, u64> = HashMap::new();
-    let mut wt_stream_owner: HashMap<u64, u64> = HashMap::new();
-    let mut wt_assoc_hdr_buf: HashMap<u64, Vec<u8>> = HashMap::new();
-
     let mut session = h3_session::new_session(from, conn);
 
     // Register the initial DCID as the primary key for routing
@@ -950,15 +991,16 @@ fn handle_quic_connection<S: HService + HServiceWebTransport + 'static>(
 
     let mut pending: Option<(std::net::SocketAddr, Vec<u8>)> = None;
     let mut next_deadline = std::time::Instant::now() + 
-        session.conn.timeout().unwrap_or(std::time::Duration::from_millis(50));
+        session.conn.timeout().unwrap_or(std::time::Duration::from_millis(5));
     loop {
         // Fire QUIC timers if due
         if std::time::Instant::now() >= next_deadline {
             session.conn.on_timeout();
             next_deadline = std::time::Instant::now() + 
-                session.conn.timeout().unwrap_or(std::time::Duration::from_millis(50));
+                session.conn.timeout().unwrap_or(std::time::Duration::from_millis(5));
         }
         let timeout = next_deadline.saturating_duration_since(std::time::Instant::now());
+        let wait = std::cmp::min(timeout, std::time::Duration::from_millis(5));
 
         // try to nonblocking-drain any backlog quickly
         let mut got_packet = false;
@@ -987,7 +1029,7 @@ fn handle_quic_connection<S: HService + HServiceWebTransport + 'static>(
                         }
                     }
                 },
-                _ = may::coroutine::sleep(timeout) => { session.conn.on_timeout(); }
+                _ = may::coroutine::sleep(wait) => { session.conn.on_timeout(); }
             };
         }
 
@@ -1020,87 +1062,13 @@ fn handle_quic_connection<S: HService + HServiceWebTransport + 'static>(
 
                 match polled {
                     Ok((sid, quiche::h3::Event::Headers { list, .. })) => {
-                        
-                        if extend_connect {
-                            use quiche::h3::NameValue;
-
-                            let has_connect = list
-                                .iter()
-                                .find(|h| h.name() == b":method")
-                                .map(|h| h.value().eq_ignore_ascii_case(b"CONNECT"))
-                                .unwrap_or(false);
-
-                            let has_webtransport = list
-                                .iter()
-                                .find(|h| h.name() == b":protocol")
-                                .map(|h| h.value().eq_ignore_ascii_case(b"webtransport"))
-                                .unwrap_or(false);
-
-                            session.req_headers = Some(list);
-                            session.current_stream_id = Some(sid);
-
-                            if has_connect && has_webtransport {
-                                let peer_ok = match session.http3_conn.as_mut() {
-                                    Some(h3) => h3.extended_connect_enabled_by_peer(),
-                                    None => false,
-                                };
-
-                                if !peer_ok {
-                                    let _ = {
-                                        let Some(h3) = session.http3_conn.as_mut() else { continue };
-                                        let rsp = [quiche::h3::Header::new(b":status", b"421")];
-                                        h3.send_response(&mut session.conn, sid, &rsp, true)
-                                    };
-                                    continue;
-                                }
-
-                                {
-                                    let Some(h3) = session.http3_conn.as_mut() else { continue };
-                                    let rsp = [quiche::h3::Header::new(b":status", b"200")];
-                                    match h3.send_response(&mut session.conn, sid, &rsp, false) {
-                                        Ok(_) => {
-                                            wt_connect_streams.insert(sid);
-                                            service.on_wt_open(&mut session, sid);
-                                            wt_quarter_to_connect.insert(wt_quarter_id(sid), sid);
-                                        },
-                                        Err(e) => {
-                                            eprintln!("WT 200 send failed on sid {sid}: {e:?}");
-                                        }
-                                    }
-                                }
-
-                                continue;
-                            }
-                        }
-                        else {
-                            session.req_headers = Some(list);
-                            session.current_stream_id = Some(sid);
-                            // respond immediately
-                            handle_h3_request(sid, &mut session, &mut service);
-                            session.current_stream_id = None;
-                        }
+                        session.req_headers = Some(list);
+                        session.current_stream_id = Some(sid);
+                        // respond immediately
+                        handle_h3_request(sid, &mut session, &mut service);
+                        session.current_stream_id = None;
                     }
                     Ok((sid, quiche::h3::Event::Data)) => {
-                        // WT CONNECT streams shouldn't carry HTTP DATA frames; if they do, drain & ignore capsules.
-                        if extend_connect && wt_connect_streams.contains(&sid) {
-                            let mut tmp = [0u8; 4096];
-                            loop {
-                                let res = {
-                                    let Some(h3) = session.http3_conn.as_mut() else { break };
-                                    h3.recv_body(&mut session.conn, sid, &mut tmp)
-                                };
-                                match res {
-                                    Ok(_n) => { /* ignore capsules */ }
-                                    Err(quiche::h3::Error::Done) => break,
-                                    Err(e) => {
-                                        eprintln!("WT CONNECT data recv err: {e:?}");
-                                        break;
-                                    }
-                                }
-                            }
-                            continue;
-                        }
-
                         // For normal HTTP: we already stream_shutdown(Read), just drain & drop.
                         let mut tmp = [0u8; 4096];
                         loop {
@@ -1116,18 +1084,6 @@ fn handle_quic_connection<S: HService + HServiceWebTransport + 'static>(
                         }
                     }
                     Ok((sid, quiche::h3::Event::Finished)) => {
-                        // No h3 borrow needed to handle service & maps.
-                        if extend_connect && wt_connect_streams.remove(&sid) {
-                            service.on_wt_close(&mut session, sid);
-                            wt_quarter_to_connect.remove(&wt_quarter_id(sid));
-                            wt_stream_owner.retain(|_, owner| *owner != sid);
-                            session.req_body_map.remove(&sid);
-                            if session.current_stream_id == Some(sid) {
-                                session.current_stream_id = None;
-                            }
-                            continue;
-                        }
-
                         session.req_body_map.remove(&sid);
                         if session.current_stream_id == Some(sid) {
                             // If you keep current_stream_id for another reason, clear it.
@@ -1135,26 +1091,11 @@ fn handle_quic_connection<S: HService + HServiceWebTransport + 'static>(
                         }
                     }
                     Ok((sid, quiche::h3::Event::Reset { .. })) => {
-                        if extend_connect && wt_connect_streams.remove(&sid) {
-                            service.on_wt_close(&mut session, sid);
-                            wt_quarter_to_connect.remove(&wt_quarter_id(sid));
-                            wt_stream_owner.retain(|_, owner| *owner != sid);
-                            if session.current_stream_id == Some(sid) {
-                                session.current_stream_id = None;
-                            }
-                        }
                         // also drop any pending HTTP response state for that stream
                         session.partial_responses.remove(&sid);
                     }
                     Ok((_id, quiche::h3::Event::PriorityUpdate)) => { /* ignore */ }
-                    Ok((_id, quiche::h3::Event::GoAway)) => {
-                        if extend_connect {
-                            // Close any WT sessions
-                            for sid in wt_connect_streams.drain() {
-                                service.on_wt_close(&mut session, sid);
-                            }
-                        }
-                    }
+                    Ok((_id, quiche::h3::Event::GoAway)) => { /* ignore */ }
                     Err(quiche::h3::Error::Done) => break, // no more events this tick
                     Err(quiche::h3::Error::RequestCancelled) | Err(quiche::h3::Error::TransportError(quiche::Error::StreamStopped(_))) |
                     Err(quiche::h3::Error::TransportError(quiche::Error::StreamReset(_))) => {
@@ -1166,132 +1107,6 @@ fn handle_quic_connection<S: HService + HServiceWebTransport + 'static>(
                         eprintln!("{} h3 error: {e:?}", session.conn.trace_id());
                         break;
                     }
-                }
-            }
-        }
-
-        if extend_connect {
-            // WebTransport UNI/BIDI
-            if session.http3_conn.is_some() {
-                // Iterate QUIC transport streams that are readable this tick
-                for sid in session.conn.readable() {
-                    // Drain as much as we can this tick. We may not be associated yet.
-                    let mut fin_seen = false;
-                    let is_uni = (sid & 0x02) != 0;
-                    loop {
-                        // Reuse a stack buffer for this recv
-                        let mut tmp = [0u8; 4096];
-                        let (n, fin) = match session.conn.stream_recv(sid, &mut tmp) {
-                            Ok(v) => v,
-                            Err(quiche::Error::Done) => break, // nothing more for now
-                            Err(e) => {
-                                eprintln!("{} WT stream_recv err on {sid}: {e:?}", session.conn.trace_id());
-                                break;
-                            }
-                        };
-
-                        if n == 0 && !fin {
-                            // No bytes and not FIN — nothing else to do now
-                            break;
-                        }
-
-                        fin_seen |= fin;
-
-                        // Are we already associated to a CONNECT stream?
-                        if let Some(&owner) = wt_stream_owner.get(&sid) {
-                            // Deliver bytes as data
-                            if n > 0 {
-                                if is_uni {
-                                    service.on_wt_unistream_data(&mut session, owner, sid, &tmp[..n]);
-                                } else {
-                                    service.on_wt_bistream_data(&mut session, owner, sid, &tmp[..n]);
-                                }
-                            }
-                            continue;
-                        }
-
-                        // Not associated yet — accumulate header bytes until we can parse.
-                        let buf = wt_assoc_hdr_buf.entry(sid).or_default();
-                        if n > 0 {
-                            buf.extend_from_slice(&tmp[..n]);
-                        }
-
-                        // Try to parse the association header from the accumulated buffer.
-                        // parse_wt_stream_assoc expects the header starting at offset 0.
-                        if let Some((connect_sid, header_len, is_uni)) = parse_wt_stream_assoc(sid, &buf[..]) {
-                            // Only accept association if this CONNECT stream is actually a WT session we opened.
-                            if !wt_connect_streams.contains(&connect_sid) {
-                                // Not a known WT CONNECT owner — treat as non-WT; drop header buffer.
-                                wt_assoc_hdr_buf.remove(&sid);
-                                continue;
-                            }
-
-                            // Record owner and fire the "open" callback once.
-                            wt_stream_owner.insert(sid, connect_sid);
-                            if is_uni {
-                                service.on_wt_unistream_open(&mut session, connect_sid, sid);
-                            } else {
-                                service.on_wt_bistream_open(&mut session, connect_sid, sid);
-                            }
-
-                            // Deliver any payload bytes that followed the header in the same packets.
-                            if buf.len() > header_len {
-                                let first_payload = &buf[header_len..];
-                                if is_uni {
-                                    service.on_wt_unistream_data(&mut session, connect_sid, sid, first_payload);
-                                } else {
-                                    service.on_wt_bistream_data(&mut session, connect_sid, sid, first_payload);
-                                }
-                            }
-
-                            // Clear the header buffer now that we’re associated.
-                            wt_assoc_hdr_buf.remove(&sid);
-                        } else {
-                            // Header still incomplete. If FIN arrives before association, we'll drop below.
-                        }
-                    } // end inner drain loop
-
-                    // Cleanup on stream FIN
-                    if fin_seen {
-                        wt_stream_owner.remove(&sid);
-                        wt_assoc_hdr_buf.remove(&sid);
-                    }
-                }
-            }
-
-
-            // handle dgram
-            if let Some(h3_conn) = session.http3_conn.as_ref() && h3_conn.dgram_enabled_by_peer(&session.conn) {
-                // Limit per-tick datagrams
-                const MAX_DGRAMS_PER_TICK: usize = 1024;
-                let mut drained = 0;
-                // scratch buffer for a single QUIC DATAGRAM
-                let mut dgram_buf = [0u8; MAX_DATAGRAM_SIZE];
-                loop {
-                    if drained >= MAX_DGRAMS_PER_TICK { break; }
-                    match session.conn.dgram_recv(&mut dgram_buf) {
-                        Ok(len) => {
-                            let bytes = &dgram_buf[..len];
-                            // H3 DATAGRAM format: [quarter-id(varint)][optional ctx(varint)][payload...]
-                            if let Some((quarter_id, ctx, payload)) = parse_wt_dgram(bytes) {
-                                if let Some(&connect_sid) = wt_quarter_to_connect.get(&quarter_id) {
-                                    // Call your service hook
-                                    service.on_wt_datagram(&mut session, connect_sid, ctx, payload);
-                                } else {
-                                    // We haven't seen the CONNECT stream yet
-                                    eprintln!("Unknown quarter-id {quarter_id}, len={}", payload.len());
-                                }
-                            } else {
-                                eprintln!("Malformed H3 DATAGRAM");
-                            }
-                        }
-                        Err(quiche::Error::Done) => break,
-                        Err(e) => {
-                            eprintln!("{} QUIC dgram_recv error: {e:?}", session.conn.trace_id());
-                            break;
-                        }
-                    }
-                    drained += 1;
                 }
             }
         }
@@ -1343,12 +1158,6 @@ fn handle_quic_connection<S: HService + HServiceWebTransport + 'static>(
 
         // close handling
         if session.conn.is_closed() {
-            if extend_connect {
-                // best-effort close callbacks for any remaining WT sessions
-                for sid in wt_connect_streams.drain() {
-                    service.on_wt_close(&mut session, sid);
-                }
-            }
             // cleanup
             for cid in dcids.drain() {
                 let _ = ctrl_tx.send(H3CtrlMsg::RemoveCid(cid));
@@ -1360,30 +1169,6 @@ fn handle_quic_connection<S: HService + HServiceWebTransport + 'static>(
             may::coroutine::yield_now();
         }
     }
-}
-
-/// Parses a QUIC varint from `buf`
-#[cfg(feature = "net-h3-server")]
-#[inline]
-fn read_quic_varint(buf: &[u8]) -> Option<(u64, usize)> {
-    if buf.is_empty() { return None; }
-    let b0 = buf[0];
-    // Two most significant bits determine length:
-    let (_prefix, len) = match b0 >> 6 {
-        0b00 => (0, 1),
-        0b01 => (1, 2),
-        0b10 => (2, 4),
-        0b11 => (3, 8),
-        _ => unreachable!(),
-    };
-    if buf.len() < len { return None; }
-
-    let mut value = (b0 & 0x3f) as u64;
-    for &b in &buf[1..len] {
-        value = (value << 8) | (b as u64);
-    }
-
-    Some((value, len))
 }
 
 #[cfg(feature = "net-h3-server")]
@@ -1399,40 +1184,6 @@ fn register_scids(
         if dcids.insert(k) {
             let _ = ctrl_tx.send(H3CtrlMsg::AddCid(k, tx.clone()));
         }
-    }
-}
-
-#[cfg(feature = "net-h3-server")]
-#[inline]
-fn wt_quarter_id(connect_sid: u64) -> u64 { connect_sid / 4 }
-
-#[cfg(feature = "net-h3-server")]
-#[inline]
-fn parse_wt_dgram(b: &[u8]) -> Option<(u64 /*quarter*/, Option<u64> /*ctx*/, &[u8]/*payload*/)> {
-    let (qid, n1) = read_quic_varint(b)?;
-    if n1 == b.len() { return Some((qid, None, &[])); }
-    // Try read context id; if it fails, treat as no ctx and payload = rest
-    if let Some((ctx, n2)) = read_quic_varint(&b[n1..]) {
-        Some((qid, Some(ctx), &b[n1 + n2..]))
-    } else {
-        Some((qid, None, &b[n1..]))
-    }
-}
-
-#[cfg(feature = "net-h3-server")]
-#[inline]
-fn parse_wt_stream_assoc(stream_id: u64, buf: &[u8]) -> Option<(u64 /*connect_sid*/, usize /*hdr_len*/, bool /*is_uni*/)> {
-    const WT_UNI_STREAM_TYPE: u64 = 0x54; // draft-ietf-webtrans-http3
-    if (stream_id & 0x02) != 0 {
-        // uni
-        let (ty, n1) = read_quic_varint(buf)?;
-        if ty != WT_UNI_STREAM_TYPE { return None; }
-        let (connect_sid, n2) = read_quic_varint(&buf[n1..])?;
-        Some((connect_sid, n1 + n2, true))
-    } else {
-        // bi
-        let (connect_sid, n1) = read_quic_varint(buf)?;
-        Some((connect_sid, n1, false))
     }
 }
 
@@ -1479,16 +1230,6 @@ mod tests {
                 return Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "H1 POST should return WouldBlock"));
             }
             Ok(())
-        }
-    }
-
-    #[cfg(feature = "net-h3-server")]
-    impl crate::network::http::session::HServiceWebTransport for EchoServer {
-        fn on_wt_open<SE: Session>(&mut self, _session: &mut SE, _connect_sid: u64) {
-            eprintln!("Hi Webtransport");
-        }
-        fn on_wt_close<SE: Session>(&mut self, _session: &mut SE, _connect_sid: u64) {
-            eprintln!("Bye Webtransport");
         }
     }
 
@@ -1720,7 +1461,7 @@ mod tests {
         std::thread::spawn(|| {
             println!("Starting H3 server...");
             EchoServer
-                .start_h3_tls("0.0.0.0:8080", ("/tmp/cert.pem", "/tmp/key.pem"), std::time::Duration::from_secs(10), true, 0, false)
+                .start_h3_tls("0.0.0.0:8080", ("/tmp/cert.pem", "/tmp/key.pem"), std::time::Duration::from_secs(10), true, (0, NUMBER_OF_WORKERS), false)
                 .expect("h3 start server");
         });
 

@@ -550,7 +550,7 @@ mod tests {
                 ]
             };
 
-            serve(session,"/Users/pooyaeimandar/Desktop/k6.js", get_cache(),
+            serve(session,"/Users/pooyaeimandar/Codes/alpha/podverse-rs/asset/media/verse/poster.png", get_cache(),
             &mut rsp_headers,
             &[
                     EncodingType::Zstd { level: 3 },
@@ -565,9 +565,6 @@ mod tests {
             )
         }
     }
-
-    #[cfg(feature = "net-h3-server")]
-    impl crate::network::http::session::HServiceWebTransport for FileService {}
 
     impl HFactory for FileServer<FileService> {
         type Service = FileService;
@@ -597,13 +594,13 @@ mod tests {
 
     #[test]
     fn file_server() {
-        const NUMBER_OF_WORKERS: usize = 1;
+        const NUMBER_OF_WORKERS: usize = 2;
         const STACK_SIZE: usize = 2 * 1024 * 1024;
         crate::init(NUMBER_OF_WORKERS, STACK_SIZE);
 
         // Pick a port and start the server
         let addr = "0.0.0.0:8080";
-        let mut threads = Vec::with_capacity(2);
+        let mut threads = Vec::new();
 
         // create self-signed TLS certificates
         let certs = create_self_signed_tls_pems();
@@ -613,38 +610,40 @@ mod tests {
         std::fs::write(cert_path, certs.0.clone()).unwrap();
         std::fs::write(key_path, certs.1.clone()).unwrap();
 
-        let cert_pem = certs.0.clone();
-        let key_pem = certs.1.clone();
+        for _ in 0..NUMBER_OF_WORKERS {
+            let cert_pem = certs.0.clone();
+            let key_pem = certs.1.clone();
+            let h1_handle = std::thread::spawn(move || {
 
-        let h1_handle = std::thread::spawn(move || {
-
-            let id = std::thread::current().id();
-            let ssl = crate::network::http::util::SSL
-            {
-                cert_pem: cert_pem.as_bytes(),
-                key_pem: key_pem.as_bytes(),
-                chain_pem: None,
-                min_version: crate::network::http::util::SSLVersion::TLS1_2,
-                max_version: crate::network::http::util::SSLVersion::TLS1_3,
-                io_timeout: std::time::Duration::from_secs(10)
-            };
-            println!("Starting H1 server on {addr} with thread: {id:?}");
-            FileServer(FileService)
-                .start_h1_tls(addr, &ssl, STACK_SIZE, None)
-                .unwrap_or_else(|_| panic!("file server failed to start for thread {id:?}"))
-                .join()
-                .unwrap_or_else(|_| panic!("file server failed to joining thread {id:?}"));
-        });
-        threads.push(h1_handle);
+                let id = std::thread::current().id();
+                let ssl = crate::network::http::util::SSL
+                {
+                    cert_pem: cert_pem.as_bytes(),
+                    key_pem: key_pem.as_bytes(),
+                    chain_pem: None,
+                    min_version: crate::network::http::util::SSLVersion::TLS1_2,
+                    max_version: crate::network::http::util::SSLVersion::TLS1_3,
+                    io_timeout: std::time::Duration::from_secs(10)
+                };
+                println!("Starting H1 server on {addr} with thread: {id:?}");
+                FileServer(FileService)
+                    .start_h1_tls(addr, &ssl, STACK_SIZE, None)
+                    .unwrap_or_else(|_| panic!("file server failed to start for thread {id:?}"))
+                    .join()
+                    .unwrap_or_else(|_| panic!("file server failed to joining thread {id:?}"));
+            });
+            threads.push(h1_handle);
+        }
 
         let h3_handle = std::thread::spawn(move || {
             let id = std::thread::current().id();
             println!("Starting H3 server on {addr} with thread: {id:?}");
             FileServer(FileService)
-                .start_h3_tls(addr, (cert_path, key_path), std::time::Duration::from_secs(10), false, STACK_SIZE, false)
+                .start_h3_tls(addr, (cert_path, key_path), std::time::Duration::from_secs(10), false, (STACK_SIZE, NUMBER_OF_WORKERS), false)
                 .unwrap_or_else(|_| panic!("file server failed to start for thread {id:?}"));
         });
         threads.push(h3_handle);
+        
 
         // Wait for all threads to complete (they won’t unless crashed)
         for handle in threads {
