@@ -18,7 +18,7 @@ it is designed for **real-time networking**, **low-latency streaming**, and **sc
 
 ## 📊 Benchmarks
 
-### 🔬 [HTTP/1.1 TechEmpower Plaintext Benchmark](https://github.com/TechEmpower/FrameworkBenchmarks/tree/master/frameworks/Rust/sib)
+### 🔬 [HTTP/1.1 TechEmpower Plaintext Benchmark](https://github.com/TechEmpower/FrameworkBenchmarks/tree/master/frameworks/Rust/sib) - **Ready** for production
 
 **Environment:**
 
@@ -40,7 +40,7 @@ it is designed for **real-time networking**, **low-latency streaming**, and **sc
 | 4096        | 5,890,631     | 5.11 ms       | 719.07 MB/s  |
 | 16384       | 5,038,547     | 19.11 ms      | 615.06 MB/s  |
 
-### 🔬 [HTTP/3 Stress Test Benchmark](https://github.com/PooyaEimandar/sib/tree/main//bench/h3_test.py)
+### 🔬 [HTTP/3 Stress Test Benchmark](https://github.com/PooyaEimandar/sib/tree/main//bench/h3_test.py) - **Not ready** for production
 
 **Environment:**
 
@@ -59,9 +59,9 @@ it is designed for **real-time networking**, **low-latency streaming**, and **sc
 - Run the Python script from the bench folder `python3 ./h3_test.py --url https://localhost:8080 --curl-path ./curl --requests 10000 --concurrency 10000 --http3 --insecure`
 - 10K requests launched all at once, each over its own QUIC/TLS handshake. This is a hammer test and purpose is validate the stability and tail latency under handshake pressure.
 
-| Total Requests | Concurrency | Success Rate | Avg Latency 
-| -------------- | ----------- | ------------ | ----------- 
-| 10,000         | 10,000      | **99.97%**   | **1.00 s**   
+| Total Requests | Concurrency | Success Rate | Avg Latency |
+| -------------- | ----------- | ------------ | ----------- |
+| 10,000         | 10,000      | **99.97%**   | **1.00 s**  |
 
 # ⚙️ Build note
 
