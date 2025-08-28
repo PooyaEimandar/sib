@@ -980,7 +980,8 @@ fn handle_quic_connection<S: HService + HServiceWebTransport + 'static>(
             };
         }
 
-        if session.conn.is_established() && session.http3_conn.is_none()
+        if (session.conn.is_in_early_data() || session.conn.is_established())
+            && session.http3_conn.is_none()
         {
             for sc in session.conn.source_ids() {
                 let k = key_from_cid(sc);
