@@ -19,11 +19,11 @@ use std::net::{SocketAddr, ToSocketAddrs};
 use may::io::WaitIo;
 
 #[cfg(feature = "net-h3-server")]
-const MAX_DATAGRAM_SIZE: usize = 1350;
+const MAX_DATAGRAM_SIZE: usize = 1200;
 #[cfg(feature = "net-h3-server")]
 const H3_CHUNK_SIZE: usize = 64 * 1024; // 64 KB
 #[cfg(feature = "net-h3-server")]
-const H3_MAX_BYTES_PER_TICK: usize = 8 * 1024 * 1024; //cap per tick
+const H3_MAX_BYTES_PER_TICK: usize = 512 * 1024; //cap per tick
 
 const MIN_BUF_LEN: usize = 1024;
 const MAX_BODY_LEN: usize = 4096;
@@ -239,7 +239,7 @@ pub trait HFactory: Send + Sized + 'static {
         io_timeout: std::time::Duration,
         verify_peer: bool,
         stack_size: usize,
-        dgram_size: Option<(usize, usize)>
+        extend_connect: bool
     ) -> std::io::Result<()> {
         // create the UDP listening socket.
         let socket = std::sync::Arc::new(may::net::UdpSocket::bind(addr)?);
@@ -281,12 +281,9 @@ pub trait HFactory: Send + Sized + 'static {
         config.verify_peer(verify_peer);
         config.enable_early_data();
 
-        let extend_connect = if let Some((r_len, s_len)) = dgram_size{
-            config.enable_dgram(true, r_len, s_len);
-            true
-        } else {
-            false
-        };
+        if extend_connect{
+            config.enable_dgram(true, MAX_DATAGRAM_SIZE, MAX_DATAGRAM_SIZE);
+        }
 
         let stacksize = if stack_size > 0 {
             stack_size
@@ -450,44 +447,50 @@ fn serve_tls<T: HService>(
 #[cfg(not(unix))]
 fn serve<T: HService>(stream: &mut TcpStream, mut service: T) -> io::Result<()> {
     use std::io::Write;
+    use bytes::Buf;
 
     let mut req_buf = BytesMut::with_capacity(BUF_LEN);
     let mut rsp_buf = BytesMut::with_capacity(BUF_LEN);
+
     loop {
-        // read the socket for requests
+        // read
         reserve_buf(&mut req_buf);
         let read_buf: &mut [u8] = unsafe { std::mem::transmute(&mut *req_buf.chunk_mut()) };
         let read_cnt = stream.read(read_buf)?;
         if read_cnt == 0 {
-            //connection was closed
             return Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed"));
         }
         unsafe { req_buf.advance_mut(read_cnt) };
 
-        // prepare the requests
+        // parse & serve
         if read_cnt > 0 {
             loop {
-                let mut headers = [MaybeUninit::uninit(); h1session::MAX_HEADERS];
-                let mut sess =
-                    match h1session::new_session(stream, &mut headers, &mut req_buf, &mut rsp_buf)?
-                    {
-                        Some(sess) => sess,
-                        None => break,
-                    };
-
+                use crate::network::http::h1_session; // <-- fix module path
+                let mut headers = [MaybeUninit::uninit(); h1_session::MAX_HEADERS];
+                let mut sess = match h1_session::new_session(stream, &mut headers, &mut req_buf, &mut rsp_buf)? {
+                    Some(sess) => sess,
+                    None => break,
+                };
                 if let Err(e) = service.call(&mut sess) {
                     if e.kind() == std::io::ErrorKind::ConnectionAborted {
-                        // abort the connection immediately
                         return Err(e);
                     }
+                    break;
                 }
             }
         }
 
-        // send the result back to client
-        stream.write_all(&rsp_buf)?;
+        // write (drain)
+        while !rsp_buf.is_empty() {
+            let n = stream.write(rsp_buf.chunk())?;
+            if n == 0 {
+                return Err(io::Error::new(io::ErrorKind::BrokenPipe, "write closed"));
+            }
+            rsp_buf.advance(n);
+        }
     }
 }
+
 
 #[cfg(feature = "net-h3-server")]
 type ConnKey = [u8; quiche::MAX_CONN_ID_LEN];
@@ -740,7 +743,15 @@ fn handle_h3_request<S: HService>(
         });
     } else {
         let cap = quic_conn_stream_capacity(&session.conn, stream_id);
-        if cap == 0 { return; } // retry FIN later
+        if cap == 0 {
+            // Enqueue a FIN-only write so handle_writable() will finish it.
+            session.partial_responses.insert(stream_id, PartialResponse {
+                headers: None,
+                body: h3_session::BodySource::Empty,
+                written: 0,
+            });
+            return;
+        }
         match http3_conn.send_body(&mut session.conn, stream_id, &[], true) {
             Ok(_) | Err(quiche::h3::Error::Done) => {}
             Err(quiche::h3::Error::StreamBlocked) => {
@@ -1709,7 +1720,7 @@ mod tests {
         std::thread::spawn(|| {
             println!("Starting H3 server...");
             EchoServer
-                .start_h3_tls("0.0.0.0:8080", ("/tmp/cert.pem", "/tmp/key.pem"), std::time::Duration::from_secs(10), true, 0, Some((1350, 1350)))
+                .start_h3_tls("0.0.0.0:8080", ("/tmp/cert.pem", "/tmp/key.pem"), std::time::Duration::from_secs(10), true, 0, false)
                 .expect("h3 start server");
         });
 
