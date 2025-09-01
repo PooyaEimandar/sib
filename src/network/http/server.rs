@@ -21,9 +21,6 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         addr: L,
         num_shards: usize,
         backlog: i32,
-        ring_depth: usize,
-        preempt_timer: std::time::Duration,
-        spin_before_park: std::time::Duration,
     ) -> std::io::Result<()>
     where
         L: std::net::ToSocketAddrs,
@@ -42,9 +39,6 @@ pub trait HFactory: Send + Sync + Sized + 'static {
             glommio::CpuSet::online().ok(),
         ))
         .name("sib")
-        .ring_depth(ring_depth)
-        .preempt_timer(preempt_timer)
-        .spin_before_park(spin_before_park)
         .on_all_shards(move || {
             let factory = std::sync::Arc::clone(&self);
             let s_addr = s_addr;
@@ -219,14 +213,7 @@ mod tests {
             let factory = Arc::clone(&factory);
             move || {
                 factory
-                    .start_h1(
-                        format!("127.0.0.1:{PORT}"),
-                        1,
-                        1024,
-                        4096,
-                        std::time::Duration::from_micros(200),
-                        std::time::Duration::from_micros(50),
-                    )
+                    .start_h1(format!("127.0.0.1:{PORT}"), 1, 1024)
                     .expect("server failed");
             }
         });
