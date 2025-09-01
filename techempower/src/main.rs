@@ -112,14 +112,6 @@ fn main() {
         }
     }
 
-    HelloFactory::start_h1(
-        Arc::new(HelloFactory),
-        "0.0.0.0:8080",
-        cpus,
-        1024,
-        4096,
-        std::time::Duration::from_micros(200),
-        std::time::Duration::from_micros(50),
-    )
-    .expect("server failed");
+    HelloFactory::start_h1(Arc::new(HelloFactory), "0.0.0.0:8080", cpus, 65_536)
+        .expect("server failed");
 }
