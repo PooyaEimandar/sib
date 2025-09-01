@@ -28,7 +28,3 @@ pub trait Session {
     
     fn eom(&mut self);
 }
-
-pub trait HService {
-    fn call<SE: Session>(&mut self, session: &mut SE) -> std::io::Result<()>;
-}

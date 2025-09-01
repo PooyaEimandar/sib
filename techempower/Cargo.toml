@@ -13,11 +13,15 @@ readme = "README.md"
 
 [dependencies]
 sib = { path = "../", default-features = false, features = ["net-h1-server"] }
-bytes = { version = "1.10.1", default-features = false }
-mimalloc = { version = "0.1.47", features = ["secure"] }
-num_cpus = { version = "1.16" }
-serde = { version = "1.0.219", features = ["derive"] }
-serde_json = { version = "1.0.141" }
+arc-swap = "1.7.1"
+futures-lite = "2.6.1"
+futures-util = "0.3.31"
+glommio = { version = "0.9.0", default-features = false }
+httpdate = "1.0.3"
+mimalloc = "0.1.48"
+num_cpus = "1.17.0"
+once_cell = "1.21.3"
+
 
 [profile.release]
 opt-level = 3            # Consider "3" for max speed, but "z" gives small size & good cache perf

@@ -1,4 +1,3 @@
-use crate::network::http::server::reserve_buf;
 use crate::network::http::{session::Session, util::HttpHeader};
 use bytes::{Buf, BufMut, BytesMut};
 use std::io::{self, Read, Write};
