@@ -1,6 +1,12 @@
 use futures_util::{FutureExt, future::LocalBoxFuture};
+use nix::sys::uio::writev;
 use sib::network::http::server::{HFactory, HService};
-use std::{fs, sync::Arc};
+use std::{
+    fs,
+    io::IoSlice,
+    os::fd::{AsRawFd, BorrowedFd},
+    sync::Arc,
+};
 
 // --------- Fast global allocator ---------
 #[global_allocator]
@@ -37,30 +43,13 @@ fn start_date_updater_once() {
     Lazy::force(&STARTED);
 }
 
-// RFC1123 date is always 29 bytes, e.g. "Mon, 02 Jan 2006 15:04:05 GMT"
-const DATE_LEN: usize = 29;
-
 const PART1: &[u8] = b"HTTP/1.1 200 OK\r\n\
 Content-Type: text/plain\r\n\
-Content-Length: 12\r\n\
+Content-Length: 13\r\n\
 Connection: keep-alive\r\n\
 Server: Sib\r\n\
 Date: ";
-const PART2: &[u8] = b"\r\n\r\nHello World!";
-
-const BUF_LEN: usize = PART1.len() + DATE_LEN + PART2.len();
-const DATE_OFF: usize = PART1.len();
-
-// One buffer per shard/thread (no contention, no alloc).
-thread_local! {
-    static RESP_BUF: std::cell::RefCell<[u8; BUF_LEN]> = {
-        let mut buf = [0u8; BUF_LEN];
-        // Pre-fill static parts once
-        buf[..PART1.len()].copy_from_slice(PART1);
-        buf[DATE_OFF + DATE_LEN .. ].copy_from_slice(PART2);
-        std::cell::RefCell::new(buf)
-    };
-}
+const PART2: &[u8] = b"\r\n\r\nHello, World!";
 
 // --------- Service/Factory ---------
 struct HelloService;
@@ -71,25 +60,24 @@ impl HService for HelloService {
     where
         Self: 'a;
 
-    fn call<'a>(self, mut stream: glommio::net::TcpStream) -> Self::F<'a> {
+    fn call<'a>(self, stream: glommio::net::TcpStream) -> Self::F<'a> {
         async move {
-            use futures_lite::io::AsyncWriteExt;
-
-            // Get current Date (Arc<[u8]> -> &[u8])
+            // Arc<[u8]> with 29-byte RFC1123 date
             let date = DATE_CACHE.load();
 
-            RESP_BUF.with(|cell| {
-                let mut buf = cell.borrow_mut();
-                // Patch the date into the prebuilt buffer (29-byte memcpy).
-                // This is already optimal; compilers typically vectorize it.
-                buf[DATE_OFF..DATE_OFF + DATE_LEN].copy_from_slice(&date);
+            // Convert raw fd -> BorrowedFd (what nix::writev expects)
+            let fd_raw = stream.as_raw_fd();
+            let fd = unsafe { BorrowedFd::borrow_raw(fd_raw) };
 
-                // Single syscall on the hot path
-                // (glommio/futures-lite write_all() is fine; no flush needed)
-                futures_lite::future::block_on(async {
-                    let _ = stream.write_all(&*buf).await;
-                });
-            });
+            // Single gather write: [PART1][date][PART2]
+            let bufs = [
+                IoSlice::new(PART1),
+                IoSlice::new(&date), // Arc<[u8]> derefs to [u8]
+                IoSlice::new(PART2),
+            ];
+
+            // One writev(2) syscall, no extra copies/allocations
+            let _ = writev(fd, &bufs);
         }
         .boxed_local()
     }
@@ -124,6 +112,14 @@ fn main() {
         }
     }
 
-    HelloFactory::start_h1(Arc::new(HelloFactory), "0.0.0.0:8080", cpus, 4096)
-        .expect("server failed");
+    HelloFactory::start_h1(
+        Arc::new(HelloFactory),
+        "0.0.0.0:8080",
+        cpus,
+        1024,
+        4096,
+        std::time::Duration::from_micros(200),
+        std::time::Duration::from_micros(50),
+    )
+    .expect("server failed");
 }

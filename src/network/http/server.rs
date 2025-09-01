@@ -21,6 +21,9 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         addr: L,
         num_shards: usize,
         backlog: i32,
+        ring_depth: usize,
+        preempt_timer: std::time::Duration,
+        spin_before_park: std::time::Duration,
     ) -> std::io::Result<()>
     where
         L: std::net::ToSocketAddrs,
@@ -38,6 +41,10 @@ pub trait HFactory: Send + Sync + Sized + 'static {
             num_shards,
             glommio::CpuSet::online().ok(),
         ))
+        .name("sib")
+        .ring_depth(ring_depth)
+        .preempt_timer(preempt_timer)
+        .spin_before_park(spin_before_park)
         .on_all_shards(move || {
             let factory = std::sync::Arc::clone(&self);
             let s_addr = s_addr;
@@ -53,7 +60,9 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                 let listener = glommio::net::TcpListener::bind(s_addr).expect("bind");
 
                 // Concurrency budget
-                let sem = Rc::new(glommio::sync::Semaphore::new((backlog as u64).saturating_mul(2)));
+                let sem = Rc::new(glommio::sync::Semaphore::new(
+                    (backlog as u64).saturating_mul(2),
+                ));
 
                 eprintln!("Shard {shard_id} listening on {s_addr}");
 
@@ -173,7 +182,10 @@ mod tests {
     struct HelloService;
 
     impl HService for HelloService {
-        type F<'a> = LocalBoxFuture<'a, ()> where Self: 'a;
+        type F<'a>
+            = LocalBoxFuture<'a, ()>
+        where
+            Self: 'a;
 
         fn call<'a>(self, mut stream: glommio::net::TcpStream) -> Self::F<'a> {
             async move {
@@ -207,7 +219,14 @@ mod tests {
             let factory = Arc::clone(&factory);
             move || {
                 factory
-                    .start_h1(format!("127.0.0.1:{PORT}"), 1, 1024)
+                    .start_h1(
+                        format!("127.0.0.1:{PORT}"),
+                        1,
+                        1024,
+                        4096,
+                        std::time::Duration::from_micros(200),
+                        std::time::Duration::from_micros(50),
+                    )
                     .expect("server failed");
             }
         });
@@ -232,9 +251,6 @@ mod tests {
         }
 
         let body = resp_text.expect("server never responded");
-        assert!(
-            body.contains("Hello World!"),
-            "unexpected body: {body:?}"
-        );
-        }
+        assert!(body.contains("Hello World!"), "unexpected body: {body:?}");
+    }
 }
