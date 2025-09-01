@@ -1,13 +1,16 @@
 use crate::network::http::session::HService;
 use bytes::{BufMut, BytesMut};
+use hmac::{Hmac, Mac};
 use may::{
     net::{TcpListener, TcpStream},
     {coroutine, go},
 };
+use sha2::Sha256;
 #[cfg(feature = "net-h3-server")]
 use std::{
     io::{self, Read},
-    mem::MaybeUninit, os::fd::FromRawFd,
+    mem::MaybeUninit,
+    os::fd::FromRawFd,
 };
 
 #[cfg(unix)]
@@ -26,6 +29,21 @@ const H3_MAX_BYTES_PER_TICK: usize = 512 * 1024; //cap per tick
 const MIN_BUF_LEN: usize = 1024;
 const MAX_BODY_LEN: usize = 4096;
 pub const BUF_LEN: usize = MAX_BODY_LEN * 8;
+
+#[derive(Clone)]
+struct RetryKey {
+    secret: [u8; 32],
+}
+
+// rotate this key periodically (keep previous+current in memory).
+fn retry_key_current() -> RetryKey {
+    // Load from env/KMS/secret file at boot; example only:
+    RetryKey {
+        secret: *b"0123456789abcdef0123456789abcdef",
+    }
+}
+
+const TOKEN_TTL_SECS: u64 = 120; // 2 minutes
 
 macro_rules! mc {
     ($exp: expr) => {
@@ -48,7 +66,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
             type Service: HService + Send;
         }
     }
- 
+
     // create a new http service for each connection
     fn service(&self, id: usize) -> Self::Service;
 
@@ -141,7 +159,10 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         #[cfg(not(debug_assertions))]
         {
             tls_builder.set_servername_callback(|ssl_ref, _| {
-                if ssl_ref.servername(boring::ssl::NameType::HOST_NAME).is_none() {
+                if ssl_ref
+                    .servername(boring::ssl::NameType::HOST_NAME)
+                    .is_none()
+                {
                     eprintln!("SNI not provided, rejecting connection");
                     return Err(boring::ssl::SniError::ALERT_FATAL);
                 }
@@ -236,7 +257,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         io_timeout: std::time::Duration,
         verify_peer: bool,
         (stack_size, num_of_workers): (usize, usize),
-        extend_connect: bool
+        extend_connect: bool,
     ) -> std::io::Result<()> {
         let stacksize = if stack_size > 0 {
             stack_size
@@ -254,10 +275,9 @@ pub trait HFactory: Send + Sync + Sized + 'static {
             .ok_or_else(|| std::io::Error::other("Failed to get address info"))?;
         let sockets = bind_udp_sockets(address, io_timeout, num_of_workers)?;
         for socket in sockets {
-
-            let local_addr = socket
-            .local_addr()
-            .map_err(|e| std::io::Error::other(format!("Failed to get local address: {e:?}")))?;
+            let local_addr = socket.local_addr().map_err(|e| {
+                std::io::Error::other(format!("Failed to get local address: {e:?}"))
+            })?;
 
             let cfg = build_quiche_config(
                 cert_pem_file_path,
@@ -330,7 +350,10 @@ fn write(stream: &mut impl std::io::Write, rsp_buf: &mut BytesMut) -> io::Result
         match stream.write_vectored(std::slice::from_ref(&slice)) {
             Ok(0) => return Err(io::Error::new(io::ErrorKind::BrokenPipe, "write closed")),
             Ok(n) => write_cnt += n,
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => { blocked = true; break;},
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                blocked = true;
+                break;
+            }
             Err(e) => return Err(e),
         }
     }
@@ -368,10 +391,11 @@ where
     loop {
         use crate::network::http::h1_session;
         let mut headers = [MaybeUninit::uninit(); h1_session::MAX_HEADERS];
-        let mut sess = match h1_session::new_session(stream, peer_addr, &mut headers, req_buf, rsp_buf)? {
-            Some(sess) => sess,
-            None => break,
-        };
+        let mut sess =
+            match h1_session::new_session(stream, peer_addr, &mut headers, req_buf, rsp_buf)? {
+                Some(sess) => sess,
+                None => break,
+            };
 
         if let Err(e) = service.call(&mut sess) {
             if e.kind() == std::io::ErrorKind::ConnectionAborted {
@@ -382,7 +406,7 @@ where
             break;
         }
     }
-    
+
     // final flush
     let (_, wblocked2) = write(stream, rsp_buf)?;
     blocked |= wblocked2;
@@ -424,8 +448,8 @@ fn serve_tls<T: HService>(
 
 #[cfg(not(unix))]
 fn serve<T: HService>(stream: &mut TcpStream, mut service: T) -> io::Result<()> {
-    use std::io::Write;
     use bytes::Buf;
+    use std::io::Write;
 
     let mut req_buf = BytesMut::with_capacity(BUF_LEN);
     let mut rsp_buf = BytesMut::with_capacity(BUF_LEN);
@@ -445,7 +469,12 @@ fn serve<T: HService>(stream: &mut TcpStream, mut service: T) -> io::Result<()> 
             loop {
                 use crate::network::http::h1_session; // <-- fix module path
                 let mut headers = [MaybeUninit::uninit(); h1_session::MAX_HEADERS];
-                let mut sess = match h1_session::new_session(stream, &mut headers, &mut req_buf, &mut rsp_buf)? {
+                let mut sess = match h1_session::new_session(
+                    stream,
+                    &mut headers,
+                    &mut req_buf,
+                    &mut rsp_buf,
+                )? {
                     Some(sess) => sess,
                     None => break,
                 };
@@ -468,7 +497,6 @@ fn serve<T: HService>(stream: &mut TcpStream, mut service: T) -> io::Result<()> 
         }
     }
 }
-
 
 #[cfg(feature = "net-h3-server")]
 type ConnKey = [u8; quiche::MAX_CONN_ID_LEN];
@@ -496,12 +524,20 @@ fn key_from_cid(cid: &quiche::ConnectionId<'_>) -> ConnKey {
 }
 
 #[cfg(feature = "net-h3-server")]
-fn bind_udp_sockets(addr: SocketAddr, io_timeout: std::time::Duration, n: usize) -> io::Result<Vec<std::sync::Arc<may::net::UdpSocket>>> {
+fn bind_udp_sockets(
+    addr: SocketAddr,
+    io_timeout: std::time::Duration,
+    n: usize,
+) -> io::Result<Vec<std::sync::Arc<may::net::UdpSocket>>> {
     use socket2::{Domain, Protocol, Socket, Type};
-    use std::os::fd::{IntoRawFd};
+    use std::os::fd::IntoRawFd;
 
     // Only fan out on Linux (REUSEPORT). On others, make a single socket.
-    let fanout = if cfg!(any(target_os = "linux", target_os = "android")) { n } else { 1 };
+    let fanout = if cfg!(any(target_os = "linux", target_os = "android")) {
+        n
+    } else {
+        1
+    };
 
     let mut v = Vec::with_capacity(fanout);
     for _ in 0..fanout {
@@ -551,12 +587,12 @@ fn build_quiche_config(
     config.set_max_idle_timeout(io_timeout.as_millis() as u64);
     config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
     config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
-    config.set_initial_max_data(256 * 1024 * 1024);
-    config.set_initial_max_stream_data_bidi_local(64 * 1024 * 1024);
-    config.set_initial_max_stream_data_bidi_remote(64 * 1024 * 1024);
-    config.set_initial_max_stream_data_uni(64 * 1024 * 1024);
-    config.set_initial_max_streams_bidi(1024);
-    config.set_initial_max_streams_uni(1024);
+    config.set_initial_max_data(2 * 1024 * 1024);
+    config.set_initial_max_stream_data_bidi_local(256 * 1024);
+    config.set_initial_max_stream_data_bidi_remote(256 * 1024);
+    config.set_initial_max_stream_data_uni(128 * 1024);
+    config.set_initial_max_streams_bidi(128);
+    config.set_initial_max_streams_uni(32);
     config.set_disable_active_migration(true);
     config.verify_peer(verify_peer);
     config.enable_early_data();
@@ -566,63 +602,73 @@ fn build_quiche_config(
     Ok(config)
 }
 
-/// Generate a stateless retry token.
-///
-/// The token includes the static string `"quiche"` followed by the IP address
-/// of the client and by the original destination connection ID generated by the
-/// client.
-///
-/// Note that this function is only an example and doesn't do any cryptographic
-/// authenticate of the token. *It should not be used in production system*.
-#[cfg(feature = "net-h3-server")]
-fn mint_token(hdr: &quiche::Header, src: &std::net::SocketAddr) -> Vec<u8> {
-    let mut token = Vec::new();
-
-    token.extend_from_slice(b"quiche");
-
-    let addr = match src.ip() {
-        std::net::IpAddr::V4(a) => a.octets().to_vec(),
-        std::net::IpAddr::V6(a) => a.octets().to_vec(),
+fn mint_token_secure(key: &RetryKey, odcid: &[u8], client_ip: &std::net::SocketAddr) -> Vec<u8> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let ip = match client_ip.ip() {
+        std::net::IpAddr::V4(v) => v.octets().to_vec(),
+        std::net::IpAddr::V6(v) => v.octets().to_vec(),
     };
+    let mut payload = Vec::with_capacity(1 + 8 + 1 + ip.len() + odcid.len());
+    payload.extend_from_slice(&ts.to_be_bytes());
+    payload.push(ip.len() as u8);
+    payload.extend_from_slice(&ip);
+    payload.extend_from_slice(odcid);
 
-    token.extend_from_slice(&addr);
-    token.extend_from_slice(&hdr.dcid);
+    let mut mac = Hmac::<Sha256>::new_from_slice(&key.secret).unwrap();
+    mac.update(&payload);
+    let tag = mac.finalize().into_bytes();
 
-    token
+    // token = payload || tag
+    let mut out = payload;
+    out.extend_from_slice(&tag);
+    out
 }
 
-/// Validates a stateless retry token.
-///
-/// This checks that the ticket includes the `"quiche"` static string, and that
-/// the client IP address matches the address stored in the ticket.
-///
-/// Note that this function is only an example and doesn't do any cryptographic
-/// authenticate of the token. *It should not be used in production system*.
-#[cfg(feature = "net-h3-server")]
-fn validate_token<'a>(
-    src: &std::net::SocketAddr,
-    token: &'a [u8],
-) -> Option<quiche::ConnectionId<'a>> {
-    if token.len() < 6 {
+fn validate_token_secure(
+    key: &RetryKey,
+    token: &[u8],
+    client_ip: &std::net::SocketAddr,
+) -> Option<Vec<u8>> {
+    if token.len() < 8 + 1 + 32 {
+        return None;
+    } // ts + iplen + tag
+    let (head, tag) = token.split_at(token.len() - 32);
+
+    let mut mac = Hmac::<Sha256>::new_from_slice(&key.secret).ok()?;
+    mac.update(head);
+    mac.verify_slice(tag).ok()?; // constant-time check
+
+    // parse head
+    let (tsb, rest) = head.split_at(8);
+    let ts = u64::from_be_bytes(tsb.try_into().ok()?);
+    let (iplenb, rest) = rest.split_first()?;
+    let iplen = *iplenb as usize;
+    if rest.len() < iplen {
         return None;
     }
+    let (ipb, odcid) = rest.split_at(iplen);
 
-    if &token[..6] != b"quiche" {
-        return None;
-    }
-
-    let token = &token[6..];
-
-    let addr = match src.ip() {
-        std::net::IpAddr::V4(a) => a.octets().to_vec(),
-        std::net::IpAddr::V6(a) => a.octets().to_vec(),
+    // check IP match
+    let want_ip = match client_ip.ip() {
+        std::net::IpAddr::V4(v) => v.octets().to_vec(),
+        std::net::IpAddr::V6(v) => v.octets().to_vec(),
     };
-
-    if token.len() < addr.len() || &token[..addr.len()] != addr.as_slice() {
+    if ipb != want_ip.as_slice() {
         return None;
     }
 
-    Some(quiche::ConnectionId::from_ref(&token[addr.len()..]))
+    // check TTL
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+    if now.saturating_sub(ts) > TOKEN_TTL_SECS {
+        return None;
+    }
+
+    Some(odcid.to_vec())
 }
 
 /// Handles newly writable streams.
@@ -631,10 +677,15 @@ fn handle_writable(session: &mut super::h3_session::H3Session, stream_id: u64) {
     let conn = &mut session.conn;
     let http3_conn = match session.http3_conn.as_mut() {
         Some(h3) => h3,
-        None => { eprintln!("{} handle_writable with no h3_conn", conn.trace_id()); return; }
+        None => {
+            eprintln!("{} handle_writable with no h3_conn", conn.trace_id());
+            return;
+        }
     };
 
-    let Some(resp) = session.partial_responses.get_mut(&stream_id) else { return; };
+    let Some(resp) = session.partial_responses.get_mut(&stream_id) else {
+        return;
+    };
 
     // Flush headers if still pending
     if let Some(ref headers) = resp.headers {
@@ -650,7 +701,12 @@ fn handle_writable(session: &mut super::h3_session::H3Session, stream_id: u64) {
             }
             Err(e) => {
                 session.partial_responses.remove(&stream_id);
-                eprintln!("{} send_response failed on {}: {:?}", conn.trace_id(), stream_id, e);
+                eprintln!(
+                    "{} send_response failed on {}: {:?}",
+                    conn.trace_id(),
+                    stream_id,
+                    e
+                );
                 return;
             }
         }
@@ -662,11 +718,15 @@ fn handle_writable(session: &mut super::h3_session::H3Session, stream_id: u64) {
 
     while resp.written < resp.body.len() && budget > 0 {
         let cap = quic_conn_stream_capacity(conn, stream_id);
-        if cap == 0 { return; } // we’ll be called again when writable
+        if cap == 0 {
+            return;
+        } // we’ll be called again when writable
 
         let want = H3_CHUNK_SIZE.min(budget).min(cap);
         let chunk = resp.body.chunk_at(resp.written, want);
-        if chunk.is_empty() { return; }
+        if chunk.is_empty() {
+            return;
+        }
 
         match http3_conn.send_body(conn, stream_id, chunk, false) {
             Ok(n) if n > 0 => {
@@ -685,7 +745,12 @@ fn handle_writable(session: &mut super::h3_session::H3Session, stream_id: u64) {
             }
             Err(e) => {
                 session.partial_responses.remove(&stream_id);
-                eprintln!("{} send_body failed on {}: {:?}", conn.trace_id(), stream_id, e);
+                eprintln!(
+                    "{} send_body failed on {}: {:?}",
+                    conn.trace_id(),
+                    stream_id,
+                    e
+                );
                 return;
             }
         }
@@ -696,7 +761,12 @@ fn handle_writable(session: &mut super::h3_session::H3Session, stream_id: u64) {
         match http3_conn.send_body(conn, stream_id, &[], true) {
             Ok(_) | Err(quiche::h3::Error::Done) => {}
             Err(quiche::h3::Error::StreamBlocked) => return, // FIN will be retried later
-            Err(e) => eprintln!("{} send FIN failed on {}: {:?}", conn.trace_id(), stream_id, e),
+            Err(e) => eprintln!(
+                "{} send FIN failed on {}: {:?}",
+                conn.trace_id(),
+                stream_id,
+                e
+            ),
         }
         session.partial_responses.remove(&stream_id);
     }
@@ -711,9 +781,17 @@ fn handle_h3_request<S: HService>(
     use super::h3_session::{self, PartialResponse};
 
     // Decide response on headers only; stop reading request body.
-    if let Err(e) = session.conn.stream_shutdown(stream_id, quiche::Shutdown::Read, 0) {
+    if let Err(e) = session
+        .conn
+        .stream_shutdown(stream_id, quiche::Shutdown::Read, 0)
+    {
         if !matches!(e, quiche::Error::Done) {
-            eprintln!("{} sid={} stream_shutdown(Read) non-fatal: {:?}", session.conn.trace_id(), stream_id, e);
+            eprintln!(
+                "{} sid={} stream_shutdown(Read) non-fatal: {:?}",
+                session.conn.trace_id(),
+                stream_id,
+                e
+            );
         }
     }
 
@@ -722,14 +800,22 @@ fn handle_h3_request<S: HService>(
     if let Err(e) = service.call(session) {
         if e.kind() == std::io::ErrorKind::ConnectionAborted {
             session.partial_responses.remove(&stream_id);
-            let _ = session.conn.stream_shutdown(stream_id, quiche::Shutdown::Write, 0);
+            let _ = session
+                .conn
+                .stream_shutdown(stream_id, quiche::Shutdown::Write, 0);
             return;
         }
     }
 
     let http3_conn = match session.http3_conn.as_mut() {
         Some(v) => v,
-        None => { eprintln!("{} HTTP/3 connection not initialized", session.conn.trace_id()); return; }
+        None => {
+            eprintln!(
+                "{} HTTP/3 connection not initialized",
+                session.conn.trace_id()
+            );
+            return;
+        }
     };
 
     // Send headers first (or defer if blocked)
@@ -737,18 +823,23 @@ fn handle_h3_request<S: HService>(
         Ok(_) => {}
         Err(quiche::h3::Error::StreamBlocked) | Err(quiche::h3::Error::Done) => {
             use std::mem::take;
-            session.partial_responses.insert(stream_id, PartialResponse {
-                headers: Some(take(&mut session.rsp_headers)),
-                body: take(&mut session.rsp_body),
-                written: 0,
-            });
+            session.partial_responses.insert(
+                stream_id,
+                PartialResponse {
+                    headers: Some(take(&mut session.rsp_headers)),
+                    body: take(&mut session.rsp_body),
+                    written: 0,
+                },
+            );
             return;
         }
         Err(quiche::h3::Error::RequestCancelled)
         | Err(quiche::h3::Error::TransportError(quiche::Error::StreamStopped(_)))
         | Err(quiche::h3::Error::TransportError(quiche::Error::StreamReset(_))) => {
             session.partial_responses.remove(&stream_id);
-            let _ = session.conn.stream_shutdown(stream_id, quiche::Shutdown::Write, 0);
+            let _ = session
+                .conn
+                .stream_shutdown(stream_id, quiche::Shutdown::Write, 0);
             return;
         }
         Err(e) => {
@@ -765,50 +856,71 @@ fn handle_h3_request<S: HService>(
 
     while written < total && budget > 0 {
         let cap = quic_conn_stream_capacity(&session.conn, stream_id);
-        if cap == 0 { break; } // wait for writable()
-        let want  = H3_CHUNK_SIZE.min(budget).min(cap);
+        if cap == 0 {
+            break;
+        } // wait for writable()
+        let want = H3_CHUNK_SIZE.min(budget).min(cap);
         let chunk = session.rsp_body.chunk_at(written, want);
 
         match http3_conn.send_body(&mut session.conn, stream_id, chunk, false) {
-            Ok(n) if n > 0 => { written += n; budget = budget.saturating_sub(n); }
-            Ok(_) | Err(quiche::h3::Error::Done) | Err(quiche::h3::Error::StreamBlocked) => { break; }
+            Ok(n) if n > 0 => {
+                written += n;
+                budget = budget.saturating_sub(n);
+            }
+            Ok(_) | Err(quiche::h3::Error::Done) | Err(quiche::h3::Error::StreamBlocked) => {
+                break;
+            }
             Err(quiche::h3::Error::RequestCancelled)
             | Err(quiche::h3::Error::TransportError(quiche::Error::StreamStopped(_)))
             | Err(quiche::h3::Error::TransportError(quiche::Error::StreamReset(_))) => {
-                let _ = session.conn.stream_shutdown(stream_id, quiche::Shutdown::Write, 0);
+                let _ = session
+                    .conn
+                    .stream_shutdown(stream_id, quiche::Shutdown::Write, 0);
                 return;
             }
-            Err(e) => { eprintln!("{} send_body failed: {:?}", session.conn.trace_id(), e); return; }
+            Err(e) => {
+                eprintln!("{} send_body failed: {:?}", session.conn.trace_id(), e);
+                return;
+            }
         }
     }
 
     if written < total {
         use std::mem::take;
         let body_src = take(&mut session.rsp_body);
-        session.partial_responses.insert(stream_id, PartialResponse {
-            headers: None,
-            body: body_src,
-            written,
-        });
+        session.partial_responses.insert(
+            stream_id,
+            PartialResponse {
+                headers: None,
+                body: body_src,
+                written,
+            },
+        );
     } else {
         let cap = quic_conn_stream_capacity(&session.conn, stream_id);
         if cap == 0 {
             // Enqueue a FIN-only write so handle_writable() will finish it.
-            session.partial_responses.insert(stream_id, PartialResponse {
-                headers: None,
-                body: h3_session::BodySource::Empty,
-                written: 0,
-            });
+            session.partial_responses.insert(
+                stream_id,
+                PartialResponse {
+                    headers: None,
+                    body: h3_session::BodySource::Empty,
+                    written: 0,
+                },
+            );
             return;
         }
         match http3_conn.send_body(&mut session.conn, stream_id, &[], true) {
             Ok(_) | Err(quiche::h3::Error::Done) => {}
             Err(quiche::h3::Error::StreamBlocked) => {
-                session.partial_responses.insert(stream_id, PartialResponse {
-                    headers: None,
-                    body: h3_session::BodySource::Empty,
-                    written: 0,
-                });
+                session.partial_responses.insert(
+                    stream_id,
+                    PartialResponse {
+                        headers: None,
+                        body: h3_session::BodySource::Empty,
+                        written: 0,
+                    },
+                );
             }
             Err(e) => eprintln!("{} send FIN failed: {:?}", session.conn.trace_id(), e),
         }
@@ -827,10 +939,13 @@ fn quic_dispatcher<S: HService + Send + 'static>(
     use std::time::{Duration, Instant};
 
     type WorkerTx = may::sync::mpsc::Sender<Datagram>;
-    let mut by_cid:  HashMap<ConnKey, WorkerTx> = HashMap::new();
+    let mut by_cid: HashMap<ConnKey, WorkerTx> = HashMap::new();
 
-    // NEW: short-lived addr map to cover CID switch race
-    struct AddrEntry { tx: WorkerTx, expires: Instant }
+    // short-lived addr map to cover CID switch race
+    struct AddrEntry {
+        tx: WorkerTx,
+        expires: Instant,
+    }
     let mut by_addr: HashMap<SocketAddr, AddrEntry> = HashMap::new();
     const BY_ADDR_TTL: Duration = Duration::from_secs(5);
 
@@ -841,8 +956,12 @@ fn quic_dispatcher<S: HService + Send + 'static>(
         // drain control messages
         while let Ok(msg) = ctrl_rx.try_recv() {
             match msg {
-                H3CtrlMsg::AddCid(cid, tx) => { by_cid.insert(cid, tx); }
-                H3CtrlMsg::RemoveCid(cid)  => { by_cid.remove(&cid); }
+                H3CtrlMsg::AddCid(cid, tx) => {
+                    by_cid.insert(cid, tx);
+                }
+                H3CtrlMsg::RemoveCid(cid) => {
+                    by_cid.remove(&cid);
+                }
             }
         }
         // expire old addr bindings
@@ -853,14 +972,23 @@ fn quic_dispatcher<S: HService + Send + 'static>(
         let mut scratch = [0u8; 65535];
         let (n, from) = match socket.recv_from(&mut scratch) {
             Ok(v) => v,
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {may::coroutine::yield_now(); continue;},
-            Err(e) => { eprintln!("recv_from error: {e:?}"); continue; }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                may::coroutine::yield_now();
+                continue;
+            }
+            Err(e) => {
+                eprintln!("recv_from error: {e:?}");
+                continue;
+            }
         };
 
         // parse header using n
         let hdr = match quiche::Header::from_slice(&mut scratch[..n], quiche::MAX_CONN_ID_LEN) {
             Ok(h) => h,
-            Err(e) => { eprintln!("Header parse failed: {e:?}"); continue; }
+            Err(e) => {
+                eprintln!("Header parse failed: {e:?}");
+                continue;
+            }
         };
         let dcid_key = key_from_cid(&hdr.dcid);
 
@@ -868,7 +996,11 @@ fn quic_dispatcher<S: HService + Send + 'static>(
         if let Some(tx) = by_cid.get(&dcid_key) {
             let mut v = Vec::with_capacity(n);
             v.extend_from_slice(&scratch[..n]);
-            let _ = tx.send(Datagram { buf: v, from, to: local_addr });
+            let _ = tx.send(Datagram {
+                buf: v,
+                from,
+                to: local_addr,
+            });
             continue;
         }
 
@@ -878,7 +1010,11 @@ fn quic_dispatcher<S: HService + Send + 'static>(
             let tx = &entry.tx;
             let mut v = Vec::with_capacity(n);
             v.extend_from_slice(&scratch[..n]);
-            let _ = tx.send(Datagram { buf: v, from, to: local_addr });
+            let _ = tx.send(Datagram {
+                buf: v,
+                from,
+                to: local_addr,
+            });
             by_cid.insert(dcid_key, tx.clone());
             continue;
         }
@@ -900,27 +1036,55 @@ fn quic_dispatcher<S: HService + Send + 'static>(
             continue;
         }
 
-        // retry if needed
+        // Retry: only when required by policy. If client provided a valid token, accept.
+        let retry_key = retry_key_current();
         let token = hdr.token.as_deref().unwrap_or(&[]);
-        let odcid_opt = if token.is_empty() { None } else { validate_token(&from, token) };
-        if odcid_opt.is_none() {
+        let odcid_bytes_opt: Option<Vec<u8>> = if token.is_empty() {
+            None
+        } else {
+            validate_token_secure(&retry_key, token, &from)
+        };
+        if odcid_bytes_opt.is_none() {
             use ring::rand::{SecureRandom, SystemRandom};
             let rng = SystemRandom::new();
             let cid_len = hdr.dcid.len().min(quiche::MAX_CONN_ID_LEN);
             let mut scid_bytes = [0u8; quiche::MAX_CONN_ID_LEN];
             rng.fill(&mut scid_bytes[..cid_len]).expect("rng");
+
             let scid = quiche::ConnectionId::from_ref(&scid_bytes[..cid_len]);
-            let new_token = mint_token(&hdr, &from);
-            if let Ok(len) = quiche::retry(&hdr.scid, &hdr.dcid, &scid, &new_token, hdr.version, &mut out) {
+            let new_token = mint_token_secure(&retry_key, &hdr.dcid, &from);
+            if let Ok(len) = quiche::retry(
+                &hdr.scid,
+                &hdr.dcid,
+                &scid,
+                &new_token,
+                hdr.version,
+                &mut out,
+            ) {
                 let _ = socket.send_to(&out[..len], from);
             }
             continue;
         }
 
+        // We have a valid token: build a ConnectionId that borrows from the odcid bytes.
+        // Keep the Vec alive while we pass a &ConnectionId into quiche::accept.
+        let odcid_bytes = odcid_bytes_opt.unwrap();
+        let odcid_conn_id = quiche::ConnectionId::from_ref(&odcid_bytes);
+
         // accept new connection
-        let conn = match quiche::accept(&hdr.dcid, odcid_opt.as_ref(), local_addr, from, &mut config) {
+        // accept new connection
+        let conn = match quiche::accept(
+            &hdr.dcid,
+            Some(&odcid_conn_id),
+            local_addr,
+            from,
+            &mut config,
+        ) {
             Ok(c) => c,
-            Err(e) => { eprintln!("accept failed: {e:?}"); continue; }
+            Err(e) => {
+                eprintln!("accept failed: {e:?}");
+                continue;
+            }
         };
 
         // create channel, spawn worker, then seed
@@ -940,28 +1104,40 @@ fn quic_dispatcher<S: HService + Send + 'static>(
                 service,
             );
         });
-        
-        by_addr.insert(from, AddrEntry { tx: tx_cloned.clone(), expires: Instant::now() + BY_ADDR_TTL });
+
+        by_addr.insert(
+            from,
+            AddrEntry {
+                tx: tx_cloned.clone(),
+                expires: Instant::now() + BY_ADDR_TTL,
+            },
+        );
         by_cid.insert(dcid_key, tx_cloned.clone());
         let mut v = Vec::with_capacity(n);
         v.extend_from_slice(&scratch[..n]);
-        let _ = tx_cloned.send(Datagram { buf: v, from, to: local_addr });
+        let _ = tx_cloned.send(Datagram {
+            buf: v,
+            from,
+            to: local_addr,
+        });
     }
 }
-
 
 #[cfg(feature = "net-h3-server")]
 fn handle_quic_connection<S: HService + 'static>(
     socket: std::sync::Arc<may::net::UdpSocket>,
     conn: quiche::Connection,
     from: SocketAddr,
-    (rx, tx): (may::sync::mpsc::Receiver<Datagram>, may::sync::mpsc::Sender<Datagram>),
+    (rx, tx): (
+        may::sync::mpsc::Receiver<Datagram>,
+        may::sync::mpsc::Sender<Datagram>,
+    ),
     ctrl_tx: may::sync::mpsc::Sender<H3CtrlMsg>,
     (initial_dcid, extend_connect): (ConnKey, bool),
     mut service: S,
 ) {
-    use std::collections::{HashSet};
     use crate::network::http::h3_session;
+    use std::collections::HashSet;
 
     let mut dcids: HashSet<ConnKey> = HashSet::new();
     let mut session = h3_session::new_session(from, conn);
@@ -983,21 +1159,27 @@ fn handle_quic_connection<S: HService + 'static>(
     };
 
     h3_config.set_qpack_max_table_capacity(4 * 1024);
-    h3_config.set_qpack_blocked_streams(100);
-    h3_config.set_max_field_section_size(256 * 1024);
+    h3_config.set_qpack_blocked_streams(64);
+    h3_config.set_max_field_section_size(64 * 1024);
     if extend_connect {
         h3_config.enable_extended_connect(true);
     }
 
     let mut pending: Option<(std::net::SocketAddr, Vec<u8>)> = None;
-    let mut next_deadline = std::time::Instant::now() + 
-        session.conn.timeout().unwrap_or(std::time::Duration::from_millis(5));
+    let mut next_deadline = std::time::Instant::now()
+        + session
+            .conn
+            .timeout()
+            .unwrap_or(std::time::Duration::from_millis(5));
     loop {
         // Fire QUIC timers if due
         if std::time::Instant::now() >= next_deadline {
             session.conn.on_timeout();
-            next_deadline = std::time::Instant::now() + 
-                session.conn.timeout().unwrap_or(std::time::Duration::from_millis(5));
+            next_deadline = std::time::Instant::now()
+                + session
+                    .conn
+                    .timeout()
+                    .unwrap_or(std::time::Duration::from_millis(5));
         }
         let timeout = next_deadline.saturating_duration_since(std::time::Instant::now());
         let wait = std::cmp::min(timeout, std::time::Duration::from_millis(5));
@@ -1008,7 +1190,10 @@ fn handle_quic_connection<S: HService + 'static>(
         while drained < 64 {
             match rx.try_recv() {
                 Ok(mut data) => {
-                    let recv_info = quiche::RecvInfo { to: data.to, from: data.from };
+                    let recv_info = quiche::RecvInfo {
+                        to: data.to,
+                        from: data.from,
+                    };
                     if session.conn.recv(&mut data.buf, recv_info).is_ok() {
                         got_packet = true;
                     }
@@ -1056,7 +1241,9 @@ fn handle_quic_connection<S: HService + 'static>(
             loop {
                 // Poll once with a short-lived borrow of h3_conn.
                 let polled = {
-                    let Some(h3) = session.http3_conn.as_mut() else { break };
+                    let Some(h3) = session.http3_conn.as_mut() else {
+                        break;
+                    };
                     h3.poll(&mut session.conn)
                 };
 
@@ -1073,13 +1260,18 @@ fn handle_quic_connection<S: HService + 'static>(
                         let mut tmp = [0u8; 4096];
                         loop {
                             let res = {
-                                let Some(h3) = session.http3_conn.as_mut() else { break };
+                                let Some(h3) = session.http3_conn.as_mut() else {
+                                    break;
+                                };
                                 h3.recv_body(&mut session.conn, sid, &mut tmp)
                             };
                             match res {
                                 Ok(_n) => {} // drop
                                 Err(quiche::h3::Error::Done) => break,
-                                Err(e) => { eprintln!("recv_body(drop): {e:?}"); break; }
+                                Err(e) => {
+                                    eprintln!("recv_body(drop): {e:?}");
+                                    break;
+                                }
                             }
                         }
                     }
@@ -1097,8 +1289,9 @@ fn handle_quic_connection<S: HService + 'static>(
                     Ok((_id, quiche::h3::Event::PriorityUpdate)) => { /* ignore */ }
                     Ok((_id, quiche::h3::Event::GoAway)) => { /* ignore */ }
                     Err(quiche::h3::Error::Done) => break, // no more events this tick
-                    Err(quiche::h3::Error::RequestCancelled) | Err(quiche::h3::Error::TransportError(quiche::Error::StreamStopped(_))) |
-                    Err(quiche::h3::Error::TransportError(quiche::Error::StreamReset(_))) => {
+                    Err(quiche::h3::Error::RequestCancelled)
+                    | Err(quiche::h3::Error::TransportError(quiche::Error::StreamStopped(_)))
+                    | Err(quiche::h3::Error::TransportError(quiche::Error::StreamReset(_))) => {
                         // per-stream transport issues, don't kill the whole connection worker
                         continue;
                     }
@@ -1117,7 +1310,7 @@ fn handle_quic_connection<S: HService + 'static>(
                 match socket.send_to(&pkt, to) {
                     Ok(_) => { /* sent */ }
                     Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        pending = Some((to, pkt));  // keep for next tick
+                        pending = Some((to, pkt)); // keep for next tick
                         break;
                     }
                     Err(e) => {
@@ -1198,7 +1391,7 @@ mod tests {
     use crate::network::http::{
         server::{HFactory, HService},
         session::Session,
-        util::{Status, SSLVersion},
+        util::{SSLVersion, Status},
     };
     use may::net::TcpStream;
     use std::{
@@ -1227,7 +1420,10 @@ mod tests {
                 .eom();
 
             if !session.is_h3() && req_method == "POST" {
-                return Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "H1 POST should return WouldBlock"));
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "H1 POST should return WouldBlock",
+                ));
             }
             Ok(())
         }
@@ -1266,17 +1462,19 @@ mod tests {
 
     #[cfg(feature = "sys-boring-ssl")]
     fn create_self_signed_tls_pems() -> (String, String) {
+        use base64::{Engine as _, engine::general_purpose::STANDARD as b64};
         use rcgen::{
             CertificateParams, DistinguishedName, DnType, KeyPair, SanType, date_time_ymd,
         };
         use sha2::{Digest, Sha256};
-        use base64::{engine::general_purpose::STANDARD as b64, Engine as _};
 
         let mut params: CertificateParams = Default::default();
         params.not_before = date_time_ymd(1975, 1, 1);
         params.not_after = date_time_ymd(4096, 1, 1);
         params.distinguished_name = DistinguishedName::new();
-        params.distinguished_name.push(DnType::OrganizationName, "Sib");
+        params
+            .distinguished_name
+            .push(DnType::OrganizationName, "Sib");
         params.distinguished_name.push(DnType::CommonName, "Sib");
         params.subject_alt_names = vec![SanType::DnsName("localhost".try_into().unwrap())];
 
@@ -1304,7 +1502,6 @@ mod tests {
 
         (cert_pem, key_pem)
     }
-
 
     #[cfg(feature = "net-h1-server")]
     #[test]
@@ -1461,7 +1658,14 @@ mod tests {
         std::thread::spawn(|| {
             println!("Starting H3 server...");
             EchoServer
-                .start_h3_tls("0.0.0.0:8080", ("/tmp/cert.pem", "/tmp/key.pem"), std::time::Duration::from_secs(10), true, (0, NUMBER_OF_WORKERS), false)
+                .start_h3_tls(
+                    "0.0.0.0:8080",
+                    ("/tmp/cert.pem", "/tmp/key.pem"),
+                    std::time::Duration::from_secs(10),
+                    true,
+                    (0, NUMBER_OF_WORKERS),
+                    false,
+                )
                 .expect("h3 start server");
         });
 
