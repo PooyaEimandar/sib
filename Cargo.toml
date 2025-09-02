@@ -1,6 +1,6 @@
 [package]
 name = "sib"
-version = "0.0.10"
+version = "0.0.11"
 authors = ["mail@pooya.ai"]
 description = "A high-performance, secure, and cross-platform modules optimized for efficiency, scalability, and reliability."
 documentation = "https://docs.rs/sib"
@@ -62,11 +62,6 @@ foundationdb-sys = { version = "0.9.1", optional = true, default-features = fals
     "fdb-7_3",
 ] }
 
-# # only for linux
-# [target.'cfg(target_os = "linux")'.dependencies]
-# io-uring = { version = "0.7.9", optional = true }
-# nix = { version = "0.30.1", optional = true }
-
 [features]
 default = []
 db-fdb = ["foundationdb-sys", "may"]
@@ -106,7 +101,7 @@ stm-receiver = ["glib", "gstreamer", "gstreamer-app", "gstreamer-video"]
 sys-boring-ssl = ["boring"]
 
 [dev-dependencies]
-num_cpus = { version = "1.16" }
+num_cpus = { version = "1.17.0" }
 dashmap = { version = "6.1.0", default-features = false, features = ["rayon"] }
 rcgen = { version = "0.14.3" }
 reqwest = { version = "0.12.23", default-features = false, features = [
@@ -114,10 +109,10 @@ reqwest = { version = "0.12.23", default-features = false, features = [
 ] }
 sha2 = { version = "0.10.9" }
 base64 = { version = "0.22.1" }
-tokio = { version = "1.47.0", default-features = false, features = [
+tokio = { version = "1.47.1", default-features = false, features = [
     "macros",
     "rt",
 ] }
 
 [build-dependencies]
-chrono = { version = "0.4.40" }
+chrono = { version = "0.4.41" }
