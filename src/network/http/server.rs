@@ -994,10 +994,10 @@ fn quic_dispatcher<S: HService + Send + 'static>(
 
         // fast path: known DCID
         if let Some(tx) = by_cid.get(&dcid_key) {
-            let mut v = Vec::with_capacity(n);
-            v.extend_from_slice(&scratch[..n]);
+            let mut owned = Vec::with_capacity(n);
+            owned.extend_from_slice(&scratch[..n]);
             let _ = tx.send(Datagram {
-                buf: v,
+                buf: owned,
                 from,
                 to: local_addr,
             });
@@ -1008,10 +1008,10 @@ fn quic_dispatcher<S: HService + Send + 'static>(
         if let Some(entry) = by_addr.get_mut(&from) {
             entry.expires = Instant::now() + BY_ADDR_TTL;
             let tx = &entry.tx;
-            let mut v = Vec::with_capacity(n);
-            v.extend_from_slice(&scratch[..n]);
+            let mut owned = Vec::with_capacity(n);
+            owned.extend_from_slice(&scratch[..n]);
             let _ = tx.send(Datagram {
-                buf: v,
+                buf: owned,
                 from,
                 to: local_addr,
             });
@@ -1071,7 +1071,6 @@ fn quic_dispatcher<S: HService + Send + 'static>(
         let odcid_bytes = odcid_bytes_opt.unwrap();
         let odcid_conn_id = quiche::ConnectionId::from_ref(&odcid_bytes);
 
-        // accept new connection
         // accept new connection
         let conn = match quiche::accept(
             &hdr.dcid,
@@ -1142,11 +1141,9 @@ fn handle_quic_connection<S: HService + 'static>(
     let mut dcids: HashSet<ConnKey> = HashSet::new();
     let mut session = h3_session::new_session(from, conn);
 
-    // Register the initial DCID as the primary key for routing
     if dcids.insert(initial_dcid) {
         let _ = ctrl_tx.send(H3CtrlMsg::AddCid(initial_dcid, tx.clone()));
     }
-    // register all server source CIDs
     register_scids(&session.conn, &mut dcids, &ctrl_tx, &tx);
 
     let mut out = [0u8; MAX_DATAGRAM_SIZE];
@@ -1157,7 +1154,6 @@ fn handle_quic_connection<S: HService + 'static>(
             return;
         }
     };
-
     h3_config.set_qpack_max_table_capacity(4 * 1024);
     h3_config.set_qpack_blocked_streams(64);
     h3_config.set_max_field_section_size(64 * 1024);
@@ -1165,29 +1161,18 @@ fn handle_quic_connection<S: HService + 'static>(
         h3_config.enable_extended_connect(true);
     }
 
-    let mut pending: Option<(std::net::SocketAddr, Vec<u8>)> = None;
-    let mut next_deadline = std::time::Instant::now()
-        + session
-            .conn
-            .timeout()
-            .unwrap_or(std::time::Duration::from_millis(5));
-    loop {
-        // Fire QUIC timers if due
-        if std::time::Instant::now() >= next_deadline {
-            session.conn.on_timeout();
-            next_deadline = std::time::Instant::now()
-                + session
-                    .conn
-                    .timeout()
-                    .unwrap_or(std::time::Duration::from_millis(5));
-        }
-        let timeout = next_deadline.saturating_duration_since(std::time::Instant::now());
-        let wait = std::cmp::min(timeout, std::time::Duration::from_millis(5));
+    // Optimized pending handling
+    let mut pending_to: Option<SocketAddr> = None;
+    let mut pending_len: usize = 0;
+    let mut pending_buf = bytes::BytesMut::with_capacity(MAX_DATAGRAM_SIZE);
 
-        // try to nonblocking-drain any backlog quickly
+    loop {
+        let deadline = std::time::Instant::now() + session.conn.timeout().unwrap_or_default();
+        let wait = deadline.saturating_duration_since(std::time::Instant::now());
+
         let mut got_packet = false;
-        let mut drained = 0usize;
-        while drained < 64 {
+        let start = std::time::Instant::now();
+        while start.elapsed() < std::time::Duration::from_micros(300) {
             match rx.try_recv() {
                 Ok(mut data) => {
                     let recv_info = quiche::RecvInfo {
@@ -1197,13 +1182,11 @@ fn handle_quic_connection<S: HService + 'static>(
                     if session.conn.recv(&mut data.buf, recv_info).is_ok() {
                         got_packet = true;
                     }
-                    drained += 1;
                 }
                 Err(_) => break,
             }
         }
 
-        // if we still didn’t get anything, block up to the QUIC timeout for ONE packet
         if !got_packet {
             let _ = may::select! {
                 pkt = rx.recv() => {
@@ -1239,7 +1222,6 @@ fn handle_quic_connection<S: HService + 'static>(
             }
 
             loop {
-                // Poll once with a short-lived borrow of h3_conn.
                 let polled = {
                     let Some(h3) = session.http3_conn.as_mut() else {
                         break;
@@ -1251,12 +1233,10 @@ fn handle_quic_connection<S: HService + 'static>(
                     Ok((sid, quiche::h3::Event::Headers { list, .. })) => {
                         session.req_headers = Some(list);
                         session.current_stream_id = Some(sid);
-                        // respond immediately
                         handle_h3_request(sid, &mut session, &mut service);
                         session.current_stream_id = None;
                     }
                     Ok((sid, quiche::h3::Event::Data)) => {
-                        // For normal HTTP: we already stream_shutdown(Read), just drain & drop.
                         let mut tmp = [0u8; 4096];
                         loop {
                             let res = {
@@ -1266,7 +1246,7 @@ fn handle_quic_connection<S: HService + 'static>(
                                 h3.recv_body(&mut session.conn, sid, &mut tmp)
                             };
                             match res {
-                                Ok(_n) => {} // drop
+                                Ok(_) => {}
                                 Err(quiche::h3::Error::Done) => break,
                                 Err(e) => {
                                     eprintln!("recv_body(drop): {e:?}");
@@ -1278,21 +1258,18 @@ fn handle_quic_connection<S: HService + 'static>(
                     Ok((sid, quiche::h3::Event::Finished)) => {
                         session.req_body_map.remove(&sid);
                         if session.current_stream_id == Some(sid) {
-                            // If you keep current_stream_id for another reason, clear it.
                             session.current_stream_id = None;
                         }
                     }
                     Ok((sid, quiche::h3::Event::Reset { .. })) => {
-                        // also drop any pending HTTP response state for that stream
                         session.partial_responses.remove(&sid);
                     }
-                    Ok((_id, quiche::h3::Event::PriorityUpdate)) => { /* ignore */ }
-                    Ok((_id, quiche::h3::Event::GoAway)) => { /* ignore */ }
-                    Err(quiche::h3::Error::Done) => break, // no more events this tick
+                    Ok((_id, quiche::h3::Event::PriorityUpdate)) => {}
+                    Ok((_id, quiche::h3::Event::GoAway)) => {}
+                    Err(quiche::h3::Error::Done) => break,
                     Err(quiche::h3::Error::RequestCancelled)
                     | Err(quiche::h3::Error::TransportError(quiche::Error::StreamStopped(_)))
                     | Err(quiche::h3::Error::TransportError(quiche::Error::StreamReset(_))) => {
-                        // per-stream transport issues, don't kill the whole connection worker
                         continue;
                     }
                     Err(e) => {
@@ -1304,40 +1281,40 @@ fn handle_quic_connection<S: HService + 'static>(
             }
         }
 
-        // drain sends (flush pending first)
+        // Optimized pending send
         loop {
-            if let Some((to, pkt)) = pending.take() {
-                match socket.send_to(&pkt, to) {
-                    Ok(_) => { /* sent */ }
-                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        pending = Some((to, pkt)); // keep for next tick
-                        break;
+            if let Some(to) = pending_to {
+                match socket.send_to(&pending_buf[..pending_len], to) {
+                    Ok(_) => {
+                        pending_to = None;
+                        pending_len = 0;
                     }
+                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
                     Err(e) => {
                         eprintln!("send failed (pending): {e:?}");
                         session.conn.close(false, 0x1, b"send-pending-fail").ok();
                         break;
                     }
                 }
-                continue; // maybe more to send this tick
+                continue;
             }
 
             match session.conn.send(&mut out) {
-                Ok((n, send_info)) => {
-                    match socket.send_to(&out[..n], send_info.to) {
-                        Ok(_) => {}
-                        Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                            // keep a copy and retry next tick
-                            pending = Some((send_info.to, out[..n].to_vec()));
-                            break;
-                        }
-                        Err(e) => {
-                            eprintln!("send failed: {e:?}");
-                            session.conn.close(false, 0x1, b"send-fail").ok();
-                            break;
-                        }
+                Ok((n, send_info)) => match socket.send_to(&out[..n], send_info.to) {
+                    Ok(_) => {}
+                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        pending_buf.clear();
+                        pending_buf.extend_from_slice(&out[..n]);
+                        pending_len = n;
+                        pending_to = Some(send_info.to);
+                        break;
                     }
-                }
+                    Err(e) => {
+                        eprintln!("send failed: {e:?}");
+                        session.conn.close(false, 0x1, b"send-fail").ok();
+                        break;
+                    }
+                },
                 Err(quiche::Error::Done) => break,
                 Err(e) => {
                     eprintln!("{} send error: {e:?}", session.conn.trace_id());
@@ -1349,9 +1326,7 @@ fn handle_quic_connection<S: HService + 'static>(
 
         register_scids(&session.conn, &mut dcids, &ctrl_tx, &tx);
 
-        // close handling
         if session.conn.is_closed() {
-            // cleanup
             for cid in dcids.drain() {
                 let _ = ctrl_tx.send(H3CtrlMsg::RemoveCid(cid));
             }
