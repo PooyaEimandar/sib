@@ -1,4 +1,3 @@
-use crate::network::http::server::reserve_buf;
 use crate::network::http::{session::Session, util::HttpHeader};
 use bytes::{Buf, BufMut, BytesMut};
 use std::io::{self, Read, Write};
@@ -123,9 +122,8 @@ where
                 continue;
             }
 
-            let buf = unsafe {
-                std::slice::from_raw_parts_mut(spare.as_mut_ptr() as *mut u8, to_read)
-            };
+            let buf =
+                unsafe { std::slice::from_raw_parts_mut(spare.as_mut_ptr() as *mut u8, to_read) };
 
             match self.stream.read(buf) {
                 Ok(0) => {
@@ -264,7 +262,6 @@ where
     }
 }
 
-
 pub fn new_session<'header, 'buf, 'stream, S>(
     stream: &'stream mut S,
     peer_addr: &'stream std::net::SocketAddr,
@@ -275,6 +272,8 @@ pub fn new_session<'header, 'buf, 'stream, S>(
 where
     S: Read + Write,
 {
+    use crate::network::http::h1_server_coro::reserve_buf;
+
     let mut req = httparse::Request::new(&mut []);
     let buf: &[u8] = unsafe { std::mem::transmute(req_buf.chunk()) };
     let status = match req.parse_with_uninit_headers(buf, headers) {
