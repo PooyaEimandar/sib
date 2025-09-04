@@ -24,7 +24,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
 
     /// Start the http service
     #[cfg(feature = "net-h1-server")]
-    fn start_h1_coro<L: ToSocketAddrs>(
+    fn start_h1<L: ToSocketAddrs>(
         self,
         addr: L,
         stack_size: usize,
@@ -37,10 +37,10 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         let listener = may::net::TcpListener::bind(addr)?;
         may::go!(
             may::coroutine::Builder::new()
-                .name("Sib_H1_Coro_Factory".to_owned())
+                .name("Sib_H1_Factory".to_owned())
                 .stack_size(stacksize),
             move || {
-                use crate::network::http::h1_server_coro::serve;
+                use crate::network::http::h1_server::serve;
 
                 #[cfg(unix)]
                 use std::os::fd::AsRawFd;
@@ -76,7 +76,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
     }
 
     #[cfg(all(feature = "net-h1-server", feature = "sys-boring-ssl"))]
-    fn start_h1_tls_coro<L: ToSocketAddrs>(
+    fn start_h1_tls<L: ToSocketAddrs>(
         self,
         addr: L,
         ssl: &super::util::SSL,
@@ -140,10 +140,10 @@ pub trait HFactory: Send + Sync + Sized + 'static {
 
         may::go!(
             may::coroutine::Builder::new()
-                .name("Sib_H1_TLS_Coro_Factory".to_owned())
+                .name("Sib_H1_TLS_Factory".to_owned())
                 .stack_size(stacksize),
             move || {
-                use crate::network::http::h1_server_coro::serve_tls;
+                use crate::network::http::h1_server::serve_tls;
 
                 #[cfg(unix)]
                 use std::os::fd::AsRawFd;
@@ -211,7 +211,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
     }
 
     #[cfg(feature = "net-h3-server")]
-    fn start_h3_tls_coro<L: ToSocketAddrs>(
+    fn start_h3_tls<L: ToSocketAddrs>(
         self,
         addr: L,
         (cert_pem_file_path, key_pem_file_path): (&str, &str),
@@ -240,7 +240,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                 std::io::Error::other(format!("Failed to get local address: {e:?}"))
             })?;
 
-            use crate::network::http::h3_server_coro::build_quiche_config;
+            use crate::network::http::h3_server::build_quiche_config;
             let cfg = build_quiche_config(
                 cert_pem_file_path,
                 key_pem_file_path,
@@ -255,7 +255,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                     .name("H3ServiceFactory".to_owned())
                     .stack_size(stacksize),
                 move || {
-                    use crate::network::http::h3_server_coro::quic_dispatcher;
+                    use crate::network::http::h3_server::quic_dispatcher;
                     quic_dispatcher(socket, cfg, local_addr, extend_connect, factory_cloned);
                 }
             );
@@ -396,12 +396,12 @@ mod tests {
 
     #[cfg(feature = "net-h1-server")]
     #[test]
-    fn test_h1_server_coro_gracefull_shutdown() {
+    fn test_h1_server_gracefull_shutdown() {
         const NUMBER_OF_WORKERS: usize = 1;
         crate::init(NUMBER_OF_WORKERS, 2 * 1024 * 1024);
 
         let addr = "127.0.0.1:8080";
-        let server_handle = EchoServer.start_h1_coro(addr, 0).expect("h1 start server");
+        let server_handle = EchoServer.start_h1(addr, 0).expect("h1 start server");
 
         let handler = may::go!(move || {
             may::coroutine::sleep(Duration::from_millis(100));
@@ -413,7 +413,7 @@ mod tests {
 
     #[cfg(all(feature = "sys-boring-ssl", feature = "net-h1-server"))]
     #[test]
-    fn test_h1_tls_server_coro_gracefull_shutdown() {
+    fn test_h1_tls_server_gracefull_shutdown() {
         const NUMBER_OF_WORKERS: usize = 1;
         crate::init(NUMBER_OF_WORKERS, 2 * 1024 * 1024);
 
@@ -428,7 +428,7 @@ mod tests {
         };
         let addr = "127.0.0.1:8080";
         let server_handle = EchoServer
-            .start_h1_tls_coro(addr, &ssl, 0, None)
+            .start_h1_tls(addr, &ssl, 0, None)
             .expect("h1 TLS start server");
 
         let handler = may::go!(move || {
@@ -441,13 +441,13 @@ mod tests {
 
     #[cfg(feature = "net-h1-server")]
     #[test]
-    fn test_h1_server_coro_get() {
+    fn test_h1_server_get() {
         const NUMBER_OF_WORKERS: usize = 1;
         crate::init(NUMBER_OF_WORKERS, 2 * 1024 * 1024);
 
         // Pick a port and start the server
         let addr = "127.0.0.1:8080";
-        let server_handle = EchoServer.start_h1_coro(addr, 0).expect("h1 start server");
+        let server_handle = EchoServer.start_h1(addr, 0).expect("h1 start server");
 
         let client_handler = may::go!(move || {
             may::coroutine::sleep(Duration::from_millis(100));
@@ -473,12 +473,12 @@ mod tests {
 
     #[cfg(feature = "net-h1-server")]
     #[test]
-    fn test_h1_server_coro_post() {
+    fn test_h1_server_post() {
         const NUMBER_OF_WORKERS: usize = 1;
         crate::init(NUMBER_OF_WORKERS, 2 * 1024 * 1024);
 
         let addr = "127.0.0.1:8080";
-        let server_handle = EchoServer.start_h1_coro(addr, 0).expect("h1 start server");
+        let server_handle = EchoServer.start_h1(addr, 0).expect("h1 start server");
 
         let client_handler = may::go!(move || {
             use std::io::{Read, Write};
@@ -524,7 +524,7 @@ mod tests {
         std::thread::spawn(|| {
             println!("Starting H3 server...");
             EchoServer
-                .start_h3_tls_coro(
+                .start_h3_tls(
                     "0.0.0.0:8080",
                     ("/tmp/cert.pem", "/tmp/key.pem"),
                     std::time::Duration::from_secs(10),

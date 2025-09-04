@@ -9,13 +9,13 @@ cfg_if::cfg_if! {
         #[cfg(feature = "net-h1-server")]
         pub mod h1_session;
         #[cfg(feature = "net-h1-server")]
-        pub mod h1_server_coro;
+        pub mod h1_server;
 
         // HTTP/3 coroutine
         #[cfg(feature = "net-h3-server")]
         pub mod h3_session;
         #[cfg(feature = "net-h3-server")]
-        pub mod h3_server_coro;
+        pub mod h3_server;
     }
 }
 

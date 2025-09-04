@@ -733,7 +733,7 @@ mod tests {
                 };
                 println!("Starting H1 server on {addr} with thread: {id:?}");
                 FileServer(FileService)
-                    .start_h1_tls_coro(addr, &ssl, STACK_SIZE, None)
+                    .start_h1_tls(addr, &ssl, STACK_SIZE, None)
                     .unwrap_or_else(|_| panic!("file server failed to start for thread {id:?}"))
                     .join()
                     .unwrap_or_else(|_| panic!("file server failed to joining thread {id:?}"));
@@ -745,7 +745,7 @@ mod tests {
             let id = std::thread::current().id();
             println!("Starting H3 server on {addr} with thread: {id:?}");
             FileServer(FileService)
-                .start_h3_tls_coro(
+                .start_h3_tls(
                     addr,
                     (cert_path, key_path),
                     std::time::Duration::from_secs(10),

@@ -272,7 +272,7 @@ pub fn new_session<'header, 'buf, 'stream, S>(
 where
     S: Read + Write,
 {
-    use crate::network::http::h1_server_coro::reserve_buf;
+    use crate::network::http::h1_server::reserve_buf;
 
     let mut req = httparse::Request::new(&mut []);
     let buf: &[u8] = unsafe { std::mem::transmute(req_buf.chunk()) };
