@@ -4,9 +4,7 @@ use sha2::Sha256;
 use std::io::{self};
 use std::net::SocketAddr;
 
-const MAX_DATAGRAM_SIZE: usize = 1350;
-const H3_CHUNK_SIZE: usize = 64 * 1024; // 64 KB
-const H3_MAX_BYTES_PER_TICK: usize = 512 * 1024; //cap per tick
+const MAX_DATAGRAM_SIZE: usize = 1200; // RFC-safe default
 const TOKEN_TTL_SECS: u64 = 120; // 2 minutes
 
 type ConnKey = [u8; quiche::MAX_CONN_ID_LEN];
@@ -23,7 +21,8 @@ struct RetryKey {
 
 #[derive(Debug)]
 struct Datagram {
-    buf: Vec<u8>,
+    buf: Box<[u8; 65535]>,
+    len: usize,
     from: SocketAddr,
     to: SocketAddr,
 }
@@ -67,12 +66,12 @@ pub(crate) fn build_quiche_config(
     config.set_max_idle_timeout(io_timeout.as_millis() as u64);
     config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
     config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
-    config.set_initial_max_data(2 * 1024 * 1024);
-    config.set_initial_max_stream_data_bidi_local(256 * 1024);
-    config.set_initial_max_stream_data_bidi_remote(256 * 1024);
-    config.set_initial_max_stream_data_uni(128 * 1024);
-    config.set_initial_max_streams_bidi(128);
-    config.set_initial_max_streams_uni(32);
+    config.set_initial_max_data(32 * 1024 * 1024);
+    config.set_initial_max_stream_data_uni(8 * 1024 * 1024);
+    config.set_initial_max_stream_data_bidi_local(16 * 1024 * 1024);
+    config.set_initial_max_stream_data_bidi_remote(16 * 1024 * 1024);
+    config.set_initial_max_streams_bidi(256);
+    config.set_initial_max_streams_uni(64);
     config.set_disable_active_migration(true);
     config.verify_peer(verify_peer);
     config.enable_early_data();
@@ -92,7 +91,7 @@ fn mint_token_secure(key: &RetryKey, odcid: &[u8], client_ip: &std::net::SocketA
         std::net::IpAddr::V4(v) => v.octets().to_vec(),
         std::net::IpAddr::V6(v) => v.octets().to_vec(),
     };
-    let mut payload = Vec::with_capacity(1 + 8 + 1 + ip.len() + odcid.len());
+    let mut payload = Vec::with_capacity(8 + 1 + ip.len() + odcid.len());
     payload.extend_from_slice(&ts.to_be_bytes());
     payload.push(ip.len() as u8);
     payload.extend_from_slice(&ip);
@@ -193,7 +192,7 @@ fn handle_writable(session: &mut super::h3_session::H3Session, stream_id: u64) {
     }
 
     // Stream body in bounded chunks while we have credit.
-    let mut budget = H3_MAX_BYTES_PER_TICK.min(resp.body.len().saturating_sub(resp.written));
+    let mut budget = resp.body.len().saturating_sub(resp.written);
 
     while resp.written < resp.body.len() && budget > 0 {
         let cap = quic_conn_stream_capacity(conn, stream_id);
@@ -201,7 +200,7 @@ fn handle_writable(session: &mut super::h3_session::H3Session, stream_id: u64) {
             return;
         }
 
-        let want = H3_CHUNK_SIZE.min(budget).min(cap);
+        let want = cap.min(budget);
         let chunk = resp.body.chunk_at(resp.written, want);
         if chunk.is_empty() {
             return;
@@ -330,14 +329,15 @@ fn handle_h3_request<S: HService>(
     // Send body in bounded chunks
     let total = session.rsp_body.len();
     let mut written = 0usize;
-    let mut budget = H3_MAX_BYTES_PER_TICK.min(total);
+    let mut budget = total;
 
     while written < total && budget > 0 {
         let cap = quic_conn_stream_capacity(&session.conn, stream_id);
         if cap == 0 {
             break;
         } // wait for writable()
-        let want = H3_CHUNK_SIZE.min(budget).min(cap);
+
+        let want = cap.min(budget);
         let chunk = session.rsp_body.chunk_at(written, want);
 
         match http3_conn.send_body(&mut session.conn, stream_id, chunk, false) {
@@ -429,6 +429,7 @@ pub(crate) fn quic_dispatcher<S: HService + Send + 'static>(
     let (ctrl_tx, ctrl_rx) = may::sync::mpsc::channel::<H3CtrlMsg>();
     let mut out = [0u8; MAX_DATAGRAM_SIZE];
 
+    let mut scratch = [0u8; 65535];
     loop {
         // drain control messages
         while let Ok(msg) = ctrl_rx.try_recv() {
@@ -446,7 +447,6 @@ pub(crate) fn quic_dispatcher<S: HService + Send + 'static>(
         by_addr.retain(|_, e| e.expires > now);
 
         // recv one datagram
-        let mut scratch = [0u8; 65535];
         let (n, from) = match socket.recv_from(&mut scratch) {
             Ok(v) => v,
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -471,28 +471,49 @@ pub(crate) fn quic_dispatcher<S: HService + Send + 'static>(
 
         // fast path: known DCID
         if let Some(tx) = by_cid.get(&dcid_key) {
-            let mut owned = Vec::with_capacity(n);
-            owned.extend_from_slice(&scratch[..n]);
-            let _ = tx.send(Datagram {
-                buf: owned,
-                from,
-                to: local_addr,
-            });
+            let _ = tx.send(make_datagram(from, local_addr, &scratch[..n]));
+
+            // pull a few more waiting packets without going around the loop again
+            for _ in 0..8 {
+                match socket.recv_from(&mut scratch) {
+                    Ok((n2, from2)) => {
+                        if let Ok(h2) =
+                            quiche::Header::from_slice(&mut scratch[..n2], quiche::MAX_CONN_ID_LEN)
+                        {
+                            let k2 = key_from_cid(&h2.dcid);
+                            if let Some(tx2) = by_cid.get(&k2) {
+                                let _ = tx2.send(make_datagram(from2, local_addr, &scratch[..n2]));
+                            } else if let Some(entry2) = by_addr.get_mut(&from2) {
+                                entry2.expires = Instant::now() + BY_ADDR_TTL;
+                                let _ = entry2.tx.send(make_datagram(
+                                    from2,
+                                    local_addr,
+                                    &scratch[..n2],
+                                ));
+                                by_cid.insert(k2, entry2.tx.clone());
+                            } else {
+                                // Not known yet; fall back to normal path next loop
+                                break;
+                            }
+                        } else {
+                            // Can't parse; skip
+                        }
+                    }
+                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(_) => break,
+                }
+            }
+
             continue;
         }
 
         // fallback by remote address; also "learn" the new DCID
         if let Some(entry) = by_addr.get_mut(&from) {
             entry.expires = Instant::now() + BY_ADDR_TTL;
-            let tx = &entry.tx;
-            let mut owned = Vec::with_capacity(n);
-            owned.extend_from_slice(&scratch[..n]);
-            let _ = tx.send(Datagram {
-                buf: owned,
-                from,
-                to: local_addr,
-            });
-            by_cid.insert(dcid_key, tx.clone());
+            let _ = entry
+                .tx
+                .send(make_datagram(from, local_addr, &scratch[..n]));
+            by_cid.insert(dcid_key, entry.tx.clone());
             continue;
         }
 
@@ -589,13 +610,7 @@ pub(crate) fn quic_dispatcher<S: HService + Send + 'static>(
             },
         );
         by_cid.insert(dcid_key, tx_cloned.clone());
-        let mut v = Vec::with_capacity(n);
-        v.extend_from_slice(&scratch[..n]);
-        let _ = tx_cloned.send(Datagram {
-            buf: v,
-            from,
-            to: local_addr,
-        });
+        let _ = tx_cloned.send(make_datagram(from, local_addr, &scratch[..n]));
     }
 }
 
@@ -640,42 +655,33 @@ fn handle_quic_connection<S: HService + 'static>(
     // Optimized pending handling
     let mut pending_to: Option<SocketAddr> = None;
     let mut pending_len: usize = 0;
-    let mut pending_buf = bytes::BytesMut::with_capacity(MAX_DATAGRAM_SIZE);
+    let mut pending_buf: Vec<u8> = Vec::with_capacity(MAX_DATAGRAM_SIZE);
 
     loop {
         let deadline = std::time::Instant::now() + session.conn.timeout().unwrap_or_default();
         let wait = deadline.saturating_duration_since(std::time::Instant::now());
 
         let mut got_packet = false;
-        let start = std::time::Instant::now();
-        while start.elapsed() < std::time::Duration::from_micros(300) {
-            match rx.try_recv() {
-                Ok(mut data) => {
-                    let recv_info = quiche::RecvInfo {
-                        to: data.to,
-                        from: data.from,
-                    };
-                    if session.conn.recv(&mut data.buf, recv_info).is_ok() {
+        let _ = may::select! {
+            pkt = rx.recv() => {
+                if let Ok(mut data) = pkt {
+                    let recv_info = quiche::RecvInfo { to: data.to, from: data.from };
+                    if session.conn.recv(&mut data.buf[..data.len], recv_info).is_ok() {
                         got_packet = true;
                     }
-                }
-                Err(_) => break,
-            }
-        }
-
-        if !got_packet {
-            let _ = may::select! {
-                pkt = rx.recv() => {
-                    if let Ok(mut data) = pkt {
-                        let recv_info = quiche::RecvInfo { to: data.to, from: data.from };
-                        if session.conn.recv(&mut data.buf, recv_info).is_ok() {
-                            got_packet = true;
+                    // drain whatever else is queued right now
+                    for _ in 0..32 {
+                        if let Ok(mut more) = rx.try_recv() {
+                            let recv_info = quiche::RecvInfo { to: more.to, from: more.from };
+                            let _ = session.conn.recv(&mut more.buf[..more.len], recv_info);
+                        } else {
+                            break;
                         }
                     }
-                },
-                _ = may::coroutine::sleep(wait) => { session.conn.on_timeout(); }
-            };
-        }
+                }
+            },
+            _ = may::coroutine::sleep(wait) => { session.conn.on_timeout(); }
+        };
 
         if (session.conn.is_in_early_data() || session.conn.is_established())
             && session.http3_conn.is_none()
@@ -775,28 +781,36 @@ fn handle_quic_connection<S: HService + 'static>(
                 continue;
             }
 
-            match session.conn.send(&mut out) {
-                Ok((n, send_info)) => match socket.send_to(&out[..n], send_info.to) {
-                    Ok(_) => {}
-                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        pending_buf.clear();
-                        pending_buf.extend_from_slice(&out[..n]);
-                        pending_len = n;
-                        pending_to = Some(send_info.to);
-                        break;
-                    }
+            let mut sent_any = false;
+            for _ in 0..32 {
+                match session.conn.send(&mut out) {
+                    Ok((n, send_info)) => match socket.send_to(&out[..n], send_info.to) {
+                        Ok(_) => {
+                            sent_any = true;
+                        }
+                        Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                            pending_buf.clear();
+                            pending_buf.extend_from_slice(&out[..n]);
+                            pending_len = n;
+                            pending_to = Some(send_info.to);
+                            break;
+                        }
+                        Err(e) => {
+                            eprintln!("send failed: {e:?}");
+                            session.conn.close(false, 0x1, b"send-fail").ok();
+                            break;
+                        }
+                    },
+                    Err(quiche::Error::Done) => break,
                     Err(e) => {
-                        eprintln!("send failed: {e:?}");
-                        session.conn.close(false, 0x1, b"send-fail").ok();
+                        eprintln!("{} send error: {e:?}", session.conn.trace_id());
+                        session.conn.close(false, 0x1, b"fail").ok();
                         break;
                     }
-                },
-                Err(quiche::Error::Done) => break,
-                Err(e) => {
-                    eprintln!("{} send error: {e:?}", session.conn.trace_id());
-                    session.conn.close(false, 0x1, b"fail").ok();
-                    break;
                 }
+            }
+            if !sent_any {
+                break;
             }
         }
 
@@ -813,6 +827,14 @@ fn handle_quic_connection<S: HService + 'static>(
             may::coroutine::yield_now();
         }
     }
+}
+
+#[inline]
+fn make_datagram(from: SocketAddr, to: SocketAddr, data: &[u8]) -> Datagram {
+    let mut buf = Box::new([0u8; 65535]);
+    let len = data.len();
+    buf[..len].copy_from_slice(data);
+    Datagram { buf, len, from, to }
 }
 
 #[inline]

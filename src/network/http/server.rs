@@ -536,7 +536,7 @@ mod tests {
         });
 
         // Wait for the server to be ready
-        std::thread::sleep(std::time::Duration::from_millis(1000));
+        std::thread::sleep(std::time::Duration::from_millis(100000));
 
         let client = reqwest::Client::builder()
             .http3_prior_knowledge()
