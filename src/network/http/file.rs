@@ -514,7 +514,6 @@ fn parse_byte_range(header: &str, total_size: u64) -> Option<Range<u64>> {
         _ => None,
     }
 }
-
 fn choose_encoding(accept: &str, mime: &Mime, order: &[EncodingType]) -> EncodingType {
     let is_media = matches!(mime.type_(), mime::IMAGE | mime::AUDIO | mime::VIDEO);
     let is_svg = mime.type_() == mime::IMAGE
@@ -523,13 +522,13 @@ fn choose_encoding(accept: &str, mime: &Mime, order: &[EncodingType]) -> Encodin
         return EncodingType::None;
     }
 
-    // Parse "token[;q=val]" items into a map: token -> q (default 1.0)
-    // Also handle "*" (wildcard) and "identity" (no encoding)
     #[derive(Copy, Clone)]
     struct Pref {
         q: f32,
     }
-    let mut prefs: std::collections::HashMap<&str, Pref> = std::collections::HashMap::new();
+
+    let has_header = !accept.trim().is_empty();
+    let mut prefs: std::collections::HashMap<String, Pref> = std::collections::HashMap::new();
     let mut star_q: Option<f32> = None;
     let mut identity_q: Option<f32> = None;
 
@@ -539,18 +538,18 @@ fn choose_encoding(accept: &str, mime: &Mime, order: &[EncodingType]) -> Encodin
             continue;
         }
         let mut parts = item.split(';');
-        let token = parts.next().unwrap().trim();
+        let token_raw = parts.next().unwrap().trim();
+        let token = token_raw.to_ascii_lowercase();
         let mut q: f32 = 1.0;
         for p in parts {
             let p = p.trim();
             if let Some(v) = p.strip_prefix("q=").or_else(|| p.strip_prefix("Q=")) {
-                // RFC accepts up to 3 decimals. Be forgiving.
                 if let Ok(val) = v.trim().parse::<f32>() {
                     q = val;
                 }
             }
         }
-        match token {
+        match token.as_str() {
             "*" => star_q = Some(q),
             "identity" => identity_q = Some(q),
             _ => {
@@ -559,31 +558,42 @@ fn choose_encoding(accept: &str, mime: &Mime, order: &[EncodingType]) -> Encodin
         }
     }
 
-    // Helper: is encoding allowed (q>0)?
+    // is encoding allowed (q>0)?
     let allowed = |name: &str| -> bool {
-        if let Some(pref) = prefs.get(name) {
+        let lname = name.to_ascii_lowercase();
+        if lname == "identity" {
+            return identity_q.unwrap_or(1.0) > 0.0;
+        }
+        if let Some(pref) = prefs.get(&lname) {
             return pref.q > 0.0;
         }
         if let Some(q) = star_q {
             return q > 0.0;
-        } // wildcard covers it
-        true // not mentioned => q=1.0
+        }
+        // If the header is present and the encoding wasn't mentioned and no wildcard,
+        // it's NOT acceptable. Only when no header at all => everything is acceptable.
+        if has_header {
+            return false;
+        }
+        true
     };
 
-    // If client explicitly disallows identity and no encoding matches,
-    // we’ll only pick an encoding when it’s explicitly or implicitly allowed (q>0).
     for enc in order {
         let name = enc.as_str();
         if !name.is_empty() && allowed(name) {
             return enc.clone();
         }
+        if name.is_empty() && allowed("identity") {
+            // If `order` includes `None`, only pick it if identity is allowed.
+            return EncodingType::None;
+        }
     }
 
-    // Fallback to identity if not explicitly disallowed
-    if identity_q.unwrap_or(1.0) > 0.0 {
+    // Fallback to identity if allowed
+    if allowed("identity") {
         EncodingType::None
     } else {
-        // Identity disallowed and nothing else available, Not acceptable (406) is ideal.
+        // If you have this variant; otherwise return None and let caller send 406.
         EncodingType::NotAcceptable
     }
 }
