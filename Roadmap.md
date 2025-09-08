@@ -5,7 +5,7 @@
 - [x] Ratelimit
 - [x] gstreamer
 - [x] Static file server
-- [] io_uring
+- [x] io_uring
 - [] Webtransport server
 - [] Websocket server
 - [] Log with clickhouse

@@ -40,29 +40,6 @@ it is designed for **real-time networking**, **low-latency streaming**, and **sc
 | 4096        | 5,890,631     | 5.11 ms       | 719.07 MB/s  |
 | 16384       | 5,038,547     | 19.11 ms      | 615.06 MB/s  |
 
-### 🔬 [HTTP/3 Stress Test Benchmark](https://github.com/PooyaEimandar/sib/tree/main//bench/h3_test.py) - **Not ready** for production
-
-**Environment:**
-
-- 🧠 12-core CPU
-- 🧮 96 GB RAM
-- 💻 Apple Macbook Pro M2 Max 2023
-- Sib HTTP/3 uses:
-  - [`may`](https://github.com/Xudong-Huang/may) for coroutine scheduling.
-  - [`quiche`](https://github.com/cloudflare/quiche) for QUIC + HTTP/3 transport.
-  - [`bytes`](https://github.com/tokio-rs/bytes) for zero-copy buffer management.
-  - [`mimalloc`](https://github.com/microsoft/mimalloc) compact high-performance allocator.
-
-**Test setup:**
-
-- Download [binary of curl built with HTTP/3](https://github.com/stunnel/static-curl) and place it inside bench folder
-- Run the Python script from the bench folder `python3 ./h3_test.py --url https://localhost:8080 --curl-path ./curl --requests 10000 --concurrency 10000 --http3 --insecure`
-- 10K requests launched all at once, each over its own QUIC/TLS handshake. This is a hammer test and purpose is validate the stability and tail latency under handshake pressure.
-
-| Total Requests | Concurrency | Success Rate | Avg Latency |
-| -------------- | ----------- | ------------ | ----------- |
-| 10,000         | 10,000      | **99.97%**   | **1.00 s**  |
-
 # ⚙️ Build note
 
 When building with the `sys-boring-ssl` feature enabled, you’ll need to set up the LLVM toolchain and related libraries first.
