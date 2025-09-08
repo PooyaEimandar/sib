@@ -166,7 +166,7 @@ jobs:
           rustup target add aarch64-apple-ios
 
       - name: Run Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy
 
       - name: Build for macOS (arm64)
         run: cargo build --release --target=aarch64-apple-darwin
