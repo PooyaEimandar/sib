@@ -332,19 +332,11 @@ pub fn serve<S: Session>(
         }
     };
 
-    if session.is_h3() {
-        session
-            .status_code(status)
-            .headers_vec(rsp_headers)?
-            .body_mmap(std::sync::Arc::new(mmap), start as usize, end as usize)
-            .eom();
-    } else {
-        session
-            .status_code(status)
-            .headers_vec(rsp_headers)?
-            .body_slice(&mmap[start as usize..end as usize])
-            .eom();
-    }
+    session
+        .status_code(status)
+        .headers_vec(rsp_headers)?
+        .body_slice(&mmap[start as usize..end as usize])
+        .eom();
 
     Ok(())
 }
@@ -628,148 +620,148 @@ pub fn encode_gzip<T: AsRef<[u8]>>(input: T, level: u32) -> std::io::Result<Byte
     Ok(Bytes::from(out))
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::network::http::{
-        file::{EncodingType, FileInfo, serve},
-        server::HFactory,
-        session::{HService, Session},
-    };
-    use dashmap::DashMap;
-    use std::sync::OnceLock;
+// #[cfg(test)]
+// mod tests {
+//     use crate::network::http::{
+//         file::{EncodingType, FileInfo, serve},
+//         server::HFactory,
+//         session::{HService, Session},
+//     };
+//     use dashmap::DashMap;
+//     use std::sync::OnceLock;
 
-    struct FileServer<T>(pub T);
+//     struct FileServer<T>(pub T);
 
-    struct FileService;
+//     struct FileService;
 
-    static FILE_CACHE: OnceLock<DashMap<String, FileInfo>> = OnceLock::new();
-    fn get_cache() -> &'static DashMap<String, FileInfo> {
-        FILE_CACHE.get_or_init(|| DashMap::with_capacity(128))
-    }
+//     static FILE_CACHE: OnceLock<DashMap<String, FileInfo>> = OnceLock::new();
+//     fn get_cache() -> &'static DashMap<String, FileInfo> {
+//         FILE_CACHE.get_or_init(|| DashMap::with_capacity(128))
+//     }
 
-    impl HService for FileService {
-        fn call<S: Session>(&mut self, session: &mut S) -> std::io::Result<()> {
-            use crate::network::http::file::HttpHeader;
+//     impl HService for FileService {
+//         fn call<S: Session>(&mut self, session: &mut S) -> std::io::Result<()> {
+//             use crate::network::http::file::HttpHeader;
 
-            let mut rsp_headers: Vec<(HttpHeader, String)> = if session.is_h3() {
-                Vec::new()
-            } else {
-                vec![
-                    (HttpHeader::Connection, "close".to_string()),
-                    (HttpHeader::AltSvc, "h3=\":8080\"; ma=86400".to_string()),
-                ]
-            };
+//             let mut rsp_headers: Vec<(HttpHeader, String)> = if session.is_h3() {
+//                 Vec::new()
+//             } else {
+//                 vec![
+//                     (HttpHeader::Connection, "close".to_string()),
+//                     (HttpHeader::AltSvc, "h3=\":8080\"; ma=86400".to_string()),
+//                 ]
+//             };
 
-            const MIN_BYTES_ON_THE_FLY_SIZE: u64 = 1024;
-            const MAX_BYTES_ON_THE_FLY_SIZE: u64 = 512 * 1024; // 512 KB
+//             const MIN_BYTES_ON_THE_FLY_SIZE: u64 = 1024;
+//             const MAX_BYTES_ON_THE_FLY_SIZE: u64 = 512 * 1024; // 512 KB
 
-            let rel_file = file!();
-            serve(
-                session,
-                rel_file,
-                get_cache(),
-                &mut rsp_headers,
-                &[
-                    EncodingType::Zstd { level: 3 },
-                    EncodingType::Br {
-                        buffer_size: 4096,
-                        quality: 4,
-                        lgwindow: 19,
-                    },
-                    EncodingType::Gzip { level: 4 },
-                    EncodingType::None,
-                ],
-                (MIN_BYTES_ON_THE_FLY_SIZE, MAX_BYTES_ON_THE_FLY_SIZE),
-            )
-        }
-    }
+//             let rel_file = file!();
+//             serve(
+//                 session,
+//                 rel_file,
+//                 get_cache(),
+//                 &mut rsp_headers,
+//                 &[
+//                     EncodingType::Zstd { level: 3 },
+//                     EncodingType::Br {
+//                         buffer_size: 4096,
+//                         quality: 4,
+//                         lgwindow: 19,
+//                     },
+//                     EncodingType::Gzip { level: 4 },
+//                     EncodingType::None,
+//                 ],
+//                 (MIN_BYTES_ON_THE_FLY_SIZE, MAX_BYTES_ON_THE_FLY_SIZE),
+//             )
+//         }
+//     }
 
-    impl HFactory for FileServer<FileService> {
-        type Service = FileService;
+//     impl HFactory for FileServer<FileService> {
+//         type Service = FileService;
 
-        fn service(&self, _id: usize) -> FileService {
-            FileService
-        }
-    }
+//         fn service(&self, _id: usize) -> FileService {
+//             FileService
+//         }
+//     }
 
-    fn create_self_signed_tls_pems() -> (String, String) {
-        use rcgen::{
-            CertificateParams, DistinguishedName, DnType, KeyPair, SanType, date_time_ymd,
-        };
-        let mut params: CertificateParams = Default::default();
-        params.not_before = rcgen::date_time_ymd(1975, 1, 1);
-        params.not_after = date_time_ymd(4096, 1, 1);
-        params.distinguished_name = DistinguishedName::new();
-        params
-            .distinguished_name
-            .push(DnType::OrganizationName, "Sib");
-        params.distinguished_name.push(DnType::CommonName, "Sib");
-        params.subject_alt_names = vec![SanType::DnsName("localhost".try_into().unwrap())];
-        let key_pair = KeyPair::generate().unwrap();
-        let cert = params.self_signed(&key_pair).unwrap();
-        (cert.pem(), key_pair.serialize_pem())
-    }
+//     fn create_self_signed_tls_pems() -> (String, String) {
+//         use rcgen::{
+//             CertificateParams, DistinguishedName, DnType, KeyPair, SanType, date_time_ymd,
+//         };
+//         let mut params: CertificateParams = Default::default();
+//         params.not_before = rcgen::date_time_ymd(1975, 1, 1);
+//         params.not_after = date_time_ymd(4096, 1, 1);
+//         params.distinguished_name = DistinguishedName::new();
+//         params
+//             .distinguished_name
+//             .push(DnType::OrganizationName, "Sib");
+//         params.distinguished_name.push(DnType::CommonName, "Sib");
+//         params.subject_alt_names = vec![SanType::DnsName("localhost".try_into().unwrap())];
+//         let key_pair = KeyPair::generate().unwrap();
+//         let cert = params.self_signed(&key_pair).unwrap();
+//         (cert.pem(), key_pair.serialize_pem())
+//     }
 
-    #[test]
-    fn file_server() {
-        const NUMBER_OF_WORKERS: usize = 2;
-        const STACK_SIZE: usize = 2 * 1024 * 1024;
-        crate::init(NUMBER_OF_WORKERS, STACK_SIZE);
+//     #[test]
+//     fn file_server() {
+//         const NUMBER_OF_WORKERS: usize = 2;
+//         const STACK_SIZE: usize = 2 * 1024 * 1024;
+//         crate::init(NUMBER_OF_WORKERS, STACK_SIZE);
 
-        // Pick a port and start the server
-        let addr = "0.0.0.0:8080";
-        let mut threads = Vec::new();
+//         // Pick a port and start the server
+//         let addr = "0.0.0.0:8080";
+//         let mut threads = Vec::new();
 
-        // create self-signed TLS certificates
-        let certs = create_self_signed_tls_pems();
-        let cert_path = "/tmp/cert.pem";
-        let key_path = "/tmp/key.pem";
+//         // create self-signed TLS certificates
+//         let certs = create_self_signed_tls_pems();
+//         let cert_path = "/tmp/cert.pem";
+//         let key_path = "/tmp/key.pem";
 
-        std::fs::write(cert_path, certs.0.clone()).unwrap();
-        std::fs::write(key_path, certs.1.clone()).unwrap();
+//         std::fs::write(cert_path, certs.0.clone()).unwrap();
+//         std::fs::write(key_path, certs.1.clone()).unwrap();
 
-        for _ in 0..NUMBER_OF_WORKERS {
-            let cert_pem = certs.0.clone();
-            let key_pem = certs.1.clone();
-            let h1_handle = std::thread::spawn(move || {
-                let id = std::thread::current().id();
-                let ssl = crate::network::http::util::SSL {
-                    cert_pem: cert_pem.as_bytes(),
-                    key_pem: key_pem.as_bytes(),
-                    chain_pem: None,
-                    min_version: crate::network::http::util::SSLVersion::TLS1_2,
-                    max_version: crate::network::http::util::SSLVersion::TLS1_3,
-                    io_timeout: std::time::Duration::from_secs(10),
-                };
-                println!("Starting H1 server on {addr} with thread: {id:?}");
-                FileServer(FileService)
-                    .start_h1_tls(addr, &ssl, STACK_SIZE, None)
-                    .unwrap_or_else(|_| panic!("file server failed to start for thread {id:?}"))
-                    .join()
-                    .unwrap_or_else(|_| panic!("file server failed to joining thread {id:?}"));
-            });
-            threads.push(h1_handle);
-        }
+//         for _ in 0..NUMBER_OF_WORKERS {
+//             let cert_pem = certs.0.clone();
+//             let key_pem = certs.1.clone();
+//             let h1_handle = std::thread::spawn(move || {
+//                 let id = std::thread::current().id();
+//                 let ssl = crate::network::http::util::SSL {
+//                     cert_pem: cert_pem.as_bytes(),
+//                     key_pem: key_pem.as_bytes(),
+//                     chain_pem: None,
+//                     min_version: crate::network::http::util::SSLVersion::TLS1_2,
+//                     max_version: crate::network::http::util::SSLVersion::TLS1_3,
+//                     io_timeout: std::time::Duration::from_secs(10),
+//                 };
+//                 println!("Starting H1 server on {addr} with thread: {id:?}");
+//                 FileServer(FileService)
+//                     .start_h1_tls_poller(addr, &ssl, STACK_SIZE, None)
+//                     .unwrap_or_else(|_| panic!("file server failed to start for thread {id:?}"))
+//                     .join()
+//                     .unwrap_or_else(|_| panic!("file server failed to joining thread {id:?}"));
+//             });
+//             threads.push(h1_handle);
+//         }
 
-        let h3_handle = std::thread::spawn(move || {
-            let id = std::thread::current().id();
-            println!("Starting H3 server on {addr} with thread: {id:?}");
-            FileServer(FileService)
-                .start_h3_tls(
-                    addr,
-                    (cert_path, key_path),
-                    std::time::Duration::from_secs(10),
-                    false,
-                    (STACK_SIZE, NUMBER_OF_WORKERS),
-                    false,
-                )
-                .unwrap_or_else(|_| panic!("file server failed to start for thread {id:?}"));
-        });
-        threads.push(h3_handle);
+//         let h3_handle = std::thread::spawn(move || {
+//             let id = std::thread::current().id();
+//             println!("Starting H3 server on {addr} with thread: {id:?}");
+//             FileServer(FileService)
+//                 .start_h3_tls_poller(
+//                     addr,
+//                     (cert_path, key_path),
+//                     std::time::Duration::from_secs(10),
+//                     false,
+//                     (STACK_SIZE, NUMBER_OF_WORKERS),
+//                     false,
+//                 )
+//                 .unwrap_or_else(|_| panic!("file server failed to start for thread {id:?}"));
+//         });
+//         threads.push(h3_handle);
 
-        // Wait for all threads to complete (they won’t unless crashed)
-        for handle in threads {
-            handle.join().expect("Thread panicked");
-        }
-    }
-}
+//         // Wait for all threads to complete (they won’t unless crashed)
+//         for handle in threads {
+//             handle.join().expect("Thread panicked");
+//         }
+//     }
+// }

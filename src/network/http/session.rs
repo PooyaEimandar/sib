@@ -1,34 +1,42 @@
-use crate::network::http::util::HttpHeader;
+use http::{HeaderName, HeaderValue};
 
+#[async_trait::async_trait(?Send)]
 pub trait Session {
     fn peer_addr(&self) -> &std::net::SocketAddr;
-    fn is_h3(&self) -> bool;
-    fn req_method(&self) -> Option<&str>;
-    fn req_path(&self) -> Option<&str>;
-    fn req_http_version(&self) -> Option<u8>;
-    fn req_headers(&self) -> &[httparse::Header<'_>];
-    fn req_headers_vec(&self) -> Vec<httparse::Header<'_>>;
-    fn req_header(&self, header: &HttpHeader) -> std::io::Result<&str>;
-    fn req_header_str(&self, header: &str) -> std::io::Result<&str>;
-    fn req_body(&mut self, timeout: std::time::Duration) -> std::io::Result<&[u8]>;
+    fn req_method(&self) -> http::Method;
+    fn req_method_str(&self) -> Option<&str>;
+    fn req_path(&self) -> String;
+    fn req_http_version(&self) -> http::Version;
+    fn req_headers(&self) -> http::HeaderMap;
+    fn req_header(&self, header: &http::HeaderName) -> Option<http::HeaderValue>;
 
-    fn status_code(&mut self, status: super::util::Status) -> &mut Self;
+    #[cfg(feature = "net-h1-server")]
+    fn req_body_h1(&mut self, timeout: std::time::Duration) -> std::io::Result<&[u8]>;
 
+    #[cfg(all(feature = "net-h2-server", target_os = "linux"))]
+    async fn req_body_h2(
+        &mut self,
+        timeout: std::time::Duration,
+    ) -> Option<std::io::Result<bytes::Bytes>>;
+
+    fn status_code(&mut self, status: http::StatusCode) -> &mut Self;
+
+    #[cfg(all(feature = "net-h2-server", target_os = "linux"))]
+    fn start_h2_streaming(&mut self) -> std::io::Result<super::h2_session::H2Stream>;
+
+    fn header(&mut self, name: HeaderName, value: HeaderValue) -> std::io::Result<&mut Self>;
     fn header_str(&mut self, name: &str, value: &str) -> std::io::Result<&mut Self>;
+    fn headers(&mut self, headers: &http::HeaderMap) -> std::io::Result<&mut Self>;
     fn headers_str(&mut self, header_val: &[(&str, &str)]) -> std::io::Result<&mut Self>;
-    fn header(&mut self, name: &HttpHeader, value: &str) -> std::io::Result<&mut Self>;
-    fn headers(&mut self, header_val: &[(HttpHeader, &str)]) -> std::io::Result<&mut Self>;
-    fn headers_vec(&mut self, header_val: &[(HttpHeader, String)]) -> std::io::Result<&mut Self>;
-
-    fn body(&mut self, data: &bytes::Bytes) -> &mut Self;
-    fn body_slice(&mut self, body: &[u8]) -> &mut Self;
-    fn body_static(&mut self, body: &'static str) -> &mut Self;
-    #[cfg(feature = "net-file-server")]
-    fn body_mmap(&mut self, map: std::sync::Arc<memmap2::Mmap>, lo: usize, hi: usize) -> &mut Self;
-    
-    fn eom(&mut self);
+    fn body(&mut self, body: bytes::Bytes) -> &mut Self;
+    fn eom(&mut self) -> std::io::Result<()>;
 }
 
 pub trait HService {
     fn call<SE: Session>(&mut self, session: &mut SE) -> std::io::Result<()>;
+}
+
+#[async_trait::async_trait(?Send)]
+pub trait HAsyncService {
+    async fn call<SE: Session>(&mut self, session: &mut SE) -> std::io::Result<()>;
 }

@@ -1,4 +1,4 @@
-use crate::network::http::session::HService;
+use crate::network::http::{h1_session::BUF_LEN, session::HService};
 use bytes::{BufMut, BytesMut};
 use may::net::TcpStream;
 
@@ -10,18 +10,6 @@ use std::{
 
 #[cfg(unix)]
 use may::io::WaitIo;
-
-const MIN_BUF_LEN: usize = 1024;
-const MAX_BODY_LEN: usize = 4096;
-pub const BUF_LEN: usize = MAX_BODY_LEN * 8;
-
-#[inline]
-pub(crate) fn reserve_buf(buf: &mut BytesMut) {
-    let rem = buf.capacity() - buf.len();
-    if rem < MIN_BUF_LEN {
-        buf.reserve(BUF_LEN - rem);
-    }
-}
 
 #[cfg(unix)]
 pub(crate) fn serve<T: HService>(
@@ -39,7 +27,7 @@ pub(crate) fn serve<T: HService>(
     }
 }
 
-#[cfg(all(unix, feature = "sys-boring-ssl"))]
+#[cfg(unix)]
 pub(crate) fn serve_tls<T: HService>(
     stream: &mut boring::ssl::SslStream<TcpStream>,
     peer_addr: SocketAddr,
@@ -110,7 +98,12 @@ pub(crate) fn serve<T: HService>(stream: &mut TcpStream, mut service: T) -> io::
 #[cfg(unix)]
 #[inline]
 fn read(stream: &mut impl std::io::Read, buf: &mut BytesMut) -> std::io::Result<bool> {
-    reserve_buf(buf);
+    // reserve buffer
+    let rem = buf.capacity() - buf.len();
+    if rem < 1024 {
+        buf.reserve(BUF_LEN - rem);
+    }
+
     let chunk = buf.chunk_mut();
     let len = chunk.len();
 

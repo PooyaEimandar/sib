@@ -1,0 +1,248 @@
+use crate::network::http::session::Session;
+use bytes::Bytes;
+use h2::{RecvStream, SendStream, server::SendResponse};
+use http::{HeaderMap, HeaderName, HeaderValue, StatusCode, Version};
+use std::{net::SocketAddr, str::FromStr, time::Duration};
+
+pub struct H2Session {
+    peer: SocketAddr,
+    req: http::Request<RecvStream>,
+    res: SendResponse<Bytes>,
+    res_status: StatusCode,
+    resp_headers: HeaderMap,
+    resp_body: Bytes,
+}
+
+pub struct H2Stream {
+    stream: SendStream<Bytes>,
+}
+
+impl H2Stream {
+    pub fn stream_id(&self) -> u32 {
+        self.stream.stream_id().as_u32()
+    }
+
+    /// Send a chunk of data. If `end_stream` is true, this also ends the stream.
+    pub fn send_data(&mut self, data: Bytes, end_stream: bool) -> std::io::Result<()> {
+        self.stream
+            .send_data(data, end_stream)
+            .map_err(|e| std::io::Error::other(format!("failed to send data frame: {e}")))
+    }
+
+    /// Send a RST_STREAM with the given reason code.
+    pub fn send_reset(&mut self, reason: u32) {
+        self.stream.send_reset(reason.into());
+    }
+}
+
+impl H2Session {
+    pub fn new(peer: SocketAddr, req: http::Request<RecvStream>, res: SendResponse<Bytes>) -> Self {
+        Self {
+            peer,
+            req,
+            res,
+            res_status: StatusCode::OK,
+            resp_headers: HeaderMap::new(),
+            resp_body: Bytes::new(),
+        }
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl Session for H2Session {
+    #[inline]
+    fn peer_addr(&self) -> &SocketAddr {
+        &self.peer
+    }
+
+    #[inline]
+    fn req_method(&self) -> http::Method {
+        self.req.method().clone()
+    }
+
+    #[inline]
+    fn req_method_str(&self) -> Option<&str> {
+        Some(self.req.method().as_str())
+    }
+
+    #[inline]
+    fn req_path(&self) -> String {
+        self.req.uri().path().into()
+    }
+
+    #[inline]
+    fn req_http_version(&self) -> Version {
+        self.req.version()
+    }
+
+    #[inline]
+    fn req_headers(&self) -> http::HeaderMap {
+        self.req.headers().clone()
+    }
+
+    #[inline]
+    fn req_header(&self, header: &HeaderName) -> Option<http::HeaderValue> {
+        self.req.headers().get(header).cloned()
+    }
+
+    #[cfg(feature = "net-h1-server")]
+    #[inline]
+    fn req_body_h1(&mut self, _timeout: std::time::Duration) -> std::io::Result<&[u8]> {
+        Err(std::io::Error::other(
+            "req_body_h1 not supported in H2Session",
+        ))
+    }
+
+    /// Start an HTTP/2 streaming response: send headers now, return a `H2Stream`
+    /// so the caller later can push data frames and decide when to end the stream.
+    #[inline]
+    fn start_h2_streaming(&mut self) -> std::io::Result<H2Stream> {
+        let mut builder = http::Response::builder().status(self.res_status);
+
+        {
+            // Move headers in (no clones)
+            // no Content-Length or Transfer-Encoding for streaming
+            let h = builder.headers_mut().ok_or_else(|| {
+                std::io::Error::other("failed to get mutable headers from response builder")
+            })?;
+            h.extend(self.resp_headers.drain());
+        }
+
+        let resp = builder
+            .body(())
+            .map_err(|e| std::io::Error::other(format!("failed to build body response: {e}")))?;
+
+        // more frames will be sent later
+        let send = self
+            .res
+            .send_response(resp, false)
+            .map_err(|e| std::io::Error::other(format!("failed to send frame headers: {e}")))?;
+
+        // reset for reuse
+        self.res_status = StatusCode::OK;
+        self.resp_body = Bytes::new();
+
+        Ok(H2Stream { stream: send })
+    }
+
+    #[inline]
+    fn status_code(&mut self, status: StatusCode) -> &mut Self {
+        self.res_status = status;
+        self
+    }
+
+    #[inline]
+    fn header(&mut self, name: HeaderName, value: HeaderValue) -> std::io::Result<&mut Self> {
+        self.resp_headers.append(name, value);
+        Ok(self)
+    }
+
+    #[inline]
+    fn header_str(&mut self, name: &str, value: &str) -> std::io::Result<&mut Self> {
+        use http::HeaderValue;
+        let header_name = HeaderName::from_str(name).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid header name {}: {}", name, e),
+            )
+        })?;
+        let header_value = HeaderValue::from_str(value).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid header value {}: {}", value, e),
+            )
+        })?;
+        self.resp_headers.append(header_name, header_value);
+        Ok(self)
+    }
+
+    #[inline]
+    fn headers(&mut self, headers: &HeaderMap) -> std::io::Result<&mut Self> {
+        for (k, v) in headers {
+            self.resp_headers.append(k, v.clone());
+        }
+        Ok(self)
+    }
+
+    #[inline]
+    fn headers_str(&mut self, header_val: &[(&str, &str)]) -> std::io::Result<&mut Self> {
+        for (name, value) in header_val {
+            self.header_str(name, value)?;
+        }
+        Ok(self)
+    }
+
+    #[inline]
+    fn body(&mut self, body: Bytes) -> &mut Self {
+        self.resp_body = body;
+        self
+    }
+
+    #[inline]
+    async fn req_body_h2(&mut self, timeout: Duration) -> Option<std::io::Result<Bytes>> {
+        use futures_lite::future::race;
+        use glommio::timer::Timer;
+
+        let data_fut = async {
+            match self.req.body_mut().data().await {
+                Some(Ok(bytes)) => Some(Ok(bytes)),
+                Some(Err(e)) => Some(Err(std::io::Error::other(e.to_string()))),
+                None => None, // peer ended stream, no more data
+            }
+        };
+
+        let timeout_fut = async {
+            Timer::new(timeout).await;
+            Some(Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "req_body_h2 timed out",
+            )))
+        };
+
+        race(data_fut, timeout_fut).await
+    }
+
+    // end of message: send the response (headers + body)
+    #[inline]
+    fn eom(&mut self) -> std::io::Result<()> {
+        let mut builder = http::Response::builder().status(self.res_status);
+        {
+            // Move staged headers in
+            let header_map = builder.headers_mut().expect("headers_mut");
+            header_map.extend(self.resp_headers.drain());
+
+            // Add Content-Length when sending a single buffered body
+            if !header_map.contains_key(http::header::CONTENT_LENGTH) {
+                use http::HeaderValue;
+                let len = self.resp_body.len();
+                header_map.insert(
+                    http::header::CONTENT_LENGTH,
+                    HeaderValue::from_str(&len.to_string()).map_err(|e| {
+                        std::io::Error::other(format!("invalid content-length {}: {}", len, e))
+                    })?,
+                );
+            }
+        }
+
+        // Body is sent as DATA frames by h2 from this Bytes
+        let resp = builder
+            .body(())
+            .map_err(|e| std::io::Error::other(format!("build resp: {e}")))?;
+
+        // Send headers
+        let mut send = self
+            .res
+            .send_response(resp, false)
+            .map_err(|e| std::io::Error::other(format!("send headers: {e}")))?;
+
+        // Send body and END_STREAM
+        send.send_data(std::mem::take(&mut self.resp_body), true)
+            .map_err(|e| std::io::Error::other(format!("send body: {e}")))?;
+
+        // reset for reuse
+        self.res_status = StatusCode::OK;
+        self.resp_body = Bytes::new();
+
+        Ok(())
+    }
+}

@@ -1,9 +1,32 @@
-use crate::network::http::{session::Session, util::HttpHeader};
+use crate::network::http::session::Session;
+use arc_swap::ArcSwap;
 use bytes::{Buf, BufMut, BytesMut};
+use http::{HeaderName, HeaderValue};
 use std::io::{self, Read, Write};
 use std::mem::MaybeUninit;
+use std::str::FromStr;
+use std::sync::Arc;
 
+pub(crate) const BUF_LEN: usize = 8 * 4096;
 pub(crate) const MAX_HEADERS: usize = 32;
+pub(crate) static CURRENT_DATE: once_cell::sync::Lazy<Arc<ArcSwap<Arc<str>>>> =
+    once_cell::sync::Lazy::new(|| {
+        let now = httpdate::HttpDate::from(std::time::SystemTime::now()).to_string();
+        let swap = Arc::new(ArcSwap::from_pointee(Arc::from(now.into_boxed_str())));
+        let swap_clone: Arc<ArcSwap<Arc<str>>> = Arc::clone(&swap);
+        may::go!(move || loop {
+            let now = std::time::SystemTime::now();
+            let subsec = now
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_millis();
+            let delay = 1_000u64.saturating_sub(subsec as u64);
+            may::coroutine::sleep(std::time::Duration::from_millis(delay));
+            let new_date = httpdate::HttpDate::from(std::time::SystemTime::now()).to_string();
+            swap_clone.store(Arc::<str>::from(new_date.into_boxed_str()).into());
+        });
+        swap
+    });
 
 pub struct H1Session<'buf, 'header, 'stream, S>
 where
@@ -23,6 +46,9 @@ where
     stream: &'stream mut S,
 }
 
+//impl<'buf, 'header, 'stream, S> H1Session<'buf, 'header, 'stream, S> where S: Read + Write {}
+
+#[async_trait::async_trait(?Send)]
 impl<'buf, 'header, 'stream, S> Session for H1Session<'buf, 'header, 'stream, S>
 where
     S: Read + Write,
@@ -33,56 +59,57 @@ where
     }
 
     #[inline]
-    fn is_h3(&self) -> bool {
-        false
+    fn req_method(&self) -> http::Method {
+        if let Some(str) = self.req.method {
+            return http::Method::from_str(str).unwrap_or_default();
+        }
+        http::Method::GET
     }
 
     #[inline]
-    fn req_method(&self) -> Option<&str> {
+    fn req_method_str(&self) -> Option<&str> {
         self.req.method
     }
 
     #[inline]
-    fn req_path(&self) -> Option<&str> {
-        self.req.path
+    fn req_path(&self) -> String {
+        self.req.path.unwrap_or_default().into()
     }
 
     #[inline]
-    fn req_http_version(&self) -> Option<u8> {
-        self.req.version
+    fn req_http_version(&self) -> http::Version {
+        match self.req.version {
+            Some(1) => http::Version::HTTP_11,
+            Some(0) => http::Version::HTTP_10,
+            _ => http::Version::HTTP_09,
+        }
     }
 
     #[inline]
-    fn req_headers(&self) -> &[httparse::Header<'_>] {
-        self.req.headers
-    }
-
-    #[inline]
-    fn req_headers_vec(&self) -> Vec<httparse::Header<'_>> {
-        self.req.headers.to_vec()
-    }
-
-    #[inline]
-    fn req_header(&self, header: &HttpHeader) -> std::io::Result<&str> {
-        self.req_header_str(&header.to_string())
-    }
-
-    #[inline]
-    fn req_header_str(&self, header: &str) -> std::io::Result<&str> {
+    fn req_headers(&self) -> http::HeaderMap {
+        let mut map = http::HeaderMap::new();
         for h in self.req.headers.iter() {
-            if h.name.eq_ignore_ascii_case(header) {
-                return std::str::from_utf8(h.value)
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
+            if let Ok(v) = HeaderValue::from_bytes(h.value)
+                && let Ok(header_name) = HeaderName::from_str(h.name)
+            {
+                map.insert(header_name, v);
             }
         }
-        Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("{header} header not found"),
-        ))
+        map
     }
 
     #[inline]
-    fn req_body(&mut self, timeout: std::time::Duration) -> io::Result<&[u8]> {
+    fn req_header(&self, header: &http::HeaderName) -> Option<http::HeaderValue> {
+        for h in self.req.headers.iter() {
+            if h.name.eq_ignore_ascii_case(header.as_str()) {
+                return HeaderValue::from_bytes(h.value).ok();
+            }
+        }
+        None
+    }
+
+    #[inline]
+    fn req_body_h1(&mut self, timeout: std::time::Duration) -> io::Result<&[u8]> {
         let content_length = self
             .req
             .headers
@@ -152,21 +179,55 @@ where
         Ok(&self.req_buf[..content_length])
     }
 
+    #[cfg(all(feature = "net-h2-server", target_os = "linux"))]
     #[inline]
-    fn status_code(&mut self, status: super::util::Status) -> &mut Self {
+    async fn req_body_h2(
+        &mut self,
+        _timeout: std::time::Duration,
+    ) -> Option<std::io::Result<bytes::Bytes>> {
+        None
+    }
+
+    #[inline]
+    fn status_code(&mut self, status: http::StatusCode) -> &mut Self {
         const SERVER_NAME: &str =
             concat!("\r\nServer: Sib ", env!("SIB_BUILD_VERSION"), "\r\nDate: ");
-        let (code, reason) = status.as_parts();
 
         self.rsp_buf.extend_from_slice(b"HTTP/1.1 ");
-        self.rsp_buf.extend_from_slice(code.as_bytes());
+        self.rsp_buf.extend_from_slice(status.as_str().as_bytes());
         self.rsp_buf.extend_from_slice(b" ");
-        self.rsp_buf.extend_from_slice(reason.as_bytes());
+        if let Some(reason) = status.canonical_reason() {
+            self.rsp_buf.extend_from_slice(reason.as_bytes());
+        }
         self.rsp_buf.extend_from_slice(SERVER_NAME.as_bytes());
         self.rsp_buf
-            .extend_from_slice(super::util::CURRENT_DATE.load().as_bytes());
+            .extend_from_slice(CURRENT_DATE.load().as_bytes());
         self.rsp_buf.extend_from_slice(b"\r\n");
         self
+    }
+
+    #[cfg(all(feature = "net-h2-server", target_os = "linux"))]
+    #[inline]
+    fn start_h2_streaming(&mut self) -> std::io::Result<super::h2_session::H2Stream> {
+        Err(io::Error::other(
+            "start_h2_streaming not supported in H1Session",
+        ))
+    }
+
+    #[inline]
+    fn header(&mut self, name: HeaderName, value: HeaderValue) -> std::io::Result<&mut Self> {
+        if self.rsp_headers_len >= MAX_HEADERS {
+            return Err(io::Error::new(
+                io::ErrorKind::ArgumentListTooLong,
+                "too many headers",
+            ));
+        }
+        self.rsp_buf.extend_from_slice(format!("{name}").as_bytes());
+        self.rsp_buf.extend_from_slice(b": ");
+        self.rsp_buf.extend_from_slice(value.as_bytes());
+        self.rsp_buf.extend_from_slice(b"\r\n");
+        self.rsp_headers_len += 1;
+        Ok(self)
     }
 
     #[inline]
@@ -186,6 +247,14 @@ where
     }
 
     #[inline]
+    fn headers(&mut self, headers: &http::HeaderMap) -> std::io::Result<&mut Self> {
+        for (k, v) in headers {
+            self.header(k.clone(), v.clone())?;
+        }
+        Ok(self)
+    }
+
+    #[inline]
     fn headers_str(&mut self, header_val: &[(&str, &str)]) -> std::io::Result<&mut Self> {
         for (name, value) in header_val {
             self.header_str(name, value)?;
@@ -194,71 +263,18 @@ where
     }
 
     #[inline]
-    fn header(&mut self, name: &HttpHeader, value: &str) -> std::io::Result<&mut Self> {
-        if self.rsp_headers_len >= MAX_HEADERS {
-            return Err(io::Error::new(
-                io::ErrorKind::ArgumentListTooLong,
-                "too many headers",
-            ));
-        }
-        self.rsp_buf.extend_from_slice(format!("{name}").as_bytes());
-        self.rsp_buf.extend_from_slice(b": ");
-        self.rsp_buf.extend_from_slice(value.as_bytes());
+    fn body(&mut self, body: bytes::Bytes) -> &mut Self {
         self.rsp_buf.extend_from_slice(b"\r\n");
-        self.rsp_headers_len += 1;
-        Ok(self)
-    }
-
-    #[inline]
-    fn headers(&mut self, header_val: &[(HttpHeader, &str)]) -> std::io::Result<&mut Self> {
-        for (name, value) in header_val {
-            self.header(name, value)?;
-        }
-        Ok(self)
-    }
-
-    #[inline]
-    fn headers_vec(&mut self, header_val: &[(HttpHeader, String)]) -> std::io::Result<&mut Self> {
-        for (name, value) in header_val {
-            self.header(name, value)?;
-        }
-        Ok(self)
-    }
-
-    #[inline]
-    fn body(&mut self, body: &bytes::Bytes) -> &mut Self {
-        self.rsp_buf.extend_from_slice(b"\r\n");
-        self.rsp_buf.extend_from_slice(body);
+        self.rsp_buf.extend_from_slice(&body);
         self
     }
 
     #[inline]
-    fn body_slice(&mut self, body: &[u8]) -> &mut Self {
-        self.rsp_buf.extend_from_slice(b"\r\n");
-        self.rsp_buf.extend_from_slice(body);
-        self
-    }
-
-    #[inline]
-    fn body_static(&mut self, body: &'static str) -> &mut Self {
-        self.rsp_buf.extend_from_slice(b"\r\n");
-        self.rsp_buf.extend_from_slice(body.as_bytes());
-        self
-    }
-
-    #[cfg(feature = "net-file-server")]
-    #[inline]
-    fn body_mmap(&mut self, map: std::sync::Arc<memmap2::Mmap>, lo: usize, hi: usize) -> &mut Self {
-        self.rsp_buf.extend_from_slice(b"\r\n");
-        self.rsp_buf.extend_from_slice(&map[lo..hi]);
-        self
-    }
-
-    #[inline]
-    fn eom(&mut self) {
+    fn eom(&mut self) -> std::io::Result<()> {
         // eom, end of message
         #[cfg(debug_assertions)]
         eprintln!("sent: {:?}", self.rsp_buf);
+        Ok(())
     }
 }
 
@@ -272,8 +288,6 @@ pub fn new_session<'header, 'buf, 'stream, S>(
 where
     S: Read + Write,
 {
-    use crate::network::http::h1_server::reserve_buf;
-
     let mut req = httparse::Request::new(&mut []);
     let buf: &[u8] = unsafe { std::mem::transmute(req_buf.chunk()) };
     let status = match req.parse_with_uninit_headers(buf, headers) {
@@ -291,7 +305,11 @@ where
     };
     req_buf.advance(len);
 
-    reserve_buf(rsp_buf);
+    // reserve rsp_buf
+    let rem = rsp_buf.capacity() - rsp_buf.len();
+    if rem < 1024 {
+        rsp_buf.reserve(BUF_LEN - rem);
+    }
 
     Ok(Some(H1Session {
         peer_addr,

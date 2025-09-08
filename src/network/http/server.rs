@@ -1,8 +1,4 @@
-#[cfg(unix)]
 use std::net::{SocketAddr, ToSocketAddrs};
-
-const MAX_BODY_LEN: usize = 4096;
-pub const BUF_LEN: usize = MAX_BODY_LEN * 8;
 
 macro_rules! mc {
     ($exp: expr) => {
@@ -16,11 +12,50 @@ macro_rules! mc {
     };
 }
 
+#[cfg(all(feature = "net-h2-server", target_os = "linux"))]
+#[derive(Debug, Clone)]
+pub struct H2Config {
+    pub backlog: usize,
+    pub enable_connect_protocol: bool,
+    pub initial_connection_window_size: u32,
+    pub initial_window_size: u32,
+    pub io_timeout: std::time::Duration,
+    pub max_concurrent_streams: u32,
+    pub max_frame_size: u32,
+    pub max_header_list_size: u32,
+    pub max_sessions: u64,
+    pub num_of_shards: usize,
+}
+
+#[cfg(all(feature = "net-h2-server", target_os = "linux"))]
+impl Default for H2Config {
+    fn default() -> Self {
+        Self {
+            backlog: 512,
+            enable_connect_protocol: false,
+            initial_connection_window_size: 64 * 1024,
+            initial_window_size: 256 * 1024,
+            io_timeout: std::time::Duration::from_secs(60),
+            max_concurrent_streams: 4096,
+            max_frame_size: 32 * 1024,
+            max_header_list_size: 32 * 1024,
+            max_sessions: 1024,
+            num_of_shards: 2,
+        }
+    }
+}
+
 pub trait HFactory: Send + Sync + Sized + 'static {
     type Service: crate::network::http::session::HService + Send;
+    type HAsyncService: crate::network::http::session::HAsyncService + Send;
 
     // create a new http service for each connection
+    #[cfg(feature = "net-h1-server")]
     fn service(&self, id: usize) -> Self::Service;
+
+    // create a new http async service for each connection
+    #[cfg(all(feature = "net-h2-server", target_os = "linux"))]
+    fn async_service(&self, id: usize) -> Self::HAsyncService;
 
     /// Start the http service
     #[cfg(feature = "net-h1-server")]
@@ -51,7 +86,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                     let mut stream = mc!(stream);
 
                     // get the client IP address
-                    let peer_addr = stream.peer_addr().unwrap_or(std::net::SocketAddr::new(
+                    let peer_addr = stream.peer_addr().unwrap_or(SocketAddr::new(
                         std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
                         0,
                     ));
@@ -75,20 +110,21 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         )
     }
 
-    #[cfg(all(feature = "net-h1-server", feature = "sys-boring-ssl"))]
+    #[cfg(feature = "net-h1-server")]
     fn start_h1_tls<L: ToSocketAddrs>(
         self,
         addr: L,
-        ssl: &super::util::SSL,
+        chain_cert_key: (Option<&[u8]>, &[u8], &[u8]),
+        io_timeout: std::time::Duration,
         stack_size: usize,
         rate_limiter: Option<super::ratelimit::RateLimiterKind>,
     ) -> std::io::Result<may::coroutine::JoinHandle<()>> {
         use std::net::Shutdown;
 
-        let cert = boring::x509::X509::from_pem(ssl.cert_pem).map_err(|e| {
+        let cert = boring::x509::X509::from_pem(chain_cert_key.1).map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("Cert error: {e}"))
         })?;
-        let pkey = boring::pkey::PKey::private_key_from_pem(ssl.key_pem).map_err(|e| {
+        let pkey = boring::pkey::PKey::private_key_from_pem(chain_cert_key.2).map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("Key error: {e}"))
         })?;
 
@@ -98,7 +134,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
 
         tls_builder.set_private_key(&pkey)?;
         tls_builder.set_certificate(&cert)?;
-        if let Some(chain) = ssl.chain_pem {
+        if let Some(chain) = chain_cert_key.0 {
             // add chain
             for extra in boring::x509::X509::stack_from_pem(chain).map_err(|e| {
                 std::io::Error::new(
@@ -109,8 +145,8 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                 tls_builder.add_extra_chain_cert(extra)?;
             }
         }
-        tls_builder.set_min_proto_version(ssl.min_version.to_boring())?;
-        tls_builder.set_max_proto_version(ssl.max_version.to_boring())?;
+        tls_builder.set_min_proto_version(Some(boring::ssl::SslVersion::TLS1_2))?;
+        tls_builder.set_max_proto_version(Some(boring::ssl::SslVersion::TLS1_3))?;
         tls_builder.set_options(boring::ssl::SslOptions::NO_TICKET);
         tls_builder.set_session_id_context(b"sib\0")?;
         tls_builder.set_alpn_protos(b"\x08http/1.1")?;
@@ -134,7 +170,6 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         } else {
             2 * 1024 * 1024
         };
-        let io_timeout = ssl.io_timeout;
         let tls_acceptor = std::sync::Arc::new(tls_builder.build());
         let listener = may::net::TcpListener::bind(addr)?;
 
@@ -161,14 +196,14 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                     });
                     let ip = peer_addr.ip();
 
-                    if let Some(rl) = &rate_limiter {
-                        if !ip.is_unspecified() {
-                            use super::ratelimit::RateLimiter;
-                            let result = rl.check(ip.to_string().into());
-                            if !result.allowed {
-                                let _ = stream.shutdown(Shutdown::Both);
-                                continue;
-                            }
+                    if let Some(rl) = &rate_limiter
+                        && !ip.is_unspecified()
+                    {
+                        use super::ratelimit::RateLimiter;
+                        let result = rl.check(ip.to_string().into());
+                        if !result.allowed {
+                            let _ = stream.shutdown(Shutdown::Both);
+                            continue;
                         }
                     }
 
@@ -210,130 +245,245 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         )
     }
 
-    #[cfg(feature = "net-h3-server")]
-    fn start_h3_tls<L: ToSocketAddrs>(
+    #[cfg(all(feature = "net-h2-server", target_os = "linux"))]
+    fn start_h2_tls<L: ToSocketAddrs>(
         self,
         addr: L,
-        (cert_pem_file_path, key_pem_file_path): (&str, &str),
-        io_timeout: std::time::Duration,
-        verify_peer: bool,
-        (stack_size, num_of_workers): (usize, usize),
-        extend_connect: bool,
+        chain_cert_key: (Option<&[u8]>, &[u8], &[u8]),
+        h2_cfg: H2Config,
+        rate_limiter: Option<super::ratelimit::RateLimiterKind>,
     ) -> std::io::Result<()> {
-        let stacksize = if stack_size > 0 {
-            stack_size
-        } else {
-            2 * 1024 * 1024 // default to 2 MiB
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+        use rustls_pemfile::{certs, pkcs8_private_keys};
+
+        let certs: Vec<CertificateDer<'static>> = {
+            let mut reader = std::io::Cursor::new(chain_cert_key.1);
+            certs(&mut reader)
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .collect()
         };
 
-        // share a service factory safely across dispatchers
-        let factory: std::sync::Arc<dyn Fn(usize) -> Self::Service + Send + Sync> =
-            std::sync::Arc::new(move |id| self.service(id));
+        let key: PrivateKeyDer<'static> = {
+            let mut reader = std::io::Cursor::new(chain_cert_key.2);
+            let keys: Result<Vec<_>, std::io::Error> = pkcs8_private_keys(&mut reader)
+                .map(|res| {
+                    res.map_err(|e| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            format!("bad key: {e}"),
+                        )
+                    })
+                })
+                .collect();
+            let keys = keys?;
+            if let Some(key) = keys.into_iter().next() {
+                PrivateKeyDer::from(key)
+            } else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "no private key found",
+                ));
+            }
+        };
 
-        let address = addr
-            .to_socket_addrs()?
-            .next()
-            .ok_or_else(|| std::io::Error::other("Failed to get address info"))?;
-        let sockets = bind_udp_sockets(address, io_timeout, num_of_workers)?;
-        for socket in sockets {
-            let local_addr = socket.local_addr().map_err(|e| {
-                std::io::Error::other(format!("Failed to get local address: {e:?}"))
+        let mut cfg = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("could not load cert/key: {e}"),
+                )
             })?;
 
-            use crate::network::http::h3_server::build_quiche_config;
-            let cfg = build_quiche_config(
-                cert_pem_file_path,
-                key_pem_file_path,
-                io_timeout,
-                verify_peer,
-                extend_connect,
-            )?;
+        // Set ALPN protocols to support HTTP/2 and HTTP/1.1
+        cfg.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
-            let factory_cloned = factory.clone();
-            let _ = may::go!(
-                may::coroutine::Builder::new()
-                    .name("H3ServiceFactory".to_owned())
-                    .stack_size(stacksize),
-                move || {
-                    use crate::network::http::h3_server::quic_dispatcher;
-                    quic_dispatcher(socket, cfg, local_addr, extend_connect, factory_cloned);
+        let tls_acceptor = futures_rustls::TlsAcceptor::from(std::sync::Arc::new(cfg));
+        let socket_addr = addr.to_socket_addrs()?.next().unwrap();
+
+        let factory = std::sync::Arc::new(self);
+        let rate_limiter_arc = std::sync::Arc::new(rate_limiter);
+        glommio::LocalExecutorPoolBuilder::new(glommio::PoolPlacement::MaxSpread(
+            h2_cfg.num_of_shards,
+            glommio::CpuSet::online().ok(),
+        ))
+        .on_all_shards(move || {
+            let tls_acceptor = tls_acceptor.clone();
+            let factory = factory.clone();
+            let h2_cfg = h2_cfg.clone();
+            let rate_limiter_arc = rate_limiter_arc.clone();
+
+            async move {
+                let id = glommio::executor().id();
+                #[cfg(unix)]
+                let listener = match make_listener(
+                    socket_addr,
+                    socket2::Protocol::TCP,
+                    h2_cfg.backlog,
+                    h2_cfg.io_timeout,
+                ) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        eprintln!("Failed to create h2 listener on address {socket_addr}: {e}");
+                        return;
+                    }
+                };
+                #[cfg(not(unix))]
+                let listener = match TcpListener::bind(addr) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        eprintln!("Failed to create h2 listener on address {socket_addr}: {e}");
+                        return;
+                    }
+                };
+
+                // Generous concurrency budget (tune to your box)
+                let sem = std::rc::Rc::new(glommio::sync::Semaphore::new(h2_cfg.max_sessions));
+
+                println!("Shard {id} listening on H2/TLS on {socket_addr}");
+
+                loop {
+                    let permit = std::rc::Rc::clone(&sem).acquire(1).await;
+
+                    let stream = match listener.accept().await {
+                        Ok(s) => s,
+                        Err(_) => {
+                            drop(permit);
+                            continue;
+                        }
+                    };
+                    // Reduce head-of-line pauses within a stream mux
+                    stream.set_nodelay(true).ok();
+
+                    let factory = factory.clone();
+                    let tls_acceptor = tls_acceptor.clone();
+                    let h2_cfg = h2_cfg.clone();
+                    let rate_limiter_arc = rate_limiter_arc.clone();
+                    glommio::spawn_local(async move {
+                        // Hold the permit until the end of this session
+                        let _p = permit;
+
+                        let peer_addr = stream.peer_addr().unwrap_or_else(|_| {
+                            SocketAddr::new(
+                                std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                                0,
+                            )
+                        });
+                        let ip = peer_addr.ip();
+
+                        if let Some(rl) = rate_limiter_arc.as_ref()
+                            && !ip.is_unspecified()
+                        {
+                            use super::ratelimit::RateLimiter;
+                            let result = rl.check(ip.to_string().into());
+                            if !result.allowed {
+                                let _ = stream.shutdown(std::net::Shutdown::Both).await;
+                                return;
+                            }
+                        }
+
+                        let tls_stream = match tls_acceptor.accept(stream).await {
+                            Ok(s) => s,
+                            Err(e) => {
+                                eprintln!("H2 TLS handshake error: {e}");
+                                return;
+                            }
+                        };
+
+                        use crate::network::http::h2_server::serve;
+                        let service = factory.async_service(id);
+                        if let Err(e) = serve(tls_stream, service, &h2_cfg, peer_addr).await {
+                            eprintln!("h2 serve got an error: {e}");
+                        }
+                    })
+                    .detach();
                 }
-            );
-        }
+            }
+        })
+        .unwrap()
+        .join_all();
         Ok(())
     }
 }
 
-fn bind_udp_sockets(
+fn make_listener(
     addr: SocketAddr,
+    protocol: socket2::Protocol,
+    backlog: usize,
     io_timeout: std::time::Duration,
-    n: usize,
-) -> std::io::Result<Vec<std::sync::Arc<may::net::UdpSocket>>> {
-    use socket2::{Domain, Protocol, Socket, Type};
+) -> std::io::Result<glommio::net::TcpListener> {
+    use socket2::{Domain, Socket, Type};
     use std::os::fd::{FromRawFd, IntoRawFd};
 
-    // Only fan out on Linux (REUSEPORT)
-    let fanout = if cfg!(any(target_os = "linux", target_os = "android")) {
-        n
+    let domain = if addr.is_ipv4() {
+        Domain::IPV4
     } else {
-        1
+        Domain::IPV6
+    };
+    let sock = if protocol == socket2::Protocol::TCP {
+        Socket::new(domain, Type::STREAM.nonblocking(), Some(protocol))?
+    } else {
+        Socket::new(domain, Type::DGRAM, Some(protocol))?
     };
 
-    let mut v = Vec::with_capacity(fanout);
-    for _ in 0..fanout {
-        let s = Socket::new(Domain::for_address(addr), Type::DGRAM, Some(Protocol::UDP))?;
-        s.set_reuse_address(true)?;
-        s.set_read_timeout(Some(io_timeout))?;
-        s.set_write_timeout(Some(io_timeout))?;
+    sock.set_reuse_address(true)?;
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "freebsd"
+    ))]
+    sock.set_reuse_port(true)?;
+    sock.set_read_timeout(Some(io_timeout))?;
+    sock.set_write_timeout(Some(io_timeout))?;
+    sock.bind(&addr.into())?;
 
-        #[cfg(any(target_os = "linux", target_os = "android"))]
-        s.set_reuse_port(true)?; // enable only on Linux/Android
+    let backlog: i32 = if backlog == 0 {
+        1024
+    } else {
+        match i32::try_from(backlog) {
+            Ok(y) => y,
+            Err(_) => {
+                eprintln!("backlog too large, using 1024");
+                1024
+            }
+        }
+    };
+    sock.listen(backlog)?;
 
-        s.bind(&addr.into())?;
-        s.set_recv_buffer_size(32 * 1024 * 1024)?;
-        s.set_send_buffer_size(32 * 1024 * 1024)?;
-        s.set_nonblocking(true)?;
-
-        // Transfer ownership of the FD to may::net::UdpSocket
-        let fd = s.into_raw_fd();
-        let may_udp = unsafe { may::net::UdpSocket::from_raw_fd(fd) };
-        v.push(std::sync::Arc::new(may_udp));
-    }
-    Ok(v)
+    let listener = unsafe { glommio::net::TcpListener::from_raw_fd(sock.into_raw_fd()) };
+    Ok(listener)
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::network::http::{
-        server::HFactory,
-        session::{HService, Session},
-        util::{SSLVersion, Status},
-    };
-    use may::net::TcpStream;
-    use std::{
-        io::{Read, Write},
-        time::Duration,
-    };
+    use crate::network::http::server::HFactory;
+    use crate::network::http::session::{HAsyncService, HService, Session};
+    use std::sync::Once;
+
+    static INIT: Once = Once::new();
 
     struct EchoServer;
 
     impl HService for EchoServer {
         fn call<SE: Session>(&mut self, session: &mut SE) -> std::io::Result<()> {
-            let req_method = session.req_method().unwrap_or_default().to_owned();
-            let req_path = session.req_path().unwrap_or_default().to_owned();
-            let req_body = session.req_body(std::time::Duration::from_secs(5))?;
+            let req_method = session.req_method();
+            let req_path = session.req_path();
+            let req_body = session.req_body_h1(std::time::Duration::from_secs(5))?;
             let body = bytes::Bytes::from(format!(
                 "Echo: {req_method:?} {req_path:?}\r\nBody: {req_body:?}"
             ));
 
             session
-                .status_code(Status::Ok)
+                .status_code(http::StatusCode::OK)
                 .header_str("Content-Type", "text/plain")?
                 .header_str("Content-Length", &body.len().to_string())?
-                .body(&body)
-                .eom();
+                .body(body)
+                .eom()?;
 
-            if !session.is_h3() && req_method == "POST" {
+            if req_method == "POST" {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::WouldBlock,
                     "H1 POST should return WouldBlock",
@@ -342,16 +492,48 @@ mod tests {
             Ok(())
         }
     }
+    #[async_trait::async_trait(?Send)]
+    impl HAsyncService for EchoServer {
+        async fn call<SE: Session>(&mut self, session: &mut SE) -> std::io::Result<()> {
+            let req_method = session.req_method();
+            let req_path = session.req_path().to_owned();
+            let req_body = session.req_body_h2(std::time::Duration::from_secs(5)).await;
+            let body = bytes::Bytes::from(format!(
+                "Echo: {req_method:?} {req_path:?}\r\nBody: {req_body:?}"
+            ));
+
+            let content_len = body.len().to_string();
+            session
+                .status_code(http::StatusCode::OK)
+                .header(
+                    http::header::CONTENT_TYPE,
+                    http::HeaderValue::from_static("text/plain"),
+                )?
+                .header(
+                    http::header::CONTENT_LENGTH,
+                    http::HeaderValue::from_str(&content_len).expect("content_len"),
+                )?
+                .body(body)
+                .eom()?;
+            Ok(())
+        }
+    }
 
     impl HFactory for EchoServer {
-        type Service = EchoServer;
+        type Service = Self;
+        type HAsyncService = Self;
 
-        fn service(&self, _id: usize) -> EchoServer {
+        #[cfg(feature = "net-h1-server")]
+        fn service(&self, _id: usize) -> Self::Service {
+            EchoServer
+        }
+
+        #[cfg(all(feature = "net-h2-server", target_os = "linux"))]
+        fn async_service(&self, _id: usize) -> Self::HAsyncService {
             EchoServer
         }
     }
 
-    #[cfg(feature = "sys-boring-ssl")]
     fn create_self_signed_tls_pems() -> (String, String) {
         use base64::{Engine as _, engine::general_purpose::STANDARD as b64};
         use rcgen::{
@@ -391,45 +573,34 @@ mod tests {
 
         println!("BASE64_SHA256_OF_DER_CERT: {}", base64_hash);
 
+        INIT.call_once(|| {
+            rustls::crypto::CryptoProvider::install_default(
+                rustls::crypto::aws_lc_rs::default_provider(),
+            )
+            .expect("install aws-lc-rs");
+        });
+
         (cert_pem, key_pem)
     }
 
     #[cfg(feature = "net-h1-server")]
     #[test]
-    fn test_h1_server_gracefull_shutdown() {
-        const NUMBER_OF_WORKERS: usize = 1;
-        crate::init(NUMBER_OF_WORKERS, 2 * 1024 * 1024);
-
-        let addr = "127.0.0.1:8080";
-        let server_handle = EchoServer.start_h1(addr, 0).expect("h1 start server");
-
-        let handler = may::go!(move || {
-            may::coroutine::sleep(Duration::from_millis(100));
-            unsafe { server_handle.coroutine().cancel() };
-        });
-
-        handler.join().expect("shutdown signaler failed");
-    }
-
-    #[cfg(all(feature = "sys-boring-ssl", feature = "net-h1-server"))]
-    #[test]
     fn test_h1_tls_server_gracefull_shutdown() {
+        use std::time::Duration;
         const NUMBER_OF_WORKERS: usize = 1;
-        crate::init(NUMBER_OF_WORKERS, 2 * 1024 * 1024);
+        crate::init_global_poller(NUMBER_OF_WORKERS, 0);
 
         let (cert_pem, key_pem) = create_self_signed_tls_pems();
-        let ssl = crate::network::http::util::SSL {
-            cert_pem: cert_pem.as_bytes(),
-            key_pem: key_pem.as_bytes(),
-            chain_pem: None,
-            min_version: SSLVersion::TLS1_2,
-            max_version: SSLVersion::TLS1_3,
-            io_timeout: std::time::Duration::from_secs(10),
-        };
         let addr = "127.0.0.1:8080";
         let server_handle = EchoServer
-            .start_h1_tls(addr, &ssl, 0, None)
-            .expect("h1 TLS start server");
+            .start_h1_tls(
+                addr,
+                (None, cert_pem.as_bytes(), key_pem.as_bytes()),
+                Duration::from_secs(10),
+                0,
+                None,
+            )
+            .expect("H1 TLS server failed to start");
 
         let handler = may::go!(move || {
             may::coroutine::sleep(Duration::from_millis(100));
@@ -442,15 +613,21 @@ mod tests {
     #[cfg(feature = "net-h1-server")]
     #[test]
     fn test_h1_server_get() {
+        use may::net::TcpStream;
+        use std::{
+            io::{Read, Write},
+            time::Duration,
+        };
+
         const NUMBER_OF_WORKERS: usize = 1;
-        crate::init(NUMBER_OF_WORKERS, 2 * 1024 * 1024);
+        crate::init_global_poller(NUMBER_OF_WORKERS, 2 * 1024 * 1024);
 
         // Pick a port and start the server
-        let addr = "127.0.0.1:8080";
+        let addr = "127.0.0.1:8081";
         let server_handle = EchoServer.start_h1(addr, 0).expect("h1 start server");
 
         let client_handler = may::go!(move || {
-            may::coroutine::sleep(Duration::from_millis(100));
+            may::coroutine::sleep(Duration::from_millis(500));
 
             // Client sends HTTP request
             let mut stream = TcpStream::connect(addr).expect("connect");
@@ -462,27 +639,29 @@ mod tests {
             let n = stream.read(&mut buf).unwrap();
             let response = std::str::from_utf8(&buf[..n]).unwrap();
 
+            eprintln!("H1 GET Response: {response}");
             assert!(response.contains("/test"));
-            eprintln!("\r\nH1 GET Response: {response}");
         });
 
         may::join!(server_handle, client_handler);
 
-        std::thread::sleep(Duration::from_secs(2));
+        std::thread::sleep(Duration::from_millis(500));
     }
 
     #[cfg(feature = "net-h1-server")]
     #[test]
     fn test_h1_server_post() {
+        use may::net::TcpStream;
+        use std::time::Duration;
         const NUMBER_OF_WORKERS: usize = 1;
-        crate::init(NUMBER_OF_WORKERS, 2 * 1024 * 1024);
+        crate::init_global_poller(NUMBER_OF_WORKERS, 2 * 1024 * 1024);
 
-        let addr = "127.0.0.1:8080";
+        let addr = "127.0.0.1:8082";
         let server_handle = EchoServer.start_h1(addr, 0).expect("h1 start server");
 
         let client_handler = may::go!(move || {
             use std::io::{Read, Write};
-            may::coroutine::sleep(Duration::from_millis(100));
+            may::coroutine::sleep(Duration::from_millis(500));
 
             let mut stream = TcpStream::connect(addr).expect("connect");
 
@@ -498,62 +677,90 @@ mod tests {
             let mut buf = [0u8; 1024];
             let n = stream.read(&mut buf).unwrap();
             let response = std::str::from_utf8(&buf[..n]).unwrap();
+            eprintln!("H1 POST Response: {response}");
 
             // Should include method, path, and echoed body contents
             assert!(response.contains("POST"));
             assert!(response.contains("/submit"));
-            eprintln!("\r\nH1 POST Response: {response}");
         });
 
         may::join!(server_handle, client_handler);
-        std::thread::sleep(Duration::from_secs(2));
+        std::thread::sleep(Duration::from_millis(500));
     }
 
-    #[cfg(feature = "net-h3-server")]
-    #[tokio::test]
-    async fn test_quiche_server_response() -> Result<(), Box<dyn std::error::Error>> {
-        const NUMBER_OF_WORKERS: usize = 1;
-        crate::init(NUMBER_OF_WORKERS, 2 * 1024 * 1024);
+    #[cfg(all(feature = "net-h2-server", target_os = "linux"))]
+    #[test]
+    fn test_h2_server_get() {
+        let addr = "127.0.0.1:8083";
+        let _ = std::thread::spawn(move || {
+            let (cert, key) = create_self_signed_tls_pems();
 
-        // create self-signed TLS certificates
-        let certs = create_self_signed_tls_pems();
-        std::fs::write("/tmp/cert.pem", certs.0)?;
-        std::fs::write("/tmp/key.pem", certs.1)?;
-
-        // Start the server in a background thread
-        std::thread::spawn(|| {
-            println!("Starting H3 server...");
+            use crate::network::http::server::H2Config;
+            let h2_cfg = H2Config::default();
+            // Pick a port and start the server
             EchoServer
-                .start_h3_tls(
-                    "0.0.0.0:8080",
-                    ("/tmp/cert.pem", "/tmp/key.pem"),
-                    std::time::Duration::from_secs(10),
-                    true,
-                    (0, NUMBER_OF_WORKERS),
-                    false,
-                )
-                .expect("h3 start server");
+                .start_h2_tls(addr, (None, cert.as_bytes(), key.as_bytes()), h2_cfg, None)
+                .expect("start_h2_tls");
         });
 
-        // Wait for the server to be ready
-        std::thread::sleep(std::time::Duration::from_millis(100000));
+        std::thread::sleep(std::time::Duration::from_millis(500));
 
-        let client = reqwest::Client::builder()
-            .http3_prior_knowledge()
+        let client = reqwest::blocking::Client::builder()
             .danger_accept_invalid_certs(true)
-            .build()?;
-        let url = "https://127.0.0.1:8080/";
-        let res = client
-            .get(url)
-            .version(reqwest::Version::HTTP_3)
+            .http2_adaptive_window(true)
+            .build()
+            .expect("reqwest client");
+
+        let resp = client
+            .get(format!("https://{}", addr))
+            .body("Hello, World!")
+            .timeout(std::time::Duration::from_millis(300))
             .send()
-            .await?;
+            .expect("reqwest send");
+        eprintln!("Response: {resp:?}");
+        assert!(resp.status().is_success());
 
-        println!("Response: {:?} {}", res.version(), res.status());
-        println!("Headers: {:#?}\n", res.headers());
-        let body = res.text().await?;
-        println!("{body}");
+        let body = resp.text().expect("resp text");
+        eprintln!("Response: {body:?}");
+        assert!(body.contains("Echo:"));
+        assert!(body.contains("Hello, World!"));
+    }
 
-        Ok(())
+    #[cfg(all(feature = "net-h2-server", target_os = "linux"))]
+    #[test]
+    fn test_h2_server_post() {
+        let addr = "127.0.0.1:8084";
+        let _ = std::thread::spawn(move || {
+            let (cert, key) = create_self_signed_tls_pems();
+
+            use crate::network::http::server::H2Config;
+            let h2_cfg = H2Config::default();
+            // Pick a port and start the server
+            EchoServer
+                .start_h2_tls(addr, (None, cert.as_bytes(), key.as_bytes()), h2_cfg, None)
+                .expect("start_h2_tls");
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        let client = reqwest::blocking::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .http2_adaptive_window(true)
+            .build()
+            .expect("reqwest client");
+
+        let resp = client
+            .get(format!("https://{}", addr))
+            .body("Hello, World!")
+            .timeout(std::time::Duration::from_millis(300))
+            .send()
+            .expect("reqwest send");
+        eprintln!("Response: {resp:?}");
+        assert!(resp.status().is_success());
+
+        let body = resp.text().expect("resp text");
+        eprintln!("Response: {body:?}");
+        assert!(body.contains("Echo:"));
+        assert!(body.contains("Hello, World!"));
     }
 }
