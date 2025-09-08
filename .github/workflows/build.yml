@@ -145,7 +145,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install tools
-        run: brew install cmake ninja
+        run: brew install ninja
 
       - name: Install GStreamer
         run: |
