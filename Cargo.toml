@@ -17,6 +17,7 @@ crate-type = ["rlib", "staticlib", "cdylib"]
 
 [dependencies]
 arc-swap = { version = "1.7.1", optional = true, default-features = false }
+async-trait = { version = "0.1.58", optional = true, default-features = false }
 boring = { version = "4.19.0", optional = true }
 brotli = { version = "8.0.2", optional = true, default-features = false, features = [
     "std",
@@ -64,7 +65,6 @@ foundationdb-sys = { version = "0.9.1", optional = true, default-features = fals
 
 # linux-only deps
 [target.'cfg(target_os = "linux")'.dependencies]
-async-trait = { version = "0.1.58", optional = true }
 futures-lite = { version = "2.6.1", optional = true, default-features = false, features = [
     "race",
     "std",
@@ -92,8 +92,18 @@ tokio = { version = "1.47.1", optional = true, default-features = false, feature
 [features]
 default = []
 db-fdb = ["foundationdb-sys"]
-net-file-server = ["brotli", "dashmap", "flate2", "memmap2", "zstd"]
+net-file-server = [
+    "brotli",
+    "dashmap",
+    "flate2",
+    "httpdate",
+    "memmap2",
+    "mime_guess",
+    "mime",
+    "zstd",
+]
 net-h1-server = [
+    "async-trait",
     "arc-swap",
     "boring",
     "bytes",
@@ -102,8 +112,6 @@ net-h1-server = [
     "httpdate",
     "httparse",
     "may",
-    "mime",
-    "mime_guess",
     "once_cell",
 ]
 net-h2-server = [
@@ -133,6 +141,12 @@ reqwest = { version = "0.12.23", default-features = false, features = [
     "blocking",
     "http2",
     "http3",
+] }
+rustls = { version = "0.23.31", default-features = false, features = [
+    "aws_lc_rs",
+    "prefer-post-quantum",
+    "std",
+    "tls12",
 ] }
 num_cpus = { version = "1.17.0" }
 sha2 = { version = "0.10.9" }

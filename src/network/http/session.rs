@@ -36,6 +36,7 @@ pub trait HService {
     fn call<SE: Session>(&mut self, session: &mut SE) -> std::io::Result<()>;
 }
 
+#[cfg(all(feature = "net-h2-server", target_os = "linux"))]
 #[async_trait::async_trait(?Send)]
 pub trait HAsyncService {
     async fn call<SE: Session>(&mut self, session: &mut SE) -> std::io::Result<()>;

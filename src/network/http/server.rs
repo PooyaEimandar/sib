@@ -1,5 +1,3 @@
-use std::net::{SocketAddr, ToSocketAddrs};
-
 #[cfg(feature = "net-h1-server")]
 macro_rules! mc {
     ($exp: expr) => {
@@ -63,7 +61,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
 
     /// Start the http service
     #[cfg(feature = "net-h1-server")]
-    fn start_h1<L: ToSocketAddrs>(
+    fn start_h1<L: std::net::ToSocketAddrs>(
         self,
         addr: L,
         stack_size: usize,
@@ -90,7 +88,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                     let mut stream = mc!(stream);
 
                     // get the client IP address
-                    let peer_addr = stream.peer_addr().unwrap_or(SocketAddr::new(
+                    let peer_addr = stream.peer_addr().unwrap_or(std::net::SocketAddr::new(
                         std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
                         0,
                     ));
@@ -115,7 +113,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
     }
 
     #[cfg(feature = "net-h1-server")]
-    fn start_h1_tls<L: ToSocketAddrs>(
+    fn start_h1_tls<L: std::net::ToSocketAddrs>(
         self,
         addr: L,
         chain_cert_key: (Option<&[u8]>, &[u8], &[u8]),
@@ -196,7 +194,10 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                     let _ = stream.set_read_timeout(Some(io_timeout));
 
                     let peer_addr = stream.peer_addr().unwrap_or_else(|_| {
-                        SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0)
+                        std::net::SocketAddr::new(
+                            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                            0,
+                        )
                     });
                     let ip = peer_addr.ip();
 
@@ -250,7 +251,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
     }
 
     #[cfg(all(feature = "net-h2-server", target_os = "linux"))]
-    fn start_h2_tls<L: ToSocketAddrs>(
+    fn start_h2_tls<L: std::net::ToSocketAddrs>(
         self,
         addr: L,
         chain_cert_key: (Option<&[u8]>, &[u8], &[u8]),
@@ -373,7 +374,10 @@ pub trait HFactory: Send + Sync + Sized + 'static {
 
                     // Rate-limit check
                     let peer_addr = stream.peer_addr().unwrap_or_else(|_| {
-                        SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0)
+                        std::net::SocketAddr::new(
+                            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                            0,
+                        )
                     });
                     if let Some(rl) = rate_limiter_arc.as_ref() {
                         let ip = peer_addr.ip();
@@ -425,8 +429,9 @@ pub trait HFactory: Send + Sync + Sized + 'static {
     }
 }
 
+#[cfg(all(feature = "net-h2-server", target_os = "linux"))]
 fn make_listener(
-    addr: SocketAddr,
+    addr: std::net::SocketAddr,
     protocol: socket2::Protocol,
     backlog: usize,
 ) -> std::io::Result<glommio::net::TcpListener> {
@@ -474,8 +479,11 @@ fn make_listener(
 #[cfg(test)]
 mod tests {
     use crate::network::http::server::HFactory;
-    use crate::network::http::session::{HAsyncService, HService, Session};
+    use crate::network::http::session::{HService, Session};
     use std::sync::Once;
+
+    #[cfg(all(feature = "net-h2-server", target_os = "linux"))]
+    use crate::network::http::session::HAsyncService;
 
     static INIT: Once = Once::new();
 
@@ -507,6 +515,7 @@ mod tests {
         }
     }
 
+    #[cfg(all(feature = "net-h2-server", target_os = "linux"))]
     #[async_trait::async_trait(?Send)]
     impl HAsyncService for EchoServer {
         async fn call<SE: Session>(&mut self, session: &mut SE) -> std::io::Result<()> {
@@ -536,6 +545,8 @@ mod tests {
 
     impl HFactory for EchoServer {
         type Service = Self;
+
+        #[cfg(all(feature = "net-h2-server", target_os = "linux"))]
         type HAsyncService = Self;
 
         #[cfg(feature = "net-h1-server")]
