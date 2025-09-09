@@ -1,5 +1,6 @@
 use std::net::{SocketAddr, ToSocketAddrs};
 
+#[cfg(feature = "net-h1-server")]
 macro_rules! mc {
     ($exp: expr) => {
         match $exp {

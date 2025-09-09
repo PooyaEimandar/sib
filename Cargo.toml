@@ -109,6 +109,7 @@ net-h1-server = [
 net-h2-server = [
     "async-trait",
     "bytes",
+    "dashmap",
     "futures-lite",
     "futures-rustls",
     "glommio",
