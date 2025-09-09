@@ -506,6 +506,7 @@ mod tests {
             Ok(())
         }
     }
+
     #[async_trait::async_trait(?Send)]
     impl HAsyncService for EchoServer {
         async fn call<SE: Session>(&mut self, session: &mut SE) -> std::io::Result<()> {
