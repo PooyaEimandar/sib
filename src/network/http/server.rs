@@ -322,18 +322,14 @@ pub trait HFactory: Send + Sync + Sized + 'static {
             async move {
                 let id = glommio::executor().id();
                 #[cfg(unix)]
-                let listener = match make_listener(
-                    socket_addr,
-                    socket2::Protocol::TCP,
-                    h2_cfg.backlog,
-                    h2_cfg.io_timeout,
-                ) {
-                    Ok(l) => l,
-                    Err(e) => {
-                        eprintln!("Failed to create h2 listener on address {socket_addr}: {e}");
-                        return;
-                    }
-                };
+                let listener =
+                    match make_listener(socket_addr, socket2::Protocol::TCP, h2_cfg.backlog) {
+                        Ok(l) => l,
+                        Err(e) => {
+                            eprintln!("Failed to create h2 listener on address {socket_addr}: {e}");
+                            return;
+                        }
+                    };
                 #[cfg(not(unix))]
                 let listener = match TcpListener::bind(addr) {
                     Ok(l) => l,
@@ -365,44 +361,47 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                     let tls_acceptor = tls_acceptor.clone();
                     let h2_cfg = h2_cfg.clone();
                     let rate_limiter_arc = rate_limiter_arc.clone();
-                    glommio::spawn_local(async move {
-                        // Hold the permit until the end of this session
-                        let _p = permit;
 
-                        let peer_addr = stream.peer_addr().unwrap_or_else(|_| {
-                            SocketAddr::new(
-                                std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
-                                0,
-                            )
-                        });
-                        let ip = peer_addr.ip();
+                    let peer_addr = stream.peer_addr().unwrap_or_else(|_| {
+                        SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0)
+                    });
+                    let ip = peer_addr.ip();
 
-                        if let Some(rl) = rate_limiter_arc.as_ref()
-                            && !ip.is_unspecified()
-                        {
-                            use super::ratelimit::RateLimiter;
-                            let result = rl.check(ip.to_string().into());
-                            if !result.allowed {
-                                let _ = stream.shutdown(std::net::Shutdown::Both).await;
-                                return;
-                            }
+                    if let Some(rl) = rate_limiter_arc.as_ref()
+                        && !ip.is_unspecified()
+                    {
+                        use super::ratelimit::RateLimiter;
+                        let result = rl.check(ip.to_string().into());
+                        if !result.allowed {
+                            let _ = stream.shutdown(std::net::Shutdown::Both).await;
+                            return;
                         }
+                    }
 
-                        let tls_stream = match tls_acceptor.accept(stream).await {
-                            Ok(s) => s,
-                            Err(e) => {
-                                eprintln!("H2 TLS handshake error: {e}");
-                                return;
-                            }
-                        };
-
-                        use crate::network::http::h2_server::serve;
-                        let service = factory.async_service(id);
-                        if let Err(e) = serve(tls_stream, service, &h2_cfg, peer_addr).await {
-                            eprintln!("h2 serve got an error: {e}");
+                    let tls_stream = match tls_acceptor.accept(stream).await {
+                        Ok(s) => s,
+                        Err(e) => {
+                            eprintln!("H2 TLS handshake error: {e}");
+                            return;
                         }
-                    })
-                    .detach();
+                    };
+
+                    if let Ok(_) = sem.try_acquire(1) {
+                        glommio::spawn_local(async move {
+                            // Hold the permit until the end of this session
+                            let _guard = permit;
+
+                            use crate::network::http::h2_server::serve;
+                            let service = factory.async_service(id);
+                            if let Err(e) = serve(tls_stream, service, &h2_cfg, peer_addr).await {
+                                eprintln!("h2 serve got an error: {e}");
+                            }
+                        })
+                        .detach();
+                    } else {
+                        // No available session slots, drop the connection
+                        drop(tls_stream);
+                    }
                 }
             }
         })
@@ -416,7 +415,6 @@ fn make_listener(
     addr: SocketAddr,
     protocol: socket2::Protocol,
     backlog: usize,
-    io_timeout: std::time::Duration,
 ) -> std::io::Result<glommio::net::TcpListener> {
     use socket2::{Domain, Socket, Type};
     use std::os::fd::{FromRawFd, IntoRawFd};
@@ -440,8 +438,6 @@ fn make_listener(
         target_os = "freebsd"
     ))]
     sock.set_reuse_port(true)?;
-    sock.set_read_timeout(Some(io_timeout))?;
-    sock.set_write_timeout(Some(io_timeout))?;
     sock.bind(&addr.into())?;
 
     let backlog: i32 = if backlog == 0 {
