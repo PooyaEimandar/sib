@@ -47,7 +47,10 @@ impl Default for H2Config {
 }
 
 pub trait HFactory: Send + Sync + Sized + 'static {
+    #[cfg(feature = "net-h1-server")]
     type Service: crate::network::http::session::HService + Send;
+
+    #[cfg(all(feature = "net-h2-server", target_os = "linux"))]
     type HAsyncService: crate::network::http::session::HAsyncService + Send;
 
     // create a new http service for each connection
