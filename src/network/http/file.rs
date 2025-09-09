@@ -656,7 +656,7 @@ pub fn encode_gzip<T: AsRef<[u8]>>(input: T, level: u32) -> std::io::Result<Byte
 
 #[cfg(test)]
 mod tests {
-    use crate::network::http::session::{HAsyncService, HService, Session};
+    use crate::network::http::session::{HService, Session};
     use crate::network::http::{
         file::{EncodingType, FileInfo, serve},
         server::HFactory,
@@ -664,6 +664,9 @@ mod tests {
     use dashmap::DashMap;
     use http::HeaderMap;
     use std::sync::OnceLock;
+
+    #[cfg(all(feature = "net-h2-server", target_os = "linux"))]
+    use crate::network::http::session::HAsyncService;
 
     struct FileServer<T>(pub T);
 
@@ -674,6 +677,7 @@ mod tests {
         FILE_CACHE.get_or_init(|| DashMap::with_capacity(128))
     }
 
+    #[cfg(feature = "net-h1-server")]
     impl HService for FileService {
         fn call<S: Session>(&mut self, session: &mut S) -> std::io::Result<()> {
             const MIN_BYTES_ON_THE_FLY_SIZE: u64 = 1024;
@@ -706,6 +710,7 @@ mod tests {
         }
     }
 
+    #[cfg(all(feature = "net-h2-server", target_os = "linux"))]
     #[async_trait::async_trait(?Send)]
     impl HAsyncService for FileService {
         async fn call<SE: Session>(&mut self, session: &mut SE) -> std::io::Result<()> {
@@ -735,7 +740,10 @@ mod tests {
     }
 
     impl HFactory for FileServer<FileService> {
+        #[cfg(feature = "net-h1-server")]
         type Service = FileService;
+
+        #[cfg(all(feature = "net-h2-server", target_os = "linux"))]
         type HAsyncService = FileService;
 
         #[cfg(feature = "net-h1-server")]
@@ -830,23 +838,27 @@ mod tests {
             threads.push(h1_handle);
         }
 
-        let h2_handle = std::thread::spawn(move || {
-            use crate::network::http::server::H2Config;
-            let addr = "0.0.0.0:8081";
-            let cert_pem = certs.0.clone();
-            let key_pem = certs.1.clone();
-            let id = std::thread::current().id();
-            println!("Starting H2 server on {addr} with thread: {id:?}");
-            FileServer(FileService)
-                .start_h2_tls(
-                    addr,
-                    (None, cert_pem.as_bytes(), key_pem.as_bytes()),
-                    H2Config::default(),
-                    None,
-                )
-                .unwrap_or_else(|_| panic!("H2 file server failed to start for thread {id:?}"));
-        });
-        threads.push(h2_handle);
+        cfg_if::cfg_if! {
+                if #[cfg(all(feature = "net-h2-server", target_os = "linux"))] {
+                    let h2_handle = std::thread::spawn(move || {
+                        use crate::network::http::server::H2Config;
+                        let addr = "0.0.0.0:8081";
+                        let cert_pem = certs.0.clone();
+                        let key_pem = certs.1.clone();
+                        let id = std::thread::current().id();
+                        println!("Starting H2 server on {addr} with thread: {id:?}");
+                        FileServer(FileService)
+                            .start_h2_tls(
+                                addr,
+                                (None, cert_pem.as_bytes(), key_pem.as_bytes()),
+                                H2Config::default(),
+                                None,
+                            )
+                            .unwrap_or_else(|_| panic!("H2 file server failed to start for thread {id:?}"));
+                    });
+                    threads.push(h2_handle);
+            }
+        }
 
         // Wait for all threads to complete (they won’t unless crashed)
         for handle in threads {
