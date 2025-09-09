@@ -260,6 +260,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         use rustls::pki_types::{CertificateDer, PrivateKeyDer};
         use rustls_pemfile::{certs, pkcs8_private_keys};
 
+        // --- Load cert & key -----------------------------------------------------
         let certs: Vec<CertificateDer<'static>> = {
             let mut reader = std::io::Cursor::new(chain_cert_key.1);
             certs(&mut reader)
@@ -291,6 +292,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
             }
         };
 
+        // --- TLS config ----------------------------------------------------------
         let mut cfg = rustls::ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(certs, key)
@@ -301,7 +303,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                 )
             })?;
 
-        // Set ALPN protocols to support HTTP/2 and HTTP/1.1
+        // ALPN: h2 then h1.1
         cfg.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
         let tls_acceptor = futures_rustls::TlsAcceptor::from(std::sync::Arc::new(cfg));
@@ -309,104 +311,116 @@ pub trait HFactory: Send + Sync + Sized + 'static {
 
         let factory = std::sync::Arc::new(self);
         let rate_limiter_arc = std::sync::Arc::new(rate_limiter);
+
         glommio::LocalExecutorPoolBuilder::new(glommio::PoolPlacement::MaxSpread(
             h2_cfg.num_of_shards,
             glommio::CpuSet::online().ok(),
         ))
         .on_all_shards(move || {
+            // Per-shard clones (owned; 'static)
             let tls_acceptor = tls_acceptor.clone();
             let factory = factory.clone();
             let h2_cfg = h2_cfg.clone();
             let rate_limiter_arc = rate_limiter_arc.clone();
 
             async move {
-                let id = glommio::executor().id();
+                let shard_id = glommio::executor().id();
+
+                // Listener per shard with SO_REUSEPORT (see make_listener below)
                 #[cfg(unix)]
                 let listener =
                     match make_listener(socket_addr, socket2::Protocol::TCP, h2_cfg.backlog) {
                         Ok(l) => l,
                         Err(e) => {
-                            eprintln!("Failed to create h2 listener on address {socket_addr}: {e}");
+                            eprintln!("Failed to create h2 listener on {socket_addr}: {e}");
                             return;
                         }
                     };
                 #[cfg(not(unix))]
-                let listener = match TcpListener::bind(addr) {
+                let listener = match TcpListener::bind(socket_addr) {
                     Ok(l) => l,
                     Err(e) => {
-                        eprintln!("Failed to create h2 listener on address {socket_addr}: {e}");
+                        eprintln!("Failed to create h2 listener on {socket_addr}: {e}");
                         return;
                     }
                 };
 
-                // Generous concurrency budget (tune to your box)
+                // Per-shard concurrency budget
+                println!("Shard {shard_id} listening for H2/TLS on {socket_addr}");
+
                 let sem = std::rc::Rc::new(glommio::sync::Semaphore::new(h2_cfg.max_sessions));
 
-                println!("Shard {id} listening on H2/TLS on {socket_addr}");
-
                 loop {
-                    let permit = std::rc::Rc::clone(&sem).acquire(1).await;
-
-                    let stream = match listener.accept().await {
-                        Ok(s) => s,
+                    // Acquire a session slot (or skip if none available)
+                    let sess_token = match std::rc::Rc::clone(&sem).try_acquire_static_permit(1) {
+                        Ok(p) => p,
                         Err(_) => {
-                            drop(permit);
                             continue;
                         }
                     };
-                    // Reduce head-of-line pauses within a stream mux
-                    stream.set_nodelay(true).ok();
 
-                    let factory = factory.clone();
-                    let tls_acceptor = tls_acceptor.clone();
-                    let h2_cfg = h2_cfg.clone();
-                    let rate_limiter_arc = rate_limiter_arc.clone();
-
-                    let peer_addr = stream.peer_addr().unwrap_or_else(|_| {
-                        SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0)
-                    });
-                    let ip = peer_addr.ip();
-
-                    if let Some(rl) = rate_limiter_arc.as_ref()
-                        && !ip.is_unspecified()
-                    {
-                        use super::ratelimit::RateLimiter;
-                        let result = rl.check(ip.to_string().into());
-                        if !result.allowed {
-                            let _ = stream.shutdown(std::net::Shutdown::Both).await;
-                            return;
-                        }
-                    }
-
-                    let tls_stream = match tls_acceptor.accept(stream).await {
+                    // Accept from listener
+                    let stream = match listener.accept().await {
                         Ok(s) => s,
                         Err(e) => {
-                            eprintln!("H2 TLS handshake error: {e}");
-                            return;
+                            eprintln!("accept error on shard {shard_id}: {e}");
+                            continue;
                         }
                     };
 
-                    if let Ok(_) = sem.try_acquire(1) {
-                        glommio::spawn_local(async move {
-                            // Hold the permit until the end of this session
-                            let _guard = permit;
+                    // Small TCP tweak
+                    let _ = stream.set_nodelay(true);
+
+                    // Rate-limit check
+                    let peer_addr = stream.peer_addr().unwrap_or_else(|_| {
+                        SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0)
+                    });
+                    if let Some(rl) = rate_limiter_arc.as_ref() {
+                        let ip = peer_addr.ip();
+                        if !ip.is_unspecified() {
+                            use super::ratelimit::RateLimiter;
+                            let result = rl.check(ip.to_string().into());
+                            if !result.allowed {
+                                let _ = stream.shutdown(std::net::Shutdown::Both).await;
+                                continue;
+                            }
+                        }
+                    }
+
+                    // TLS handshake
+                    let tls_stream = match tls_acceptor.accept(stream).await {
+                        Ok(s) => s,
+                        Err(e) => {
+                            eprintln!("H2 TLS handshake error (shard {shard_id}): {e}");
+                            continue;
+                        }
+                    };
+
+                    // Clone owned values OUTSIDE the async block to avoid temporaries
+                    let factory_cloned = std::sync::Arc::clone(&factory);
+                    let h2_cfg_cloned = h2_cfg.clone();
+                    let peer = peer_addr;
+
+                    glommio::spawn_local({
+                        async move {
+                            // Hold the slot for the lifetime of the session
+                            let _permit = sess_token;
 
                             use crate::network::http::h2_server::serve;
-                            let service = factory.async_service(id);
-                            if let Err(e) = serve(tls_stream, service, &h2_cfg, peer_addr).await {
-                                eprintln!("h2 serve got an error: {e}");
+                            let service = factory_cloned.async_service(shard_id);
+
+                            if let Err(e) = serve(tls_stream, service, &h2_cfg_cloned, peer).await {
+                                eprintln!("h2 serve error (shard {shard_id}): {e}");
                             }
-                        })
-                        .detach();
-                    } else {
-                        // No available session slots, drop the connection
-                        drop(tls_stream);
-                    }
+                        }
+                    })
+                    .detach();
                 }
             }
         })
         .unwrap()
         .join_all();
+
         Ok(())
     }
 }
