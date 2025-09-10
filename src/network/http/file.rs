@@ -164,16 +164,9 @@ fn serve_fn<S: Session>(
                     && file_info.size <= max_bytes_on_the_fly_size
                     && !range_requested
                 {
-                    return compress_then_respond(
-                        session,
-                        rsp_headers,
-                        &file_info.path,
-                        file_info.mime_type.as_ref(),
-                        &file_info.etag,
-                        &file_info.last_modified_str,
-                        "br",
-                        |b| encode_brotli(b, buffer_size, quality, lgwindow),
-                    );
+                    return compress_then_respond(session, rsp_headers, &file_info, "br", |b| {
+                        encode_brotli(b, buffer_size, quality, lgwindow)
+                    });
                 } else {
                     // fall back to original file
                     (file_info.path.clone(), file_info.size)
@@ -192,16 +185,9 @@ fn serve_fn<S: Session>(
                     && file_info.size <= max_bytes_on_the_fly_size
                     && !range_requested
                 {
-                    return compress_then_respond(
-                        session,
-                        rsp_headers,
-                        &file_info.path,
-                        file_info.mime_type.as_ref(),
-                        &file_info.etag,
-                        &file_info.last_modified_str,
-                        "gzip",
-                        |b| encode_gzip(b, level),
-                    );
+                    return compress_then_respond(session, rsp_headers, &file_info, "gzip", |b| {
+                        encode_gzip(b, level)
+                    });
                 } else {
                     // fall back to original file
                     (file_info.path.clone(), file_info.size)
@@ -220,16 +206,9 @@ fn serve_fn<S: Session>(
                     && file_info.size <= max_bytes_on_the_fly_size
                     && !range_requested
                 {
-                    return compress_then_respond(
-                        session,
-                        rsp_headers,
-                        &file_info.path,
-                        file_info.mime_type.as_ref(),
-                        &file_info.etag,
-                        &file_info.last_modified_str,
-                        "zstd",
-                        |b| encode_zstd(b, level),
-                    );
+                    return compress_then_respond(session, rsp_headers, &file_info, "zstd", |b| {
+                        encode_zstd(b, level)
+                    });
                 } else {
                     // fall back to original file
                     (file_info.path.clone(), file_info.size)
@@ -502,22 +481,19 @@ pub fn load_file_cache(capacity: usize) -> FileCache {
 fn compress_then_respond<S: Session>(
     session: &mut S,
     headers: &mut HeaderMap,
-    src_path: &PathBuf,
-    mime_type: &str,
-    etag: &str,
-    last_modified_str: &str,
+    file_info: &FileInfo,
     encoding_name: &str,
     compress_fn: impl Fn(&[u8]) -> std::io::Result<Bytes>,
 ) -> std::io::Result<()> {
     let res = (|| {
-        let f = std::fs::File::open(src_path)?;
-        let mmap = unsafe { memmap2::Mmap::map(&f) }.map_err(|e| std::io::Error::other(e))?;
+        let f = std::fs::File::open(&file_info.path)?;
+        let mmap = unsafe { memmap2::Mmap::map(&f) }.map_err(std::io::Error::other)?;
         compress_fn(&mmap[..])
     })();
 
     match res {
         Ok(compressed) => {
-            let etag_val = rep_etag(etag, Some(encoding_name));
+            let etag_val = rep_etag(&file_info.etag, Some(encoding_name));
             headers.extend([
                 (
                     header::CONTENT_ENCODING,
@@ -530,7 +506,7 @@ fn compress_then_respond<S: Session>(
                 ),
                 (
                     header::CONTENT_TYPE,
-                    HeaderValue::from_str(mime_type).map_err(std::io::Error::other)?,
+                    HeaderValue::from_str(&file_info.mime_type).map_err(std::io::Error::other)?,
                 ),
                 (
                     header::ETAG,
@@ -543,7 +519,8 @@ fn compress_then_respond<S: Session>(
                 (header::VARY, HeaderValue::from_static("Accept-Encoding")),
                 (
                     header::LAST_MODIFIED,
-                    HeaderValue::from_str(last_modified_str).map_err(std::io::Error::other)?,
+                    HeaderValue::from_str(&file_info.last_modified_str)
+                        .map_err(std::io::Error::other)?,
                 ),
             ]);
 
@@ -556,7 +533,7 @@ fn compress_then_respond<S: Session>(
         Err(e) => {
             eprintln!(
                 "Compression failed ({encoding_name}) for {}: {e}",
-                src_path.display()
+                file_info.path.display()
             );
             session
                 .status_code(StatusCode::INTERNAL_SERVER_ERROR)
@@ -846,7 +823,7 @@ pub async fn serve_h2_streaming<S: Session>(
                 stream
                     .next_capacity()
                     .await
-                    .map_err(|e| glommio::GlommioError::IoError(e))
+                    .map_err(glommio::GlommioError::IoError)
             })
             .await
             {
@@ -917,7 +894,7 @@ mod tests {
                 http::HeaderValue::from_static("close"),
             );
 
-            let rel_file = "/home/parallels/sib/target/debug/libsib.so"; //file!();
+            let rel_file = file!();
             use crate::network::http::file::serve;
             serve(
                 session,
@@ -948,7 +925,7 @@ mod tests {
             const H2_STREAM_CHUNK_SIZE: usize = 128 * 1024; // 128 KB
 
             let mut rsp_headers = HeaderMap::new();
-            let rel_file = "/home/parallels/sib/target/debug/libsib.so"; //file!();
+            let rel_file = file!();
 
             use crate::network::http::file::serve_async;
             if let Err(e) = serve_async(

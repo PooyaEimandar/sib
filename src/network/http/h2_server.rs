@@ -73,7 +73,7 @@ where
         .map_err(|e| std::io::Error::other(format!("h2 handshake error: {e}")))?;
 
     // Share the per-connection service among request tasks
-    let svc = std::rc::Rc::new(std::cell::RefCell::new(service));
+    let svc = std::rc::Rc::new(std::cell::RefCell::new(Some(service)));
 
     while let Some(r) = conn.accept().await {
         let (request, respond) = match r {
@@ -92,12 +92,25 @@ where
         glommio::spawn_local(async move {
             use crate::network::http::h2_session::H2Session;
 
-            // serialized mutable borrow of the service
-            let mut svc_borrow = svc_rc.borrow_mut();
-            if let Err(e) = svc_borrow
+            let mut service = loop {
+                if let Some(s) = {
+                    let mut guard = svc_rc.borrow_mut();
+                    guard.take()
+                } {
+                    break s;
+                }
+                glommio::yield_if_needed().await;
+            };
+
+            // run the service
+            let result = service
                 .call(&mut H2Session::new(peer_addr, request, respond))
-                .await
-            {
+                .await;
+
+            // Put the service back for the next request.
+            *svc_rc.borrow_mut() = Some(service);
+
+            if let Err(e) = result {
                 eprintln!("h2 service error: {e}");
             }
         })
