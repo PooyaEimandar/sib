@@ -18,8 +18,32 @@ pub struct H2Stream {
 }
 
 impl H2Stream {
+    /// Get the HTTP/2 stream ID
     pub fn stream_id(&self) -> u32 {
         self.stream.stream_id().as_u32()
+    }
+
+    /// get capacity
+    pub fn capacity(&self) -> usize {
+        self.stream.capacity()
+    }
+
+    /// Request to reserve capacity to send data
+    pub fn reserve_capacity(&mut self, size: usize) {
+        self.stream.reserve_capacity(size);
+    }
+
+    /// Async: wait until the peer grants more capacity
+    pub async fn next_capacity(&mut self) -> std::io::Result<usize> {
+        use futures_lite::future::poll_fn;
+        match poll_fn(|cx| self.stream.poll_capacity(cx)).await {
+            Some(res) => {
+                res.map_err(|e| std::io::Error::other(format!("failed to poll capacity: {}", e)))
+            }
+            None => Err(std::io::Error::other(
+                "h2 stream capacity == None (reset/closed)",
+            )),
+        }
     }
 
     /// Send a chunk of data. If `end_stream` is true, this also ends the stream.

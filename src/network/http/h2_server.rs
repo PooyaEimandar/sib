@@ -48,7 +48,7 @@ impl<S: AsyncWrite + Unpin> TAsyncWrite for TokioStream<S> {
 
 pub(crate) async fn serve<S, T>(
     stream: S,
-    mut service: T,
+    service: T,
     config: &H2Config,
     peer: SocketAddr,
 ) -> std::io::Result<()>
@@ -68,15 +68,17 @@ where
     }
 
     let mut conn: h2::server::Connection<TokioStream<S>, bytes::Bytes> = builder
-        .handshake::<TokioStream<S>, bytes::Bytes>(TokioStream(stream))
+        .handshake(TokioStream(stream))
         .await
-        .map_err(|e| std::io::Error::other(format!("h2 error: {}", e)))?;
+        .map_err(|e| std::io::Error::other(format!("h2 handshake error: {e}")))?;
+
+    // Share the per-connection service among request tasks
+    let svc = std::rc::Rc::new(std::cell::RefCell::new(service));
 
     while let Some(r) = conn.accept().await {
         let (request, respond) = match r {
             Ok(x) => x,
             Err(e) => {
-                // Protocol / IO close.
                 if e.is_io() {
                     return Ok(());
                 }
@@ -84,17 +86,25 @@ where
             }
         };
 
-        use crate::network::http::h2_session::H2Session;
-        if let Err(e) = service
-            .call(&mut H2Session::new(peer, request, respond))
-            .await
-        {
-            eprintln!("h2 service got an error: {}", e);
-            if e.kind() == std::io::ErrorKind::ConnectionAborted {
-                // only abort if the service explicitly wants hard close
-                conn.graceful_shutdown();
+        let svc_rc = std::rc::Rc::clone(&svc);
+        let peer_addr = peer;
+
+        glommio::spawn_local(async move {
+            use crate::network::http::h2_session::H2Session;
+
+            // serialized mutable borrow of the service
+            let mut svc_borrow = svc_rc.borrow_mut();
+            if let Err(e) = svc_borrow
+                .call(&mut H2Session::new(peer_addr, request, respond))
+                .await
+            {
+                eprintln!("h2 service error: {e}");
             }
-        }
+        })
+        .detach();
+
+        // Time on single-thread executors
+        glommio::yield_if_needed().await;
     }
 
     Ok(())

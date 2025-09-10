@@ -49,13 +49,14 @@ pub struct FileInfo {
 
 pub type FileCache = DashMap<String, FileInfo>;
 
-pub fn serve<S: Session>(
+fn serve_fn<S: Session>(
     session: &mut S,
     path: &str,
     file_cache: &FileCache,
     rsp_headers: &mut http::HeaderMap,
     encoding_order: &[EncodingType],
     min_max_compress_thresholds: (u64, u64),
+    file_tuple: &mut Option<(StatusCode, PathBuf, u64, u64)>,
 ) -> std::io::Result<()> {
     let min_bytes_on_the_fly_size = min_max_compress_thresholds.0;
     let max_bytes_on_the_fly_size = min_max_compress_thresholds.1;
@@ -169,6 +170,7 @@ pub fn serve<S: Session>(
                         &file_info.path,
                         file_info.mime_type.as_ref(),
                         &file_info.etag,
+                        &file_info.last_modified_str,
                         "br",
                         |b| encode_brotli(b, buffer_size, quality, lgwindow),
                     );
@@ -196,6 +198,7 @@ pub fn serve<S: Session>(
                         &file_info.path,
                         file_info.mime_type.as_ref(),
                         &file_info.etag,
+                        &file_info.last_modified_str,
                         "gzip",
                         |b| encode_gzip(b, level),
                     );
@@ -223,6 +226,7 @@ pub fn serve<S: Session>(
                         &file_info.path,
                         file_info.mime_type.as_ref(),
                         &file_info.etag,
+                        &file_info.last_modified_str,
                         "zstd",
                         |b| encode_zstd(b, level),
                     );
@@ -239,43 +243,42 @@ pub fn serve<S: Session>(
         .and_then(|h| parse_byte_range(&h, total_size));
 
     let etag_to_send = rep_etag(&file_info.etag, applied_encoding);
-    if let Some(header_val) = session.req_header(&header::IF_NONE_MATCH) {
-        if if_none_match_contains(&header_val, &etag_to_send) {
-            if let Some(enc) = applied_encoding {
-                rsp_headers.insert(
-                    header::CONTENT_ENCODING,
-                    HeaderValue::from_str(enc).map_err(|e| std::io::Error::other(e))?,
-                );
-            }
-            rsp_headers.extend([
-                (header::CONTENT_LENGTH, HeaderValue::from_static("0")),
-                (
-                    header::ETAG,
-                    HeaderValue::from_str(&etag_to_send).map_err(|e| std::io::Error::other(e))?,
-                ),
-                (
-                    header::LAST_MODIFIED,
-                    HeaderValue::from_str(&file_info.last_modified_str)
-                        .map_err(|e| std::io::Error::other(e))?,
-                ),
-                (header::VARY, HeaderValue::from_static("Accept-Encoding")),
-            ]);
-            return session
-                .status_code(StatusCode::NOT_MODIFIED)
-                .headers(rsp_headers)?
-                .body(Bytes::new())
-                .eom();
+    if let Some(header_val) = session.req_header(&header::IF_NONE_MATCH)
+        && if_none_match_contains(&header_val, &etag_to_send)
+    {
+        if let Some(enc) = applied_encoding {
+            rsp_headers.insert(
+                header::CONTENT_ENCODING,
+                HeaderValue::from_str(enc).map_err(std::io::Error::other)?,
+            );
         }
+        rsp_headers.extend([
+            (header::CONTENT_LENGTH, HeaderValue::from_static("0")),
+            (
+                header::ETAG,
+                HeaderValue::from_str(&etag_to_send).map_err(std::io::Error::other)?,
+            ),
+            (
+                header::LAST_MODIFIED,
+                HeaderValue::from_str(&file_info.last_modified_str)
+                    .map_err(std::io::Error::other)?,
+            ),
+            (header::VARY, HeaderValue::from_static("Accept-Encoding")),
+        ]);
+        return session
+            .status_code(StatusCode::NOT_MODIFIED)
+            .headers(rsp_headers)?
+            .body(Bytes::new())
+            .eom();
     }
     rsp_headers.extend([
         (
             header::CONTENT_TYPE,
-            HeaderValue::from_str(&file_info.mime_type).map_err(|e| std::io::Error::other(e))?,
+            HeaderValue::from_str(&file_info.mime_type).map_err(std::io::Error::other)?,
         ),
         (
             header::LAST_MODIFIED,
-            HeaderValue::from_str(&file_info.last_modified_str)
-                .map_err(|e| std::io::Error::other(e))?,
+            HeaderValue::from_str(&file_info.last_modified_str).map_err(std::io::Error::other)?,
         ),
         (
             header::CONTENT_DISPOSITION,
@@ -283,7 +286,7 @@ pub fn serve<S: Session>(
         ),
         (
             header::ETAG,
-            HeaderValue::from_str(&etag_to_send).map_err(|e| std::io::Error::other(e))?,
+            HeaderValue::from_str(&etag_to_send).map_err(std::io::Error::other)?,
         ),
         (header::VARY, HeaderValue::from_static("Accept-Encoding")),
     ]);
@@ -294,12 +297,12 @@ pub fn serve<S: Session>(
             (
                 header::CONTENT_RANGE,
                 HeaderValue::from_str(&format!("bytes {}-{}/{}", r.start, r.end - 1, total_size))
-                    .map_err(|e| std::io::Error::other(e))?,
+                    .map_err(std::io::Error::other)?,
             ),
             (
                 header::CONTENT_LENGTH,
                 HeaderValue::from_str(&content_length.to_string())
-                    .map_err(|e| std::io::Error::other(e))?,
+                    .map_err(std::io::Error::other)?,
             ),
         ]);
 
@@ -307,7 +310,7 @@ pub fn serve<S: Session>(
     } else {
         rsp_headers.insert(
             header::CONTENT_LENGTH,
-            HeaderValue::from_str(&total_size.to_string()).map_err(|e| std::io::Error::other(e))?,
+            HeaderValue::from_str(&total_size.to_string()).map_err(std::io::Error::other)?,
         );
         (StatusCode::OK, 0, total_size)
     };
@@ -321,33 +324,133 @@ pub fn serve<S: Session>(
             .eom();
     }
 
-    let mmap = match std::fs::File::open(&file_path) {
-        Ok(std_file) => match unsafe { memmap2::Mmap::map(&std_file) } {
-            Ok(mmap) => mmap,
+    *file_tuple = Some((status, file_path, start, end));
+    Ok(())
+}
+
+pub fn serve<S: Session>(
+    session: &mut S,
+    path: &str,
+    file_cache: &FileCache,
+    rsp_headers: &mut http::HeaderMap,
+    encoding_order: &[EncodingType],
+    min_max_compress_thresholds: (u64, u64),
+) -> std::io::Result<()> {
+    let mut file_tuple: Option<(StatusCode, PathBuf, u64, u64)> = None;
+    let result = serve_fn(
+        session,
+        path,
+        file_cache,
+        rsp_headers,
+        encoding_order,
+        min_max_compress_thresholds,
+        &mut file_tuple,
+    );
+
+    // If we have a file tuple, it means it is ready to be served directly from mmap
+    if let Some((status, file_path, start, end)) = file_tuple {
+        let mmap = match std::fs::File::open(&file_path) {
+            Ok(std_file) => match unsafe { memmap2::Mmap::map(&std_file) } {
+                Ok(mmap) => mmap,
+                Err(e) => {
+                    eprintln!("Failed to memory-map file: {}: {}", file_path.display(), e);
+                    return session
+                        .status_code(StatusCode::INTERNAL_SERVER_ERROR)
+                        .headers(rsp_headers)?
+                        .body(Bytes::new())
+                        .eom();
+                }
+            },
             Err(e) => {
-                eprintln!("Failed to memory-map file: {}: {}", file_path.display(), e);
+                eprintln!("Failed to open file: {}: {}", file_path.display(), e);
                 return session
                     .status_code(StatusCode::INTERNAL_SERVER_ERROR)
                     .headers(rsp_headers)?
                     .body(Bytes::new())
                     .eom();
             }
-        },
-        Err(e) => {
-            eprintln!("Failed to open file: {}: {}", file_path.display(), e);
+        };
+
+        return session
+            .status_code(status)
+            .headers(rsp_headers)?
+            .body(Bytes::copy_from_slice(&mmap[start as usize..end as usize]))
+            .eom();
+    }
+    // we have already sent the response
+    result
+}
+
+#[cfg(all(feature = "net-h2-server", target_os = "linux"))]
+pub async fn serve_async<S: Session>(
+    session: &mut S,
+    path: &str,
+    file_cache: &FileCache,
+    rsp_headers: &mut http::HeaderMap,
+    encoding_order: &[EncodingType],
+    min_max_compress_thresholds: (u64, u64),
+    h2_stream_threshold_and_chunk_size: (u64, usize),
+) -> std::io::Result<()> {
+    let mut file_tuple: Option<(StatusCode, PathBuf, u64, u64)> = None;
+    let result = serve_fn(
+        session,
+        path,
+        file_cache,
+        rsp_headers,
+        encoding_order,
+        min_max_compress_thresholds,
+        &mut file_tuple,
+    );
+
+    // If we have a file tuple, it means it is ready to be served directly from mmap
+    if let Some((status, file_path, start, end)) = file_tuple {
+        let is_h2 = session.req_http_version() == http::Version::HTTP_2;
+        let bytes_to_send = end - start;
+
+        if is_h2 && bytes_to_send >= h2_stream_threshold_and_chunk_size.0 {
+            // HTTP/2 streaming
+            return serve_h2_streaming(
+                session,
+                status,
+                rsp_headers,
+                &file_path,
+                start,
+                end,
+                h2_stream_threshold_and_chunk_size.1,
+            )
+            .await;
+        } else {
+            // Send all at once
+            let mmap = match std::fs::File::open(&file_path) {
+                Ok(std_file) => match unsafe { memmap2::Mmap::map(&std_file) } {
+                    Ok(mmap) => mmap,
+                    Err(e) => {
+                        eprintln!("Failed to memory-map file: {}: {}", file_path.display(), e);
+                        return session
+                            .status_code(StatusCode::INTERNAL_SERVER_ERROR)
+                            .headers(rsp_headers)?
+                            .body(Bytes::new())
+                            .eom();
+                    }
+                },
+                Err(e) => {
+                    eprintln!("Failed to open file: {}: {}", file_path.display(), e);
+                    return session
+                        .status_code(StatusCode::INTERNAL_SERVER_ERROR)
+                        .headers(rsp_headers)?
+                        .body(Bytes::new())
+                        .eom();
+                }
+            };
+
             return session
-                .status_code(StatusCode::INTERNAL_SERVER_ERROR)
+                .status_code(status)
                 .headers(rsp_headers)?
-                .body(Bytes::new())
+                .body(Bytes::copy_from_slice(&mmap[start as usize..end as usize]))
                 .eom();
         }
-    };
-
-    return session
-        .status_code(status)
-        .headers(rsp_headers)?
-        .body(Bytes::copy_from_slice(&mmap[start as usize..end as usize]))
-        .eom();
+    }
+    result
 }
 
 #[inline]
@@ -402,13 +505,13 @@ fn compress_then_respond<S: Session>(
     src_path: &PathBuf,
     mime_type: &str,
     etag: &str,
+    last_modified_str: &str,
     encoding_name: &str,
     compress_fn: impl Fn(&[u8]) -> std::io::Result<Bytes>,
 ) -> std::io::Result<()> {
     let res = (|| {
         let f = std::fs::File::open(src_path)?;
-        let mmap = unsafe { memmap2::Mmap::map(&f) }
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let mmap = unsafe { memmap2::Mmap::map(&f) }.map_err(|e| std::io::Error::other(e))?;
         compress_fn(&mmap[..])
     })();
 
@@ -418,43 +521,47 @@ fn compress_then_respond<S: Session>(
             headers.extend([
                 (
                     header::CONTENT_ENCODING,
-                    HeaderValue::from_str(encoding_name).map_err(|e| std::io::Error::other(e))?,
+                    HeaderValue::from_str(encoding_name).map_err(std::io::Error::other)?,
                 ),
                 (
                     header::CONTENT_LENGTH,
                     HeaderValue::from_str(&compressed.len().to_string())
-                        .map_err(|e| std::io::Error::other(e))?,
+                        .map_err(std::io::Error::other)?,
                 ),
                 (
                     header::CONTENT_TYPE,
-                    HeaderValue::from_str(mime_type).map_err(|e| std::io::Error::other(e))?,
+                    HeaderValue::from_str(mime_type).map_err(std::io::Error::other)?,
                 ),
                 (
                     header::ETAG,
-                    HeaderValue::from_str(&etag_val).map_err(|e| std::io::Error::other(e))?,
+                    HeaderValue::from_str(&etag_val).map_err(std::io::Error::other)?,
                 ),
                 (
                     header::CONTENT_DISPOSITION,
                     HeaderValue::from_static("inline"),
                 ),
                 (header::VARY, HeaderValue::from_static("Accept-Encoding")),
+                (
+                    header::LAST_MODIFIED,
+                    HeaderValue::from_str(last_modified_str).map_err(std::io::Error::other)?,
+                ),
             ]);
 
-            return session
-                .status_code(StatusCode::INTERNAL_SERVER_ERROR)
+            session
+                .status_code(StatusCode::OK)
                 .headers(headers)?
                 .body(compressed)
-                .eom();
+                .eom()
         }
         Err(e) => {
             eprintln!(
                 "Compression failed ({encoding_name}) for {}: {e}",
                 src_path.display()
             );
-            return session
+            session
                 .status_code(StatusCode::INTERNAL_SERVER_ERROR)
                 .body(Bytes::new())
-                .eom();
+                .eom()
         }
     }
 }
@@ -471,7 +578,7 @@ fn generate_file_info(
         .unwrap_or_default();
 
     let etag = format!("\"{}-{}\"", duration.as_secs(), meta.len());
-    let mime_type = mime_guess::from_path(&canonical)
+    let mime_type = mime_guess::from_path(canonical)
         .first()
         .unwrap_or(mime::APPLICATION_OCTET_STREAM);
 
@@ -569,10 +676,10 @@ fn choose_encoding(accept: &HeaderValue, mime: &Mime, order: &[EncodingType]) ->
         let mut q: f32 = 1.0;
         for p in parts {
             let p = p.trim();
-            if let Some(v) = p.strip_prefix("q=").or_else(|| p.strip_prefix("Q=")) {
-                if let Ok(val) = v.trim().parse::<f32>() {
-                    q = val;
-                }
+            if let Some(v) = p.strip_prefix("q=").or_else(|| p.strip_prefix("Q="))
+                && let Ok(val) = v.trim().parse::<f32>()
+            {
+                q = val;
             }
         }
         match token.as_str() {
@@ -654,19 +761,141 @@ pub fn encode_gzip<T: AsRef<[u8]>>(input: T, level: u32) -> std::io::Result<Byte
     Ok(Bytes::from(out))
 }
 
+#[cfg(all(feature = "net-h2-server", target_os = "linux"))]
+pub async fn serve_h2_streaming<S: Session>(
+    session: &mut S,
+    status: http::StatusCode,
+    headers: &mut http::HeaderMap,
+    file_path: &std::path::Path,
+    start: u64,
+    end: u64,
+    chunk_size: usize,
+) -> std::io::Result<()> {
+    use bytes::Bytes;
+    use http::header;
+    use std::convert::TryFrom;
+
+    // Open & stat file
+    let file = std::fs::File::open(file_path)?;
+    let meta = file.metadata()?;
+    let file_len = meta.len();
+
+    // Validate & clamp range
+    if start >= file_len {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("range start {} beyond EOF {}", start, file_len),
+        ));
+    }
+    let end_excl = end.min(file_len).max(start);
+    let total_u64 = end_excl.saturating_sub(start);
+    let total = usize::try_from(total_u64)
+        .map_err(|_| std::io::Error::other("range too large for usize"))?;
+
+    // Map after validation
+    let mmap = unsafe { memmap2::Mmap::map(&file) }
+        .map_err(|e| std::io::Error::other(format!("mmap failed: {e}")))?;
+
+    // Headers
+    headers.insert(
+        header::ACCEPT_RANGES,
+        http::HeaderValue::from_static("bytes"),
+    );
+    headers.insert(
+        header::CONTENT_LENGTH,
+        http::HeaderValue::from_str(&total.to_string())
+            .map_err(|e| std::io::Error::other(format!("bad Content-Length: {e}")))?,
+    );
+    if status == http::StatusCode::PARTIAL_CONTENT && total > 0 {
+        let end_inclusive = end_excl - 1;
+        let cr = format!("bytes {}-{}/{}", start, end_inclusive, file_len);
+        headers.insert(
+            header::CONTENT_RANGE,
+            http::HeaderValue::from_str(&cr)
+                .map_err(|e| std::io::Error::other(format!("bad Content-Range: {e}")))?,
+        );
+    }
+
+    // Send status + headers (no body yet)
+    session.status_code(status).headers(headers)?;
+
+    // Start H2 streaming
+    let mut stream = session.start_h2_streaming()?;
+
+    // Fast-path: empty body (valid even for 206)
+    if total == 0 {
+        stream.send_data(Bytes::new(), true)?;
+        return Ok(());
+    }
+
+    // Ask for all credits up front; H2 will trickle it
+    stream.reserve_capacity(total);
+
+    let mut off = start as usize;
+    let end_usize = end_excl as usize;
+
+    while off < end_usize {
+        // Consume any already granted capacity before awaiting new credit
+        let cap = stream.capacity();
+        if cap == 0 {
+            // Ensure we keep requesting capacity (some peers grant lazily)
+            stream.reserve_capacity(chunk_size);
+
+            // Protect against stalls if WINDOW_UPDATEs stop
+            let cap = match glommio::timer::timeout(std::time::Duration::from_secs(3), async {
+                stream
+                    .next_capacity()
+                    .await
+                    .map_err(|e| glommio::GlommioError::IoError(e))
+            })
+            .await
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    return Err(std::io::Error::other(format!(
+                        "H2 stream capacity error: {e}"
+                    )));
+                }
+            };
+
+            if cap == 0 {
+                // try again
+                continue;
+            }
+        }
+
+        let remaining = end_usize - off;
+        let to_send = cap.min(remaining).min(chunk_size);
+        let last = to_send == remaining;
+
+        // Copy from mmap into Bytes (safe; mmap slice lives long enough)
+        let data = Bytes::copy_from_slice(&mmap[off..off + to_send]);
+
+        // Send DATA; set end_stream on the LAST DATA frame
+        stream.send_data(data, last)?;
+        off += to_send;
+
+        if !last {
+            // Hint more credit if peer is conservative
+            stream.reserve_capacity(chunk_size);
+        }
+
+        glommio::yield_if_needed().await;
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::network::http::session::{HService, Session};
+    use crate::network::http::session::{HAsyncService, HService, Session};
     use crate::network::http::{
-        file::{EncodingType, FileInfo, serve},
+        file::{EncodingType, FileInfo},
         server::HFactory,
     };
     use dashmap::DashMap;
     use http::HeaderMap;
     use std::sync::OnceLock;
-
-    #[cfg(all(feature = "net-h2-server", target_os = "linux"))]
-    use crate::network::http::session::HAsyncService;
 
     struct FileServer<T>(pub T);
 
@@ -677,7 +906,6 @@ mod tests {
         FILE_CACHE.get_or_init(|| DashMap::with_capacity(128))
     }
 
-    #[cfg(feature = "net-h1-server")]
     impl HService for FileService {
         fn call<S: Session>(&mut self, session: &mut S) -> std::io::Result<()> {
             const MIN_BYTES_ON_THE_FLY_SIZE: u64 = 1024;
@@ -689,7 +917,8 @@ mod tests {
                 http::HeaderValue::from_static("close"),
             );
 
-            let rel_file = file!();
+            let rel_file = "/home/parallels/sib/target/debug/libsib.so"; //file!();
+            use crate::network::http::file::serve;
             serve(
                 session,
                 rel_file,
@@ -710,16 +939,19 @@ mod tests {
         }
     }
 
-    #[cfg(all(feature = "net-h2-server", target_os = "linux"))]
     #[async_trait::async_trait(?Send)]
     impl HAsyncService for FileService {
         async fn call<SE: Session>(&mut self, session: &mut SE) -> std::io::Result<()> {
             const MIN_BYTES_ON_THE_FLY_SIZE: u64 = 1024;
             const MAX_BYTES_ON_THE_FLY_SIZE: u64 = 512 * 1024; // 512 KB
+            const H2_STREAM_THRESHOLD: u64 = 256 * 1024; // 256 KB
+            const H2_STREAM_CHUNK_SIZE: usize = 128 * 1024; // 128 KB
 
             let mut rsp_headers = HeaderMap::new();
-            let rel_file = file!();
-            serve(
+            let rel_file = "/home/parallels/sib/target/debug/libsib.so"; //file!();
+
+            use crate::network::http::file::serve_async;
+            if let Err(e) = serve_async(
                 session,
                 rel_file,
                 get_cache(),
@@ -735,15 +967,22 @@ mod tests {
                     EncodingType::None,
                 ],
                 (MIN_BYTES_ON_THE_FLY_SIZE, MAX_BYTES_ON_THE_FLY_SIZE),
+                (H2_STREAM_THRESHOLD, H2_STREAM_CHUNK_SIZE),
             )
+            .await
+            {
+                eprintln!("FileService async failed: {e}");
+                return session
+                    .status_code(http::StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(bytes::Bytes::new())
+                    .eom();
+            };
+            Ok(())
         }
     }
 
     impl HFactory for FileServer<FileService> {
-        #[cfg(feature = "net-h1-server")]
         type Service = FileService;
-
-        #[cfg(all(feature = "net-h2-server", target_os = "linux"))]
         type HAsyncService = FileService;
 
         #[cfg(feature = "net-h1-server")]
@@ -838,27 +1077,23 @@ mod tests {
             threads.push(h1_handle);
         }
 
-        cfg_if::cfg_if! {
-                if #[cfg(all(feature = "net-h2-server", target_os = "linux"))] {
-                    let h2_handle = std::thread::spawn(move || {
-                        use crate::network::http::server::H2Config;
-                        let addr = "0.0.0.0:8081";
-                        let cert_pem = certs.0.clone();
-                        let key_pem = certs.1.clone();
-                        let id = std::thread::current().id();
-                        println!("Starting H2 server on {addr} with thread: {id:?}");
-                        FileServer(FileService)
-                            .start_h2_tls(
-                                addr,
-                                (None, cert_pem.as_bytes(), key_pem.as_bytes()),
-                                H2Config::default(),
-                                None,
-                            )
-                            .unwrap_or_else(|_| panic!("H2 file server failed to start for thread {id:?}"));
-                    });
-                    threads.push(h2_handle);
-            }
-        }
+        let h2_handle = std::thread::spawn(move || {
+            use crate::network::http::server::H2Config;
+            let addr = "0.0.0.0:8081";
+            let cert_pem = certs.0.clone();
+            let key_pem = certs.1.clone();
+            let id = std::thread::current().id();
+            println!("Starting H2 server on {addr} with thread: {id:?}");
+            FileServer(FileService)
+                .start_h2_tls(
+                    addr,
+                    (None, cert_pem.as_bytes(), key_pem.as_bytes()),
+                    H2Config::default(),
+                    None,
+                )
+                .unwrap_or_else(|_| panic!("H2 file server failed to start for thread {id:?}"));
+        });
+        threads.push(h2_handle);
 
         // Wait for all threads to complete (they won’t unless crashed)
         for handle in threads {
