@@ -208,14 +208,31 @@ where
         self
     }
 
-    #[cfg(all(
-        target_os = "linux",
-        any(feature = "net-h2-server", feature = "net-h3-server")
-    ))]
+    #[cfg(all(target_os = "linux", feature = "net-h2-server"))]
     #[inline]
     fn start_h2_streaming(&mut self) -> std::io::Result<super::h2_session::H2Stream> {
         Err(io::Error::other(
             "start_h2_streaming not supported in H1Session",
+        ))
+    }
+
+    #[cfg(all(target_os = "linux", feature = "net-h3-server"))]
+    #[inline]
+    async fn start_h3_streaming(&mut self) -> std::io::Result<()> {
+        Err(std::io::Error::other(
+            "start_h3_streaming not supported in H1Session",
+        ))
+    }
+
+    #[cfg(all(target_os = "linux", feature = "net-h3-server"))]
+    #[inline]
+    async fn send_h3_data(
+        &mut self,
+        _chunk: bytes::Bytes,
+        _end_stream: bool,
+    ) -> std::io::Result<()> {
+        Err(std::io::Error::other(
+            "send_h3_data not supported in H1Session",
         ))
     }
 

@@ -27,6 +27,12 @@ pub trait Session {
     #[cfg(all(feature = "net-h2-server", target_os = "linux"))]
     fn start_h2_streaming(&mut self) -> std::io::Result<super::h2_session::H2Stream>;
 
+    #[cfg(all(feature = "net-h3-server", target_os = "linux"))]
+    async fn start_h3_streaming(&mut self) -> std::io::Result<()>;
+
+    #[cfg(all(feature = "net-h3-server", target_os = "linux"))]
+    async fn send_h3_data(&mut self, chunk: bytes::Bytes, end_stream: bool) -> std::io::Result<()>;
+
     fn header(&mut self, name: HeaderName, value: HeaderValue) -> std::io::Result<&mut Self>;
     fn header_str(&mut self, name: &str, value: &str) -> std::io::Result<&mut Self>;
     fn headers(&mut self, headers: &http::HeaderMap) -> std::io::Result<&mut Self>;

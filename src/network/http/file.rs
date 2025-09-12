@@ -164,9 +164,16 @@ fn serve_fn<S: Session>(
                     && file_info.size <= max_bytes_on_the_fly_size
                     && !range_requested
                 {
-                    return compress_then_respond(session, rsp_headers, &file_info, "br", |b| {
-                        encode_brotli(b, buffer_size, quality, lgwindow)
-                    });
+                    let (status, body) =
+                        compress_then_respond(rsp_headers, &file_info, "br", |b| {
+                            encode_brotli(b, buffer_size, quality, lgwindow)
+                        })?;
+
+                    return session
+                        .status_code(status)
+                        .headers(rsp_headers)?
+                        .body(body)
+                        .eom();
                 } else {
                     // fall back to original file
                     (file_info.path.clone(), file_info.size)
@@ -185,9 +192,16 @@ fn serve_fn<S: Session>(
                     && file_info.size <= max_bytes_on_the_fly_size
                     && !range_requested
                 {
-                    return compress_then_respond(session, rsp_headers, &file_info, "gzip", |b| {
-                        encode_gzip(b, level)
-                    });
+                    let (status, body) =
+                        compress_then_respond(rsp_headers, &file_info, "gzip", |b| {
+                            encode_gzip(b, level)
+                        })?;
+
+                    return session
+                        .status_code(status)
+                        .headers(rsp_headers)?
+                        .body(body)
+                        .eom();
                 } else {
                     // fall back to original file
                     (file_info.path.clone(), file_info.size)
@@ -206,9 +220,16 @@ fn serve_fn<S: Session>(
                     && file_info.size <= max_bytes_on_the_fly_size
                     && !range_requested
                 {
-                    return compress_then_respond(session, rsp_headers, &file_info, "zstd", |b| {
-                        encode_zstd(b, level)
-                    });
+                    let (status, body) =
+                        compress_then_respond(rsp_headers, &file_info, "zstd", |b| {
+                            encode_zstd(b, level)
+                        })?;
+
+                    return session
+                        .status_code(status)
+                        .headers(rsp_headers)?
+                        .body(body)
+                        .eom();
                 } else {
                     // fall back to original file
                     (file_info.path.clone(), file_info.size)
@@ -307,7 +328,294 @@ fn serve_fn<S: Session>(
     Ok(())
 }
 
-pub fn serve<S: Session>(
+async fn serve_async_fn<S: Session>(
+    session: &mut S,
+    path: &str,
+    file_cache: &FileCache,
+    rsp_headers: &mut http::HeaderMap,
+    encoding_order: &[EncodingType],
+    min_max_compress_thresholds: (u64, u64),
+    file_tuple: &mut Option<(StatusCode, PathBuf, u64, u64)>,
+) -> std::io::Result<()> {
+    let min_bytes_on_the_fly_size = min_max_compress_thresholds.0;
+    let max_bytes_on_the_fly_size = min_max_compress_thresholds.1;
+
+    // canonicalise
+    let canonical = match std::fs::canonicalize(path) {
+        Ok(path) => path,
+        Err(_) => {
+            eprintln!("File server failed to canonicalize path: {path}");
+            return session
+                .status_code(StatusCode::NOT_FOUND)
+                .headers(rsp_headers)?
+                .body(Bytes::new())
+                .eom_async()
+                .await;
+        }
+    };
+    // meta
+    let meta = match std::fs::metadata(&canonical) {
+        Ok(meta) => meta,
+        Err(e) => {
+            eprintln!(
+                "File server failed to get metadata for path: {}: {}",
+                canonical.display(),
+                e
+            );
+            return session
+                .status_code(StatusCode::NOT_FOUND)
+                .headers(rsp_headers)?
+                .body(Bytes::new())
+                .eom_async()
+                .await;
+        }
+    };
+
+    // look or fill cache
+    let key = canonical.to_string_lossy().to_string();
+
+    // Get modified time once
+    let modified = match meta.modified() {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!(
+                "Failed to read modified time for: {}: {}",
+                canonical.display(),
+                e
+            );
+            return session
+                .status_code(StatusCode::INTERNAL_SERVER_ERROR)
+                .headers(rsp_headers)?
+                .body(Bytes::new())
+                .eom_async()
+                .await;
+        }
+    };
+
+    // file cache lookup
+    let file_info = if let Some(info) = file_cache.get(&key) {
+        if modified <= info.modified {
+            info.clone()
+        } else {
+            // outdated cache entry, fall through to regeneration
+            generate_file_info(&key, &canonical, &meta, modified, file_cache)
+        }
+    } else {
+        // cache miss, generate and insert
+        generate_file_info(&key, &canonical, &meta, modified, file_cache)
+    };
+
+    let range_requested = session.req_header(&header::RANGE).is_some();
+    let encoding = match session.req_header(&header::ACCEPT_ENCODING) {
+        Some(val) => {
+            let mime_type: Mime = file_info
+                .mime_type
+                .parse()
+                .unwrap_or(mime::APPLICATION_OCTET_STREAM);
+            choose_encoding(&val, &mime_type, encoding_order)
+        }
+        _ => EncodingType::None,
+    };
+
+    let mut applied_encoding: Option<&'static str> = None;
+    let (file_path, total_size) = match encoding {
+        EncodingType::None => {
+            // Serve file directly
+            (file_info.path.clone(), file_info.size)
+        }
+        EncodingType::NotAcceptable => {
+            return session
+                .status_code(StatusCode::NOT_ACCEPTABLE)
+                .headers(rsp_headers)?
+                .body(Bytes::new())
+                .eom_async()
+                .await;
+        }
+        EncodingType::Br {
+            buffer_size,
+            quality,
+            lgwindow,
+        } => {
+            if let Some(br_info) = file_info.br_info {
+                // we already have the br info in the cache
+                rsp_headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("br"));
+                applied_encoding = Some("br");
+                br_info
+            } else {
+                // On-the-fly only if size is within [min,max] AND not a Range request
+                if file_info.size >= min_bytes_on_the_fly_size
+                    && file_info.size <= max_bytes_on_the_fly_size
+                    && !range_requested
+                {
+                    let (status, body) =
+                        compress_then_respond(rsp_headers, &file_info, "br", |b| {
+                            encode_brotli(b, buffer_size, quality, lgwindow)
+                        })?;
+
+                    return session
+                        .status_code(status)
+                        .headers(rsp_headers)?
+                        .body(body)
+                        .eom_async()
+                        .await;
+                } else {
+                    // fall back to original file
+                    (file_info.path.clone(), file_info.size)
+                }
+            }
+        }
+        EncodingType::Gzip { level } => {
+            if let Some(gz_info) = file_info.gz_info {
+                // we already have the gz info in the cache
+                rsp_headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+                applied_encoding = Some("gzip");
+                gz_info
+            } else {
+                // On-the-fly only if size is within [min,max] AND not a Range request
+                if file_info.size >= min_bytes_on_the_fly_size
+                    && file_info.size <= max_bytes_on_the_fly_size
+                    && !range_requested
+                {
+                    let (status, body) =
+                        compress_then_respond(rsp_headers, &file_info, "gzip", |b| {
+                            encode_gzip(b, level)
+                        })?;
+                    return session
+                        .status_code(status)
+                        .headers(rsp_headers)?
+                        .body(body)
+                        .eom_async()
+                        .await;
+                } else {
+                    // fall back to original file
+                    (file_info.path.clone(), file_info.size)
+                }
+            }
+        }
+        EncodingType::Zstd { level } => {
+            if let Some(zstd_info) = file_info.zstd_info {
+                // we already have the zstd info in the cache
+                rsp_headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("zstd"));
+                applied_encoding = Some("zstd");
+                zstd_info
+            } else {
+                // On-the-fly only if size is within [min,max] AND not a Range request
+                if file_info.size >= min_bytes_on_the_fly_size
+                    && file_info.size <= max_bytes_on_the_fly_size
+                    && !range_requested
+                {
+                    let (status, body) =
+                        compress_then_respond(rsp_headers, &file_info, "zstd", |b| {
+                            encode_zstd(b, level)
+                        })?;
+
+                    return session
+                        .status_code(status)
+                        .headers(rsp_headers)?
+                        .body(body)
+                        .eom_async()
+                        .await;
+                } else {
+                    // fall back to original file
+                    (file_info.path.clone(), file_info.size)
+                }
+            }
+        }
+    };
+
+    let range: Option<Range<u64>> = session
+        .req_header(&header::RANGE)
+        .and_then(|h| parse_byte_range(&h, total_size));
+
+    let etag_to_send = rep_etag(&file_info.etag, applied_encoding);
+    if let Some(header_val) = session.req_header(&header::IF_NONE_MATCH)
+        && if_none_match_contains(&header_val, &etag_to_send)
+    {
+        if let Some(enc) = applied_encoding {
+            rsp_headers.insert(
+                header::CONTENT_ENCODING,
+                HeaderValue::from_str(enc).map_err(std::io::Error::other)?,
+            );
+        }
+        rsp_headers.extend([
+            (header::CONTENT_LENGTH, HeaderValue::from_static("0")),
+            (
+                header::ETAG,
+                HeaderValue::from_str(&etag_to_send).map_err(std::io::Error::other)?,
+            ),
+            (
+                header::LAST_MODIFIED,
+                HeaderValue::from_str(&file_info.last_modified_str)
+                    .map_err(std::io::Error::other)?,
+            ),
+            (header::VARY, HeaderValue::from_static("Accept-Encoding")),
+        ]);
+        return session
+            .status_code(StatusCode::NOT_MODIFIED)
+            .headers(rsp_headers)?
+            .body(Bytes::new())
+            .eom_async()
+            .await;
+    }
+    rsp_headers.extend([
+        (
+            header::CONTENT_TYPE,
+            HeaderValue::from_str(&file_info.mime_type).map_err(std::io::Error::other)?,
+        ),
+        (
+            header::LAST_MODIFIED,
+            HeaderValue::from_str(&file_info.last_modified_str).map_err(std::io::Error::other)?,
+        ),
+        (
+            header::CONTENT_DISPOSITION,
+            HeaderValue::from_static("inline"),
+        ),
+        (
+            header::ETAG,
+            HeaderValue::from_str(&etag_to_send).map_err(std::io::Error::other)?,
+        ),
+        (header::VARY, HeaderValue::from_static("Accept-Encoding")),
+    ]);
+
+    let (status, start, end) = if let Some(r) = range {
+        let content_length = r.end - r.start;
+        rsp_headers.extend([
+            (
+                header::CONTENT_RANGE,
+                HeaderValue::from_str(&format!("bytes {}-{}/{}", r.start, r.end - 1, total_size))
+                    .map_err(std::io::Error::other)?,
+            ),
+            (
+                header::CONTENT_LENGTH,
+                HeaderValue::from_str(&content_length.to_string())
+                    .map_err(std::io::Error::other)?,
+            ),
+        ]);
+
+        (StatusCode::PARTIAL_CONTENT, r.start, r.end)
+    } else {
+        rsp_headers.insert(
+            header::CONTENT_LENGTH,
+            HeaderValue::from_str(&total_size.to_string()).map_err(std::io::Error::other)?,
+        );
+        (StatusCode::OK, 0, total_size)
+    };
+    rsp_headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+
+    if session.req_method() == http::Method::HEAD {
+        return session
+            .status_code(status)
+            .headers(rsp_headers)?
+            .body(Bytes::new())
+            .eom_async()
+            .await;
+    }
+
+    *file_tuple = Some((status, file_path, start, end));
+    Ok(())
+}
+
+pub fn serve_h1<S: Session>(
     session: &mut S,
     path: &str,
     file_cache: &FileCache,
@@ -361,14 +669,14 @@ pub fn serve<S: Session>(
 }
 
 #[cfg(all(feature = "net-h2-server", target_os = "linux"))]
-pub async fn serve_async<S: Session>(
+pub async fn serve_h2<S: Session>(
     session: &mut S,
     path: &str,
     file_cache: &FileCache,
     rsp_headers: &mut http::HeaderMap,
     encoding_order: &[EncodingType],
     min_max_compress_thresholds: (u64, u64),
-    h2_stream_threshold_and_chunk_size: (u64, usize),
+    stream_threshold_and_chunk_size: (u64, usize),
 ) -> std::io::Result<()> {
     let mut file_tuple: Option<(StatusCode, PathBuf, u64, u64)> = None;
     let result = serve_fn(
@@ -383,10 +691,9 @@ pub async fn serve_async<S: Session>(
 
     // If we have a file tuple, it means it is ready to be served directly from mmap
     if let Some((status, file_path, start, end)) = file_tuple {
-        let is_h2 = session.req_http_version() == http::Version::HTTP_2;
         let bytes_to_send = end - start;
 
-        if is_h2 && bytes_to_send >= h2_stream_threshold_and_chunk_size.0 {
+        if bytes_to_send >= stream_threshold_and_chunk_size.0 {
             // HTTP/2 streaming
             return serve_h2_streaming(
                 session,
@@ -395,7 +702,7 @@ pub async fn serve_async<S: Session>(
                 &file_path,
                 start,
                 end,
-                h2_stream_threshold_and_chunk_size.1,
+                stream_threshold_and_chunk_size.1,
             )
             .await;
         } else {
@@ -427,6 +734,80 @@ pub async fn serve_async<S: Session>(
                 .headers(rsp_headers)?
                 .body(Bytes::copy_from_slice(&mmap[start as usize..end as usize]))
                 .eom();
+        }
+    }
+    result
+}
+
+#[cfg(all(feature = "net-h3-server", target_os = "linux"))]
+pub async fn serve_h3<S: Session>(
+    session: &mut S,
+    path: &str,
+    file_cache: &FileCache,
+    rsp_headers: &mut http::HeaderMap,
+    encoding_order: &[EncodingType],
+    min_max_compress_thresholds: (u64, u64),
+    stream_threshold_and_chunk_size: (u64, usize),
+) -> std::io::Result<()> {
+    let mut file_tuple: Option<(StatusCode, PathBuf, u64, u64)> = None;
+    let result = serve_async_fn(
+        session,
+        path,
+        file_cache,
+        rsp_headers,
+        encoding_order,
+        min_max_compress_thresholds,
+        &mut file_tuple,
+    )
+    .await;
+
+    // If we have a file tuple, it means it is ready to be served directly from mmap
+    if let Some((status, file_path, start, end)) = file_tuple {
+        let bytes_to_send = end - start;
+
+        if bytes_to_send >= stream_threshold_and_chunk_size.0 {
+            return serve_h3_streaming(
+                session,
+                status,
+                rsp_headers,
+                &file_path,
+                start,
+                end,
+                stream_threshold_and_chunk_size.1,
+            )
+            .await;
+        } else {
+            // Send all at once
+            let mmap = match std::fs::File::open(&file_path) {
+                Ok(std_file) => match unsafe { memmap2::Mmap::map(&std_file) } {
+                    Ok(mmap) => mmap,
+                    Err(e) => {
+                        eprintln!("Failed to memory-map file: {}: {}", file_path.display(), e);
+                        return session
+                            .status_code(StatusCode::INTERNAL_SERVER_ERROR)
+                            .headers(rsp_headers)?
+                            .body(Bytes::new())
+                            .eom_async()
+                            .await;
+                    }
+                },
+                Err(e) => {
+                    eprintln!("Failed to open file: {}: {}", file_path.display(), e);
+                    return session
+                        .status_code(StatusCode::INTERNAL_SERVER_ERROR)
+                        .headers(rsp_headers)?
+                        .body(Bytes::new())
+                        .eom_async()
+                        .await;
+                }
+            };
+
+            return session
+                .status_code(status)
+                .headers(rsp_headers)?
+                .body(Bytes::copy_from_slice(&mmap[start as usize..end as usize]))
+                .eom_async()
+                .await;
         }
     }
     result
@@ -478,13 +859,12 @@ pub fn load_file_cache(capacity: usize) -> FileCache {
     DashMap::with_capacity(capacity)
 }
 
-fn compress_then_respond<S: Session>(
-    session: &mut S,
+fn compress_then_respond(
     headers: &mut HeaderMap,
     file_info: &FileInfo,
     encoding_name: &str,
     compress_fn: impl Fn(&[u8]) -> std::io::Result<Bytes>,
-) -> std::io::Result<()> {
+) -> std::io::Result<(StatusCode, Bytes)> {
     let res = (|| {
         let f = std::fs::File::open(&file_info.path)?;
         let mmap = unsafe { memmap2::Mmap::map(&f) }.map_err(std::io::Error::other)?;
@@ -524,21 +904,15 @@ fn compress_then_respond<S: Session>(
                 ),
             ]);
 
-            session
-                .status_code(StatusCode::OK)
-                .headers(headers)?
-                .body(compressed)
-                .eom()
+            Ok((StatusCode::OK, compressed))
         }
         Err(e) => {
             eprintln!(
                 "Compression failed ({encoding_name}) for {}: {e}",
                 file_info.path.display()
             );
-            session
-                .status_code(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(Bytes::new())
-                .eom()
+
+            Ok((StatusCode::INTERNAL_SERVER_ERROR, Bytes::new()))
         }
     }
 }
@@ -863,6 +1237,81 @@ pub async fn serve_h2_streaming<S: Session>(
     Ok(())
 }
 
+#[cfg(all(feature = "net-h3-server", target_os = "linux"))]
+pub async fn serve_h3_streaming<S: Session>(
+    session: &mut S,
+    status: http::StatusCode,
+    headers: &mut http::HeaderMap,
+    file_path: &std::path::Path,
+    start: u64,
+    end: u64,
+    chunk_size: usize,
+) -> std::io::Result<()> {
+    use bytes::Bytes;
+    use http::header;
+
+    // Open/map file and compute range (same validations as H2 path)
+    let file = std::fs::File::open(file_path)?;
+    let meta = file.metadata()?;
+    let file_len = meta.len();
+    if start >= file_len {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("range start {} beyond EOF {}", start, file_len),
+        ));
+    }
+    let end_excl = end.min(file_len).max(start);
+    let total = (end_excl - start) as usize;
+
+    let mmap = unsafe { memmap2::Mmap::map(&file) }
+        .map_err(|e| std::io::Error::other(format!("mmap failed: {e}")))?;
+
+    // Standard headers
+    headers.insert(
+        header::ACCEPT_RANGES,
+        http::HeaderValue::from_static("bytes"),
+    );
+    headers.insert(
+        header::CONTENT_LENGTH,
+        http::HeaderValue::from_str(&total.to_string()).map_err(std::io::Error::other)?,
+    );
+    if status == http::StatusCode::PARTIAL_CONTENT && total > 0 {
+        let end_inclusive = end_excl - 1;
+        let cr = format!("bytes {}-{}/{}", start, end_inclusive, file_len);
+        headers.insert(
+            header::CONTENT_RANGE,
+            http::HeaderValue::from_str(&cr).map_err(std::io::Error::other)?,
+        );
+    }
+
+    // Apply head, then start streaming (no body yet)
+    session.status_code(status).headers(headers)?;
+    session.start_h3_streaming().await?;
+
+    // Empty body send FIN ASAP
+    if total == 0 {
+        return session.send_h3_data(Bytes::new(), true).await;
+    }
+
+    // Sending chunks
+    let mut off = start as usize;
+    let end_usize = end_excl as usize;
+
+    while off < end_usize {
+        let to_send = (end_usize - off).min(chunk_size);
+        let last = off + to_send == end_usize;
+
+        let chunk = Bytes::copy_from_slice(&mmap[off..off + to_send]);
+        session.send_h3_data(chunk, last).await?;
+
+        off += to_send;
+
+        glommio::yield_if_needed().await;
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use crate::network::http::server::H1Config;
@@ -895,9 +1344,9 @@ mod tests {
                 http::HeaderValue::from_static("close"),
             );
 
-            let rel_file = file!();
-            use crate::network::http::file::serve;
-            serve(
+            let rel_file = "/home/parallels/sib/target/debug/libsib.a"; //file!();
+            use crate::network::http::file::serve_h1;
+            serve_h1(
                 session,
                 rel_file,
                 get_cache(),
@@ -926,35 +1375,70 @@ mod tests {
             const H2_STREAM_CHUNK_SIZE: usize = 128 * 1024; // 128 KB
 
             let mut rsp_headers = HeaderMap::new();
-            let rel_file = file!();
+            let rel_file = "/home/parallels/sib/target/debug/libsib.a"; //file!();
 
-            use crate::network::http::file::serve_async;
-            if let Err(e) = serve_async(
-                session,
-                rel_file,
-                get_cache(),
-                &mut rsp_headers,
-                &[
-                    EncodingType::Zstd { level: 3 },
-                    EncodingType::Br {
-                        buffer_size: 4096,
-                        quality: 4,
-                        lgwindow: 19,
-                    },
-                    EncodingType::Gzip { level: 4 },
-                    EncodingType::None,
-                ],
-                (MIN_BYTES_ON_THE_FLY_SIZE, MAX_BYTES_ON_THE_FLY_SIZE),
-                (H2_STREAM_THRESHOLD, H2_STREAM_CHUNK_SIZE),
-            )
-            .await
-            {
-                eprintln!("FileService async failed: {e}");
-                return session
-                    .status_code(http::StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(bytes::Bytes::new())
-                    .eom();
-            };
+            if session.req_http_version() == http::Version::HTTP_2 {
+                rsp_headers.insert(
+                    http::header::ALT_SVC,
+                    http::HeaderValue::from_static("h3=\":8081\"; ma=86400"),
+                );
+                use crate::network::http::file::serve_h2;
+                if let Err(e) = serve_h2(
+                    session,
+                    rel_file,
+                    get_cache(),
+                    &mut rsp_headers,
+                    &[
+                        EncodingType::Zstd { level: 3 },
+                        EncodingType::Br {
+                            buffer_size: 4096,
+                            quality: 4,
+                            lgwindow: 19,
+                        },
+                        EncodingType::Gzip { level: 4 },
+                        EncodingType::None,
+                    ],
+                    (MIN_BYTES_ON_THE_FLY_SIZE, MAX_BYTES_ON_THE_FLY_SIZE),
+                    (H2_STREAM_THRESHOLD, H2_STREAM_CHUNK_SIZE),
+                )
+                .await
+                {
+                    eprintln!("H2 FileService failed: {e}");
+                    return session
+                        .status_code(http::StatusCode::INTERNAL_SERVER_ERROR)
+                        .body(bytes::Bytes::new())
+                        .eom();
+                };
+            } else {
+                use crate::network::http::file::serve_h3;
+                if let Err(e) = serve_h3(
+                    session,
+                    rel_file,
+                    get_cache(),
+                    &mut rsp_headers,
+                    &[
+                        EncodingType::Zstd { level: 3 },
+                        EncodingType::Br {
+                            buffer_size: 4096,
+                            quality: 4,
+                            lgwindow: 19,
+                        },
+                        EncodingType::Gzip { level: 4 },
+                        EncodingType::None,
+                    ],
+                    (MIN_BYTES_ON_THE_FLY_SIZE, MAX_BYTES_ON_THE_FLY_SIZE),
+                    (H2_STREAM_THRESHOLD, H2_STREAM_CHUNK_SIZE),
+                )
+                .await
+                {
+                    eprintln!("H3 FileService failed: {e}");
+                    return session
+                        .status_code(http::StatusCode::INTERNAL_SERVER_ERROR)
+                        .body(bytes::Bytes::new())
+                        .eom_async()
+                        .await;
+                };
+            }
             Ok(())
         }
     }
@@ -968,7 +1452,10 @@ mod tests {
             FileService
         }
 
-        #[cfg(all(feature = "net-h2-server", target_os = "linux"))]
+        #[cfg(all(
+            target_os = "linux",
+            any(feature = "net-h2-server", feature = "net-h3-server")
+        ))]
         fn async_service(&self, _id: usize) -> Self::HAsyncService {
             FileService
         }
@@ -1054,23 +1541,35 @@ mod tests {
             threads.push(h1_handle);
         }
 
+        let cert_h2_pem = certs.0.clone();
+        let key_h2_pem = certs.1.clone();
         let h2_handle = std::thread::spawn(move || {
             use crate::network::http::server::H2Config;
             let addr = "0.0.0.0:8081";
-            let cert_pem = certs.0.clone();
-            let key_pem = certs.1.clone();
+            let cert_pem = cert_h2_pem.as_bytes();
+            let key_pem = key_h2_pem.as_bytes();
             let id = std::thread::current().id();
             println!("Starting H2 server on {addr} with thread: {id:?}");
             FileServer(FileService)
-                .start_h2_tls(
-                    addr,
-                    (None, cert_pem.as_bytes(), key_pem.as_bytes()),
-                    H2Config::default(),
-                    None,
-                )
+                .start_h2_tls(addr, (None, cert_pem, key_pem), H2Config::default(), None)
                 .unwrap_or_else(|_| panic!("H2 file server failed to start for thread {id:?}"));
         });
         threads.push(h2_handle);
+
+        let cert_h3_pem = certs.0.clone();
+        let key_h3_pem = certs.1.clone();
+        let h3_handle = std::thread::spawn(move || {
+            use crate::network::http::server::H3Config;
+            let addr = "0.0.0.0:8081";
+            let cert_pem = cert_h3_pem.as_bytes();
+            let key_pem = key_h3_pem.as_bytes();
+            let id = std::thread::current().id();
+            println!("Starting H2 server on {addr} with thread: {id:?}");
+            FileServer(FileService)
+                .start_h3_tls(addr, (None, cert_pem, key_pem), H3Config::default(), None)
+                .unwrap_or_else(|_| panic!("H3 file server failed to start for thread {id:?}"));
+        });
+        threads.push(h3_handle);
 
         // Wait for all threads to complete (they won’t unless crashed)
         for handle in threads {

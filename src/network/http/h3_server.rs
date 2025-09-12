@@ -68,7 +68,6 @@ where
                 break;
             }
         }
-        // Time on single-thread executors
         glommio::yield_if_needed().await;
     }
     Ok(())

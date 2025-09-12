@@ -177,6 +177,26 @@ impl Session for H2Session {
         Ok(H2Stream { stream: send })
     }
 
+    #[cfg(all(target_os = "linux", feature = "net-h3-server"))]
+    #[inline]
+    async fn start_h3_streaming(&mut self) -> std::io::Result<()> {
+        Err(std::io::Error::other(
+            "start_h3_streaming not supported in H2Session",
+        ))
+    }
+
+    #[cfg(all(target_os = "linux", feature = "net-h3-server"))]
+    #[inline]
+    async fn send_h3_data(
+        &mut self,
+        _chunk: bytes::Bytes,
+        _end_stream: bool,
+    ) -> std::io::Result<()> {
+        Err(std::io::Error::other(
+            "send_h3_data not supported in H2Session",
+        ))
+    }
+
     #[inline]
     fn status_code(&mut self, status: StatusCode) -> &mut Self {
         self.res_status = status;

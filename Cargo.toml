@@ -96,7 +96,7 @@ tokio = { version = "1.47.1", optional = true, default-features = false, feature
 ] }
 
 [features]
-default = ["net-h1-server", "net-h2-server", "net-h3-server", "net-file-server"]
+default = []
 db-fdb = ["foundationdb-sys"]
 net-file-server = [
     "brotli",

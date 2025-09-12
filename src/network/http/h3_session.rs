@@ -142,6 +142,44 @@ impl Session for H3Session {
         ))
     }
 
+    #[cfg(feature = "net-h3-server")]
+    #[inline]
+    async fn start_h3_streaming(&mut self) -> std::io::Result<()> {
+        // Build response head from current status + accumulated headers
+        let mut res = http::Response::builder().status(self.res_status);
+        for (k, v) in self.resp_headers.iter() {
+            res = res.header(k, v);
+        }
+
+        // Send only headers (no body, no FIN)
+        self.stream
+            .send_response(res.body(()).map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("invalid H3 response: {e}"),
+                )
+            })?)
+            .await
+            .map_err(|e| std::io::Error::other(e.to_string()))
+    }
+
+    #[cfg(feature = "net-h3-server")]
+    #[inline]
+    async fn send_h3_data(&mut self, chunk: bytes::Bytes, end_stream: bool) -> std::io::Result<()> {
+        self.stream
+            .send_data(chunk)
+            .await
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+        if end_stream {
+            self.stream
+                .finish()
+                .await
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+        }
+        Ok(())
+    }
+
     #[inline]
     fn status_code(&mut self, status: StatusCode) -> &mut Self {
         self.res_status = status;

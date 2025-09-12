@@ -13,7 +13,7 @@ macro_rules! mc {
     };
 }
 
-#[cfg(all(feature = "net-h2-server", target_os = "linux"))]
+#[cfg(feature = "net-h1-server")]
 #[derive(Debug, Clone)]
 pub struct H1Config {
     pub io_timeout: std::time::Duration,
@@ -107,18 +107,18 @@ fn make_socket(
 
     let domain = Domain::for_address(addr);
     let sock = if protocol == socket2::Protocol::TCP {
-        Socket::new(domain, Type::STREAM.nonblocking(), Some(protocol))?
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let socket_type = Type::STREAM.nonblocking();
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        let socket_type = Type::STREAM;
+
+        Socket::new(domain, socket_type, Some(protocol))?
     } else {
         Socket::new(domain, Type::DGRAM, Some(protocol))?
     };
 
     sock.set_reuse_address(true)?;
-    #[cfg(any(
-        target_os = "linux",
-        target_os = "android",
-        target_os = "macos",
-        target_os = "freebsd"
-    ))]
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos",))]
     sock.set_reuse_port(true)?;
     sock.set_nonblocking(true)?;
     sock.bind(&addr.into())?;

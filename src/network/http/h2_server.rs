@@ -115,7 +115,6 @@ where
         })
         .detach();
 
-        // Time on single-thread executors
         glommio::yield_if_needed().await;
     }
 
