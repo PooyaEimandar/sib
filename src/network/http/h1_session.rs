@@ -4,6 +4,7 @@ use bytes::{Buf, BufMut, BytesMut};
 use http::{HeaderName, HeaderValue};
 use std::io::{self, Read, Write};
 use std::mem::MaybeUninit;
+use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -33,7 +34,7 @@ where
     S: Read + Write,
     'buf: 'stream,
 {
-    peer_addr: &'stream std::net::SocketAddr,
+    peer_addr: &'stream IpAddr,
     // request headers
     req: httparse::Request<'header, 'buf>,
     // request buffer
@@ -46,15 +47,13 @@ where
     stream: &'stream mut S,
 }
 
-//impl<'buf, 'header, 'stream, S> H1Session<'buf, 'header, 'stream, S> where S: Read + Write {}
-
 #[async_trait::async_trait(?Send)]
 impl<'buf, 'header, 'stream, S> Session for H1Session<'buf, 'header, 'stream, S>
 where
     S: Read + Write,
 {
     #[inline]
-    fn peer_addr(&self) -> &std::net::SocketAddr {
+    fn peer_addr(&self) -> &IpAddr {
         self.peer_addr
     }
 
@@ -109,7 +108,7 @@ where
     }
 
     #[inline]
-    fn req_body_h1(&mut self, timeout: std::time::Duration) -> io::Result<&[u8]> {
+    fn req_body(&mut self, timeout: std::time::Duration) -> io::Result<&[u8]> {
         let content_length = self
             .req
             .headers
@@ -179,9 +178,12 @@ where
         Ok(&self.req_buf[..content_length])
     }
 
-    #[cfg(all(feature = "net-h2-server", target_os = "linux"))]
+    #[cfg(all(
+        target_os = "linux",
+        any(feature = "net-h2-server", feature = "net-h3-server"),
+    ))]
     #[inline]
-    async fn req_body_h2(
+    async fn req_body_async(
         &mut self,
         _timeout: std::time::Duration,
     ) -> Option<std::io::Result<bytes::Bytes>> {
@@ -206,7 +208,10 @@ where
         self
     }
 
-    #[cfg(all(feature = "net-h2-server", target_os = "linux"))]
+    #[cfg(all(
+        target_os = "linux",
+        any(feature = "net-h2-server", feature = "net-h3-server")
+    ))]
     #[inline]
     fn start_h2_streaming(&mut self) -> std::io::Result<super::h2_session::H2Stream> {
         Err(io::Error::other(
@@ -276,11 +281,20 @@ where
         eprintln!("sent: {:?}", self.rsp_buf);
         Ok(())
     }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(feature = "net-h2-server", feature = "net-h3-server")
+    ))]
+    #[inline]
+    async fn eom_async(&mut self) -> std::io::Result<()> {
+        Err(io::Error::other("eom_async not supported in H1Session"))
+    }
 }
 
 pub fn new_session<'header, 'buf, 'stream, S>(
     stream: &'stream mut S,
-    peer_addr: &'stream std::net::SocketAddr,
+    peer_addr: &'stream IpAddr,
     headers: &'header mut [MaybeUninit<httparse::Header<'buf>>; MAX_HEADERS],
     req_buf: &'buf mut BytesMut,
     rsp_buf: &'buf mut BytesMut,

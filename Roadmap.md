@@ -1,7 +1,6 @@
-- [x] HTTP1.1
-- [x] TLS based on boringSSL
-- [x] Http3 server based on Quic
-- [x] FDB connection pool based on may
+- [x] HTTP1.1 with boringSSL
+- [x] HTTP2 with rustls
+- [x] HTTP3 with rustls
 - [x] Ratelimit
 - [x] gstreamer
 - [x] Static file server

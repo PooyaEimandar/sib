@@ -865,6 +865,7 @@ pub async fn serve_h2_streaming<S: Session>(
 
 #[cfg(test)]
 mod tests {
+    use crate::network::http::server::H1Config;
     use crate::network::http::session::{HAsyncService, HService, Session};
     use crate::network::http::{
         file::{EncodingType, FileInfo},
@@ -1043,8 +1044,7 @@ mod tests {
                     .start_h1_tls(
                         addr,
                         (None, cert_pem.as_bytes(), key_pem.as_bytes()),
-                        std::time::Duration::from_secs(15),
-                        STACK_SIZE,
+                        H1Config::default(),
                         None,
                     )
                     .unwrap_or_else(|_| panic!("H1 file server failed to start for thread {id:?}"))

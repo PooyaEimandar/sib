@@ -2,10 +2,10 @@ use crate::network::http::session::Session;
 use bytes::Bytes;
 use h2::{RecvStream, SendStream, server::SendResponse};
 use http::{HeaderMap, HeaderName, HeaderValue, StatusCode, Version};
-use std::{net::SocketAddr, str::FromStr, time::Duration};
+use std::{net::IpAddr, str::FromStr, time::Duration};
 
 pub struct H2Session {
-    peer: SocketAddr,
+    peer_addr: IpAddr,
     req: http::Request<RecvStream>,
     res: SendResponse<Bytes>,
     res_status: StatusCode,
@@ -60,9 +60,13 @@ impl H2Stream {
 }
 
 impl H2Session {
-    pub fn new(peer: SocketAddr, req: http::Request<RecvStream>, res: SendResponse<Bytes>) -> Self {
+    pub fn new(
+        peer_addr: IpAddr,
+        req: http::Request<RecvStream>,
+        res: SendResponse<Bytes>,
+    ) -> Self {
         Self {
-            peer,
+            peer_addr,
             req,
             res,
             res_status: StatusCode::OK,
@@ -75,8 +79,8 @@ impl H2Session {
 #[async_trait::async_trait(?Send)]
 impl Session for H2Session {
     #[inline]
-    fn peer_addr(&self) -> &SocketAddr {
-        &self.peer
+    fn peer_addr(&self) -> &IpAddr {
+        &self.peer_addr
     }
 
     #[inline]
@@ -111,10 +115,34 @@ impl Session for H2Session {
 
     #[cfg(feature = "net-h1-server")]
     #[inline]
-    fn req_body_h1(&mut self, _timeout: std::time::Duration) -> std::io::Result<&[u8]> {
+    fn req_body(&mut self, _timeout: std::time::Duration) -> std::io::Result<&[u8]> {
         Err(std::io::Error::other(
             "req_body_h1 not supported in H2Session",
         ))
+    }
+
+    #[inline]
+    async fn req_body_async(&mut self, timeout: Duration) -> Option<std::io::Result<Bytes>> {
+        use futures_lite::future::race;
+        use glommio::timer::Timer;
+
+        let data_fut = async {
+            match self.req.body_mut().data().await {
+                Some(Ok(bytes)) => Some(Ok(bytes)),
+                Some(Err(e)) => Some(Err(std::io::Error::other(e.to_string()))),
+                None => None, // peer ended stream, no more data
+            }
+        };
+
+        let timeout_fut = async {
+            Timer::new(timeout).await;
+            Some(Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "req_body_h2 timed out",
+            )))
+        };
+
+        race(data_fut, timeout_fut).await
     }
 
     /// Start an HTTP/2 streaming response: send headers now, return a `H2Stream`
@@ -202,37 +230,15 @@ impl Session for H2Session {
         self
     }
 
-    #[inline]
-    async fn req_body_h2(&mut self, timeout: Duration) -> Option<std::io::Result<Bytes>> {
-        use futures_lite::future::race;
-        use glommio::timer::Timer;
-
-        let data_fut = async {
-            match self.req.body_mut().data().await {
-                Some(Ok(bytes)) => Some(Ok(bytes)),
-                Some(Err(e)) => Some(Err(std::io::Error::other(e.to_string()))),
-                None => None, // peer ended stream, no more data
-            }
-        };
-
-        let timeout_fut = async {
-            Timer::new(timeout).await;
-            Some(Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "req_body_h2 timed out",
-            )))
-        };
-
-        race(data_fut, timeout_fut).await
-    }
-
-    // end of message: send the response (headers + body)
+    // end of message: send the response all at once (headers + body)
     #[inline]
     fn eom(&mut self) -> std::io::Result<()> {
+        // Build HEADERS
         let mut builder = http::Response::builder().status(self.res_status);
         {
-            // Move staged headers in
-            let header_map = builder.headers_mut().expect("headers_mut");
+            let header_map = builder.headers_mut().ok_or_else(|| {
+                std::io::Error::other("failed to get mutable headers from response builder")
+            })?;
             header_map.extend(self.resp_headers.drain());
 
             // Add Content-Length when sending a single buffered body
@@ -267,6 +273,75 @@ impl Session for H2Session {
         self.res_status = StatusCode::OK;
         self.resp_body = Bytes::new();
 
+        Ok(())
+    }
+
+    // end of message: send the response (headers + body) asyncronously
+    #[inline]
+    async fn eom_async(&mut self) -> std::io::Result<()> {
+        use futures_lite::future::poll_fn;
+        use std::io;
+
+        // Build HEADERS
+        let mut builder = http::Response::builder().status(self.res_status);
+        {
+            let h = builder
+                .headers_mut()
+                .ok_or_else(|| io::Error::other("resp builder headers_mut"))?;
+            h.extend(self.resp_headers.drain());
+            if !h.contains_key(http::header::CONTENT_LENGTH) {
+                use http::HeaderValue;
+                let len = self.resp_body.len();
+                h.insert(
+                    http::header::CONTENT_LENGTH,
+                    HeaderValue::from_str(&len.to_string())
+                        .map_err(|e| io::Error::other(format!("content-length {len}: {e}")))?,
+                );
+            }
+        }
+        let resp = builder
+            .body(())
+            .map_err(|e| io::Error::other(format!("build resp: {e}")))?;
+
+        // Send HEADERS and take the SendStream
+        let mut send = self
+            .res
+            .send_response(resp, false)
+            .map_err(|e| io::Error::other(format!("send headers: {e}")))?;
+
+        // Drain BODY with flow control
+        let mut body = std::mem::take(&mut self.resp_body);
+        let mut end = body.is_empty();
+
+        // Reserve based on body size
+        send.reserve_capacity(body.len());
+
+        while !end {
+            // Wait until peer/window grants capacity
+            let cap = if send.capacity() == 0 {
+                match poll_fn(|cx| send.poll_capacity(cx)).await {
+                    Some(Ok(n)) => n,
+                    Some(Err(e)) => return Err(io::Error::other(format!("poll_capacity: {e}"))),
+                    None => return Err(io::Error::other("stream closed while sending")),
+                }
+            } else {
+                send.capacity()
+            };
+
+            let n = std::cmp::min(cap, body.len());
+            // Split off exactly what we can send now
+            let chunk = body.split_to(n);
+            end = body.is_empty();
+
+            send.send_data(chunk, end)
+                .map_err(|e| io::Error::other(format!("send_data: {e}")))?;
+
+            glommio::yield_if_needed().await;
+        }
+
+        // Reset fields for potential reuse (optional)
+        self.res_status = http::StatusCode::OK;
+        // headers already drained; body already moved
         Ok(())
     }
 }

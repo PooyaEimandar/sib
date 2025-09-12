@@ -4,7 +4,7 @@ use core::pin::Pin;
 use core::task::{Context, Poll};
 use futures_lite::io::{AsyncRead, AsyncWrite};
 use h2::server::Builder;
-use std::net::SocketAddr;
+use std::net::IpAddr;
 use tokio::io::{AsyncRead as TAsyncRead, AsyncWrite as TAsyncWrite, ReadBuf};
 
 struct TokioStream<S>(pub S);
@@ -50,7 +50,7 @@ pub(crate) async fn serve<S, T>(
     stream: S,
     service: T,
     config: &H2Config,
-    peer: SocketAddr,
+    peer_addr: IpAddr,
 ) -> std::io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + 'static,
@@ -87,7 +87,6 @@ where
         };
 
         let svc_rc = std::rc::Rc::clone(&svc);
-        let peer_addr = peer;
 
         glommio::spawn_local(async move {
             use crate::network::http::h2_session::H2Session;

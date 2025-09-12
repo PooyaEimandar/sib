@@ -15,6 +15,23 @@ macro_rules! mc {
 
 #[cfg(all(feature = "net-h2-server", target_os = "linux"))]
 #[derive(Debug, Clone)]
+pub struct H1Config {
+    pub io_timeout: std::time::Duration,
+    pub stack_size: usize,
+}
+
+#[cfg(feature = "net-h1-server")]
+impl Default for H1Config {
+    fn default() -> Self {
+        Self {
+            io_timeout: std::time::Duration::from_secs(60),
+            stack_size: 1024 * 1024,
+        }
+    }
+}
+
+#[cfg(all(feature = "net-h2-server", target_os = "linux"))]
+#[derive(Debug, Clone)]
 pub struct H2Config {
     pub backlog: usize,
     pub enable_connect_protocol: bool,
@@ -46,6 +63,85 @@ impl Default for H2Config {
     }
 }
 
+#[cfg(all(feature = "net-h3-server", target_os = "linux"))]
+#[derive(Debug, Clone)]
+pub struct H3Config {
+    pub backlog: usize,
+    pub enable_connect_protocol: bool,
+    pub io_timeout: std::time::Duration,
+    pub keep_alive_interval: std::time::Duration,
+    pub max_concurrent_bidi_streams: u32,
+    pub max_concurrent_uni_streams: u32,
+    pub max_idle_timeout: std::time::Duration,
+    pub max_sessions: u64,
+    pub num_of_shards: usize,
+    pub receive_window: u32,
+    pub send_window: u64,
+}
+
+#[cfg(all(feature = "net-h3-server", target_os = "linux"))]
+impl Default for H3Config {
+    fn default() -> Self {
+        Self {
+            backlog: 512,
+            enable_connect_protocol: false,
+            io_timeout: std::time::Duration::from_secs(60),
+            keep_alive_interval: std::time::Duration::from_secs(10),
+            max_concurrent_bidi_streams: 1024,
+            max_concurrent_uni_streams: 256,
+            max_idle_timeout: std::time::Duration::from_secs(20),
+            max_sessions: 1024,
+            num_of_shards: 2,
+            receive_window: 8 * 1024 * 1024,
+            send_window: 8 * 1024 * 1024,
+        }
+    }
+}
+
+fn make_socket(
+    addr: SocketAddr,
+    protocol: socket2::Protocol,
+    backlog: usize,
+) -> std::io::Result<socket2::Socket> {
+    use socket2::{Domain, Socket, Type};
+
+    let domain = Domain::for_address(addr);
+    let sock = if protocol == socket2::Protocol::TCP {
+        Socket::new(domain, Type::STREAM.nonblocking(), Some(protocol))?
+    } else {
+        Socket::new(domain, Type::DGRAM, Some(protocol))?
+    };
+
+    sock.set_reuse_address(true)?;
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "freebsd"
+    ))]
+    sock.set_reuse_port(true)?;
+    sock.set_nonblocking(true)?;
+    sock.bind(&addr.into())?;
+
+    let backlog: i32 = if backlog == 0 {
+        512
+    } else {
+        match i32::try_from(backlog) {
+            Ok(y) => y,
+            Err(_) => {
+                eprintln!("backlog too large, using 512");
+                1024
+            }
+        }
+    };
+
+    if protocol == socket2::Protocol::TCP {
+        sock.listen(backlog)?;
+    }
+
+    Ok(sock)
+}
+
 pub trait HFactory: Send + Sync + Sized + 'static {
     #[cfg(feature = "net-h1-server")]
     type Service: crate::network::http::session::HService + Send;
@@ -66,12 +162,13 @@ pub trait HFactory: Send + Sync + Sized + 'static {
     fn start_h1<L: ToSocketAddrs>(
         self,
         addr: L,
-        stack_size: usize,
+        cfg: H1Config,
     ) -> std::io::Result<may::coroutine::JoinHandle<()>> {
-        let stacksize = if stack_size > 0 {
-            stack_size
+        let stacksize = if cfg.stack_size > 0 {
+            cfg.stack_size
         } else {
-            2 * 1024 * 1024 // default to 2 MiB
+            eprintln!("stacksize can not be zero, using default stack size (512 KB) for H1 server");
+            512 * 1024
         };
         let listener = may::net::TcpListener::bind(addr)?;
         may::go!(
@@ -104,7 +201,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                     let service = self.service(id);
                     let builder = may::coroutine::Builder::new().id(id);
                     let _ = may::go!(builder, move || if let Err(_e) =
-                        serve(&mut stream, peer_addr, service)
+                        serve(&mut stream, &peer_addr.ip(), service)
                     {
                         //s_error!("service err = {e:?}");
                         stream.shutdown(std::net::Shutdown::Both).ok();
@@ -119,8 +216,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         self,
         addr: L,
         chain_cert_key: (Option<&[u8]>, &[u8], &[u8]),
-        io_timeout: std::time::Duration,
-        stack_size: usize,
+        cfg: H1Config,
         rate_limiter: Option<super::ratelimit::RateLimiterKind>,
     ) -> std::io::Result<may::coroutine::JoinHandle<()>> {
         use std::net::Shutdown;
@@ -169,10 +265,13 @@ pub trait HFactory: Send + Sync + Sized + 'static {
             });
         }
 
-        let stacksize = if stack_size > 0 {
-            stack_size
+        let stacksize = if cfg.stack_size > 0 {
+            cfg.stack_size
         } else {
-            2 * 1024 * 1024
+            eprintln!(
+                "stacksize can not be zero, using default stack size (512 KB) for H1 TLS server"
+            );
+            512 * 1024
         };
         let tls_acceptor = std::sync::Arc::new(tls_builder.build());
         let listener = may::net::TcpListener::bind(addr)?;
@@ -192,8 +291,8 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                 for stream_incoming in listener.incoming() {
                     let stream = mc!(stream_incoming);
                     let _ = stream.set_nodelay(true);
-                    let _ = stream.set_write_timeout(Some(io_timeout));
-                    let _ = stream.set_read_timeout(Some(io_timeout));
+                    let _ = stream.set_write_timeout(Some(cfg.io_timeout));
+                    let _ = stream.set_read_timeout(Some(cfg.io_timeout));
 
                     let peer_addr = stream.peer_addr().unwrap_or_else(|_| {
                         SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0)
@@ -224,7 +323,8 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                     let _ = may::go!(builder, move || {
                         match tls_acceptor_cloned.accept(stream) {
                             Ok(mut tls_stream) => {
-                                if let Err(e) = serve_tls(&mut tls_stream, peer_addr, service) {
+                                if let Err(e) = serve_tls(&mut tls_stream, &peer_addr.ip(), service)
+                                {
                                     tls_stream.get_mut().shutdown(Shutdown::Both).ok();
                                     eprintln!("serve_tls failed with error: {e} from {peer_addr}");
                                 }
@@ -260,7 +360,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         use rustls::pki_types::{CertificateDer, PrivateKeyDer};
         use rustls_pemfile::{certs, pkcs8_private_keys};
 
-        // --- Load cert & key -----------------------------------------------------
+        // Load certs & key
         let certs: Vec<CertificateDer<'static>> = {
             let mut reader = std::io::Cursor::new(chain_cert_key.1);
             certs(&mut reader)
@@ -276,7 +376,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                     res.map_err(|e| {
                         std::io::Error::new(
                             std::io::ErrorKind::InvalidInput,
-                            format!("bad key: {e}"),
+                            format!("H2 got a bad private key: {e}"),
                         )
                     })
                 })
@@ -287,7 +387,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
             } else {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
-                    "no private key found",
+                    "H2 could not find a private key",
                 ));
             }
         };
@@ -299,7 +399,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
             .map_err(|e| {
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
-                    format!("could not load cert/key: {e}"),
+                    format!("H2 could not load cert/key: {e}"),
                 )
             })?;
 
@@ -317,7 +417,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
             glommio::CpuSet::online().ok(),
         ))
         .on_all_shards(move || {
-            // Per-shard clones (owned; 'static)
+            // Per-shard clones
             let tls_acceptor = tls_acceptor.clone();
             let factory = factory.clone();
             let h2_cfg = h2_cfg.clone();
@@ -326,24 +426,18 @@ pub trait HFactory: Send + Sync + Sized + 'static {
             async move {
                 let shard_id = glommio::executor().id();
 
-                // Listener per shard with SO_REUSEPORT (see make_listener below)
-                #[cfg(unix)]
+                // Listener per shard with SO_REUSEPORT
                 let listener =
-                    match make_listener(socket_addr, socket2::Protocol::TCP, h2_cfg.backlog) {
-                        Ok(l) => l,
+                    match make_socket(socket_addr, socket2::Protocol::TCP, h2_cfg.backlog) {
+                        Ok(socket) => {
+                            use std::os::fd::{FromRawFd, IntoRawFd};
+                            unsafe { glommio::net::TcpListener::from_raw_fd(socket.into_raw_fd()) }
+                        }
                         Err(e) => {
                             eprintln!("Failed to create h2 listener on {socket_addr}: {e}");
                             return;
                         }
                     };
-                #[cfg(not(unix))]
-                let listener = match TcpListener::bind(socket_addr) {
-                    Ok(l) => l,
-                    Err(e) => {
-                        eprintln!("Failed to create h2 listener on {socket_addr}: {e}");
-                        return;
-                    }
-                };
 
                 // Per-shard concurrency budget
                 println!("Shard {shard_id} listening for H2/TLS on {socket_addr}");
@@ -351,7 +445,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                 let sem = std::rc::Rc::new(glommio::sync::Semaphore::new(h2_cfg.max_sessions));
 
                 loop {
-                    // Acquire a session slot (or skip if none available)
+                    // Acquire a session slot or skip if none available
                     let sess_token = match std::rc::Rc::clone(&sem).try_acquire_static_permit(1) {
                         Ok(p) => p,
                         Err(_) => {
@@ -363,27 +457,32 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                     let stream = match listener.accept().await {
                         Ok(s) => s,
                         Err(e) => {
-                            eprintln!("accept error on shard {shard_id}: {e}");
+                            eprintln!("H2 accept got an error on shard {shard_id}: {e}");
                             continue;
                         }
                     };
 
-                    // Small TCP tweak
+                    // Set no delay
                     let _ = stream.set_nodelay(true);
 
                     // Rate-limit check
-                    let peer_addr = stream.peer_addr().unwrap_or_else(|_| {
-                        SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0)
-                    });
-                    if let Some(rl) = rate_limiter_arc.as_ref() {
-                        let ip = peer_addr.ip();
-                        if !ip.is_unspecified() {
-                            use super::ratelimit::RateLimiter;
-                            let result = rl.check(ip.to_string().into());
-                            if !result.allowed {
-                                let _ = stream.shutdown(std::net::Shutdown::Both).await;
-                                continue;
-                            }
+                    let peer_ip = stream
+                        .peer_addr()
+                        .unwrap_or_else(|_| {
+                            SocketAddr::new(
+                                std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                                0,
+                            )
+                        })
+                        .ip();
+                    if let Some(rl) = rate_limiter_arc.as_ref()
+                        && !peer_ip.is_unspecified()
+                    {
+                        use super::ratelimit::RateLimiter;
+                        let result = rl.check(peer_ip.to_string().into());
+                        if !result.allowed {
+                            let _ = stream.shutdown(std::net::Shutdown::Both).await;
+                            continue;
                         }
                     }
 
@@ -396,10 +495,8 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                         }
                     };
 
-                    // Clone owned values OUTSIDE the async block to avoid temporaries
                     let factory_cloned = std::sync::Arc::clone(&factory);
                     let h2_cfg_cloned = h2_cfg.clone();
-                    let peer = peer_addr;
 
                     glommio::spawn_local({
                         async move {
@@ -409,7 +506,9 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                             use crate::network::http::h2_server::serve;
                             let service = factory_cloned.async_service(shard_id);
 
-                            if let Err(e) = serve(tls_stream, service, &h2_cfg_cloned, peer).await {
+                            if let Err(e) =
+                                serve(tls_stream, service, &h2_cfg_cloned, peer_ip).await
+                            {
                                 eprintln!("h2 serve error (shard {shard_id}): {e}");
                             }
                         }
@@ -423,52 +522,184 @@ pub trait HFactory: Send + Sync + Sized + 'static {
 
         Ok(())
     }
-}
 
-fn make_listener(
-    addr: SocketAddr,
-    protocol: socket2::Protocol,
-    backlog: usize,
-) -> std::io::Result<glommio::net::TcpListener> {
-    use socket2::{Domain, Socket, Type};
-    use std::os::fd::{FromRawFd, IntoRawFd};
+    #[cfg(all(feature = "net-h3-server", target_os = "linux"))]
+    fn start_h3_tls<L: ToSocketAddrs>(
+        self,
+        addr: L,
+        chain_cert_key: (Option<&[u8]>, &[u8], &[u8]),
+        h3_cfg: H3Config,
+        rate_limiter: Option<super::ratelimit::RateLimiterKind>,
+    ) -> std::io::Result<()> {
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+        use rustls_pemfile::{certs, pkcs8_private_keys};
 
-    let domain = if addr.is_ipv4() {
-        Domain::IPV4
-    } else {
-        Domain::IPV6
-    };
-    let sock = if protocol == socket2::Protocol::TCP {
-        Socket::new(domain, Type::STREAM.nonblocking(), Some(protocol))?
-    } else {
-        Socket::new(domain, Type::DGRAM, Some(protocol))?
-    };
+        // Load certs & key
+        let certs: Vec<CertificateDer<'static>> = {
+            let mut reader = std::io::Cursor::new(chain_cert_key.1);
+            certs(&mut reader)
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .collect()
+        };
 
-    sock.set_reuse_address(true)?;
-    #[cfg(any(
-        target_os = "linux",
-        target_os = "android",
-        target_os = "macos",
-        target_os = "freebsd"
-    ))]
-    sock.set_reuse_port(true)?;
-    sock.bind(&addr.into())?;
-
-    let backlog: i32 = if backlog == 0 {
-        1024
-    } else {
-        match i32::try_from(backlog) {
-            Ok(y) => y,
-            Err(_) => {
-                eprintln!("backlog too large, using 1024");
-                1024
+        let key: PrivateKeyDer<'static> = {
+            let mut reader = std::io::Cursor::new(chain_cert_key.2);
+            let keys: Result<Vec<_>, std::io::Error> = pkcs8_private_keys(&mut reader)
+                .map(|res| {
+                    res.map_err(|e| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            format!("H3 got a bad private key: {e}"),
+                        )
+                    })
+                })
+                .collect();
+            let keys = keys?;
+            if let Some(key) = keys.into_iter().next() {
+                PrivateKeyDer::from(key)
+            } else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "H3 could not find a private key",
+                ));
             }
-        }
-    };
-    sock.listen(backlog)?;
+        };
 
-    let listener = unsafe { glommio::net::TcpListener::from_raw_fd(sock.into_raw_fd()) };
-    Ok(listener)
+        // TLS config
+        let mut cfg = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("H3 could not load cert/key: {e}"),
+                )
+            })?;
+
+        // ALPN: h3
+        cfg.alpn_protocols = vec![b"h3".to_vec()];
+
+        let mut transport = quinn::TransportConfig::default();
+        transport.max_idle_timeout(Some(h3_cfg.max_idle_timeout.try_into().map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "H3 could not set idle timeout",
+            )
+        })?));
+        transport.keep_alive_interval(Some(h3_cfg.keep_alive_interval));
+        transport.send_window(h3_cfg.send_window);
+        transport.receive_window(quinn::VarInt::from_u32(h3_cfg.receive_window));
+        transport.max_concurrent_bidi_streams(quinn::VarInt::from_u32(
+            h3_cfg.max_concurrent_bidi_streams,
+        ));
+        transport
+            .max_concurrent_uni_streams(quinn::VarInt::from_u32(h3_cfg.max_concurrent_uni_streams));
+
+        let quic_tls = quinn::crypto::rustls::QuicServerConfig::try_from(cfg).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("H3 could not create quic TLS config: {e}"),
+            )
+        })?;
+        let mut server = quinn::ServerConfig::with_crypto(std::sync::Arc::new(quic_tls));
+        server.transport = std::sync::Arc::new(transport);
+
+        let socket_addr = addr.to_socket_addrs()?.next().unwrap();
+        let factory = std::sync::Arc::new(self);
+        let rate_limiter_arc = std::sync::Arc::new(rate_limiter);
+
+        glommio::LocalExecutorPoolBuilder::new(glommio::PoolPlacement::MaxSpread(
+            h3_cfg.num_of_shards,
+            glommio::CpuSet::online().ok(),
+        ))
+        .on_all_shards(move || {
+            // Per-shard clones
+            let factory = factory.clone();
+            let h3_cfg = h3_cfg.clone();
+            let rate_limiter_arc = rate_limiter_arc.clone();
+
+            async move {
+                let shard_id = glommio::executor().id();
+
+                // Runtime per shard with SO_REUSEPORT
+                let endpoint_res =
+                    match make_socket(socket_addr, socket2::Protocol::UDP, h3_cfg.backlog) {
+                        Ok(socket) => {
+                            let std_sock: std::net::UdpSocket = socket.into();
+                            let ep_cfg = quinn::EndpointConfig::default();
+                            let runtime = std::sync::Arc::new(quinn::AsyncStdRuntime);
+                            quinn::Endpoint::new(ep_cfg, Some(server), std_sock, runtime)
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to create h3 listener on {socket_addr}: {e}");
+                            return;
+                        }
+                    };
+                let endpoint = match &endpoint_res {
+                    Ok(ep) => ep,
+                    Err(e) => {
+                        eprintln!("H3 endpoint creation error on shard {shard_id}: {e}");
+                        return;
+                    }
+                };
+
+                // Per-shard concurrency budget
+                println!("Shard {shard_id} listening for H3/TLS on {socket_addr}");
+
+                let sem = std::rc::Rc::new(glommio::sync::Semaphore::new(h3_cfg.max_sessions));
+                while let Some(incoming) = endpoint.accept().await {
+                    // Rate-limit check
+                    let peer_ip = incoming.remote_address().ip();
+                    if let Some(rl) = rate_limiter_arc.as_ref()
+                        && !peer_ip.is_unspecified()
+                    {
+                        use super::ratelimit::RateLimiter;
+                        let result = rl.check(peer_ip.to_string().into());
+                        if !result.allowed {
+                            incoming.refuse();
+                            continue;
+                        }
+                    }
+
+                    // Acquire a session slot (or skip if none available)
+                    let sess_token = match std::rc::Rc::clone(&sem).try_acquire_static_permit(1) {
+                        Ok(p) => p,
+                        Err(_) => {
+                            continue;
+                        }
+                    };
+
+                    let factory_cloned = std::sync::Arc::clone(&factory);
+
+                    // accept connection
+                    glommio::spawn_local(async move {
+                        // Hold for the lifetime of the session
+                        let _permit = sess_token;
+
+                        match incoming.await {
+                            Ok(connection) => {
+                                use crate::network::http::h3_server::serve;
+                                let service = factory_cloned.async_service(shard_id);
+
+                                if let Err(e) = serve(connection, service, peer_ip).await {
+                                    eprintln!("h3 serve error (shard {shard_id}): {e}");
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("h3 handshake error (shard {shard_id}): {e}");
+                            }
+                        };
+                    })
+                    .detach();
+                }
+            }
+        })
+        .unwrap()
+        .join_all();
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -485,9 +716,10 @@ mod tests {
         fn call<SE: Session>(&mut self, session: &mut SE) -> std::io::Result<()> {
             let req_method = session.req_method();
             let req_path = session.req_path();
-            let req_body = session.req_body_h1(std::time::Duration::from_secs(5))?;
+            let http_version = session.req_http_version();
+            let req_body = session.req_body(std::time::Duration::from_secs(5))?;
             let body = bytes::Bytes::from(format!(
-                "Echo: {req_method:?} {req_path:?}\r\nBody: {req_body:?}"
+                "Http version: {http_version:?}, Echo: {req_method:?} {req_path:?}\r\nBody: {req_body:?}"
             ));
 
             session
@@ -512,9 +744,12 @@ mod tests {
         async fn call<SE: Session>(&mut self, session: &mut SE) -> std::io::Result<()> {
             let req_method = session.req_method();
             let req_path = session.req_path().to_owned();
-            let req_body = session.req_body_h2(std::time::Duration::from_secs(5)).await;
+            let http_version = session.req_http_version();
+            let req_body = session
+                .req_body_async(std::time::Duration::from_secs(5))
+                .await;
             let body = bytes::Bytes::from(format!(
-                "Echo: {req_method:?} {req_path:?}\r\nBody: {req_body:?}"
+                "Http version: {http_version:?}, Echo: {req_method:?} {req_path:?}\r\nBody: {req_body:?}"
             ));
 
             let content_len = body.len().to_string();
@@ -529,7 +764,8 @@ mod tests {
                     http::HeaderValue::from_str(&content_len).expect("content_len"),
                 )?
                 .body(body)
-                .eom()?;
+                .eom_async()
+                .await?;
             Ok(())
         }
     }
@@ -602,6 +838,8 @@ mod tests {
     #[test]
     fn test_h1_tls_server_gracefull_shutdown() {
         use std::time::Duration;
+
+        use crate::network::http::server::H1Config;
         const NUMBER_OF_WORKERS: usize = 1;
         crate::init_global_poller(NUMBER_OF_WORKERS, 0);
 
@@ -611,8 +849,7 @@ mod tests {
             .start_h1_tls(
                 addr,
                 (None, cert_pem.as_bytes(), key_pem.as_bytes()),
-                Duration::from_secs(10),
-                0,
+                H1Config::default(),
                 None,
             )
             .expect("H1 TLS server failed to start");
@@ -628,6 +865,7 @@ mod tests {
     #[cfg(feature = "net-h1-server")]
     #[test]
     fn test_h1_server_get() {
+        use crate::network::http::server::H1Config;
         use may::net::TcpStream;
         use std::{
             io::{Read, Write},
@@ -639,7 +877,9 @@ mod tests {
 
         // Pick a port and start the server
         let addr = "127.0.0.1:8081";
-        let server_handle = EchoServer.start_h1(addr, 0).expect("h1 start server");
+        let server_handle = EchoServer
+            .start_h1(addr, H1Config::default())
+            .expect("h1 start server");
 
         let client_handler = may::go!(move || {
             may::coroutine::sleep(Duration::from_millis(500));
@@ -660,19 +900,22 @@ mod tests {
 
         may::join!(server_handle, client_handler);
 
-        std::thread::sleep(Duration::from_millis(500));
+        std::thread::sleep(Duration::from_secs(1));
     }
 
     #[cfg(feature = "net-h1-server")]
     #[test]
     fn test_h1_server_post() {
+        use crate::network::http::server::H1Config;
         use may::net::TcpStream;
         use std::time::Duration;
         const NUMBER_OF_WORKERS: usize = 1;
         crate::init_global_poller(NUMBER_OF_WORKERS, 2 * 1024 * 1024);
 
         let addr = "127.0.0.1:8082";
-        let server_handle = EchoServer.start_h1(addr, 0).expect("h1 start server");
+        let server_handle = EchoServer
+            .start_h1(addr, H1Config::default())
+            .expect("h1 start server");
 
         let client_handler = may::go!(move || {
             use std::io::{Read, Write};
@@ -700,7 +943,7 @@ mod tests {
         });
 
         may::join!(server_handle, client_handler);
-        std::thread::sleep(Duration::from_millis(500));
+        std::thread::sleep(Duration::from_secs(1));
     }
 
     #[cfg(all(feature = "net-h2-server", target_os = "linux"))]
@@ -711,10 +954,14 @@ mod tests {
             let (cert, key) = create_self_signed_tls_pems();
 
             use crate::network::http::server::H2Config;
-            let h2_cfg = H2Config::default();
             // Pick a port and start the server
             EchoServer
-                .start_h2_tls(addr, (None, cert.as_bytes(), key.as_bytes()), h2_cfg, None)
+                .start_h2_tls(
+                    addr,
+                    (None, cert.as_bytes(), key.as_bytes()),
+                    H2Config::default(),
+                    None,
+                )
                 .expect("start_h2_tls");
         });
 
@@ -728,6 +975,7 @@ mod tests {
 
         let resp = client
             .get(format!("https://{}", addr))
+            .version(reqwest::Version::HTTP_2)
             .body("Hello, World!")
             .timeout(std::time::Duration::from_millis(300))
             .send()
@@ -749,10 +997,14 @@ mod tests {
             let (cert, key) = create_self_signed_tls_pems();
 
             use crate::network::http::server::H2Config;
-            let h2_cfg = H2Config::default();
             // Pick a port and start the server
             EchoServer
-                .start_h2_tls(addr, (None, cert.as_bytes(), key.as_bytes()), h2_cfg, None)
+                .start_h2_tls(
+                    addr,
+                    (None, cert.as_bytes(), key.as_bytes()),
+                    H2Config::default(),
+                    None,
+                )
                 .expect("start_h2_tls");
         });
 
@@ -765,7 +1017,86 @@ mod tests {
             .expect("reqwest client");
 
         let resp = client
+            .post(format!("https://{}", addr))
+            .version(reqwest::Version::HTTP_2)
+            .body("Hello, World!")
+            .timeout(std::time::Duration::from_millis(300))
+            .send()
+            .expect("reqwest send");
+        eprintln!("Response: {resp:?}");
+        assert!(resp.status().is_success());
+
+        let body = resp.text().expect("resp text");
+        eprintln!("Response: {body:?}");
+        assert!(body.contains("Echo:"));
+        assert!(body.contains("Hello, World!"));
+    }
+
+    #[cfg(all(feature = "net-h2-server", target_os = "linux"))]
+    #[test]
+    fn test_h3_server_get() {
+        let addr = "127.0.0.1:8085";
+        let _ = std::thread::spawn(move || {
+            let (cert, key) = create_self_signed_tls_pems();
+
+            use crate::network::http::server::H3Config;
+            let h3_cfg = H3Config::default();
+            // Pick a port and start the server
+            EchoServer
+                .start_h3_tls(addr, (None, cert.as_bytes(), key.as_bytes()), h3_cfg, None)
+                .expect("start_h3_tls");
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        let client = reqwest::blocking::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .http3_prior_knowledge()
+            .build()
+            .expect("reqwest client");
+
+        let resp = client
             .get(format!("https://{}", addr))
+            .version(reqwest::Version::HTTP_3)
+            .body("Hello, World!")
+            .timeout(std::time::Duration::from_millis(300))
+            .send()
+            .expect("reqwest send");
+        eprintln!("Response: {resp:?}");
+        assert!(resp.status().is_success());
+
+        let body = resp.text().expect("resp text");
+        eprintln!("Response: {body:?}");
+        assert!(body.contains("Echo:"));
+        assert!(body.contains("Hello, World!"));
+    }
+
+    #[cfg(all(feature = "net-h2-server", target_os = "linux"))]
+    #[test]
+    fn test_h3_server_post() {
+        let addr = "127.0.0.1:8086";
+        let _ = std::thread::spawn(move || {
+            let (cert, key) = create_self_signed_tls_pems();
+
+            use crate::network::http::server::H3Config;
+            let h3_cfg = H3Config::default();
+            // Pick a port and start the server
+            EchoServer
+                .start_h3_tls(addr, (None, cert.as_bytes(), key.as_bytes()), h3_cfg, None)
+                .expect("start_h3_tls");
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        let client = reqwest::blocking::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .http3_prior_knowledge()
+            .build()
+            .expect("reqwest client");
+
+        let resp = client
+            .post(format!("https://{}", addr))
+            .version(reqwest::Version::HTTP_3)
             .body("Hello, World!")
             .timeout(std::time::Duration::from_millis(300))
             .send()

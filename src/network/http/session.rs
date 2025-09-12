@@ -2,7 +2,7 @@ use http::{HeaderName, HeaderValue};
 
 #[async_trait::async_trait(?Send)]
 pub trait Session {
-    fn peer_addr(&self) -> &std::net::SocketAddr;
+    fn peer_addr(&self) -> &std::net::IpAddr;
     fn req_method(&self) -> http::Method;
     fn req_method_str(&self) -> Option<&str>;
     fn req_path(&self) -> String;
@@ -11,10 +11,13 @@ pub trait Session {
     fn req_header(&self, header: &http::HeaderName) -> Option<http::HeaderValue>;
 
     #[cfg(feature = "net-h1-server")]
-    fn req_body_h1(&mut self, timeout: std::time::Duration) -> std::io::Result<&[u8]>;
+    fn req_body(&mut self, timeout: std::time::Duration) -> std::io::Result<&[u8]>;
 
-    #[cfg(all(feature = "net-h2-server", target_os = "linux"))]
-    async fn req_body_h2(
+    #[cfg(all(
+        target_os = "linux",
+        any(feature = "net-h2-server", feature = "net-h3-server")
+    ))]
+    async fn req_body_async(
         &mut self,
         timeout: std::time::Duration,
     ) -> Option<std::io::Result<bytes::Bytes>>;
@@ -30,6 +33,12 @@ pub trait Session {
     fn headers_str(&mut self, header_val: &[(&str, &str)]) -> std::io::Result<&mut Self>;
     fn body(&mut self, body: bytes::Bytes) -> &mut Self;
     fn eom(&mut self) -> std::io::Result<()>;
+
+    #[cfg(all(
+        target_os = "linux",
+        any(feature = "net-h2-server", feature = "net-h3-server")
+    ))]
+    async fn eom_async(&mut self) -> std::io::Result<()>;
 }
 
 pub trait HService {

@@ -18,3 +18,10 @@ cfg_if::cfg_if! {
         pub mod h2_server;
     }
 }
+
+cfg_if::cfg_if! {
+    if #[cfg(all(feature = "net-h3-server", target_os = "linux"))] {
+        pub mod h3_session;
+        pub mod h3_server;
+    }
+}
