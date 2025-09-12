@@ -98,6 +98,10 @@ impl Default for H3Config {
     }
 }
 
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "net-h2-server", feature = "net-h3-server")
+))]
 fn make_socket(
     addr: SocketAddr,
     protocol: socket2::Protocol,
@@ -705,8 +709,14 @@ pub trait HFactory: Send + Sync + Sized + 'static {
 #[cfg(test)]
 mod tests {
     use crate::network::http::server::HFactory;
-    use crate::network::http::session::{HAsyncService, HService, Session};
+    use crate::network::http::session::{HService, Session};
     use std::sync::Once;
+
+    #[cfg(all(
+        target_os = "linux",
+        any(feature = "net-h2-server", feature = "net-h3-server")
+    ))]
+    use crate::network::http::session::HAsyncService;
 
     static INIT: Once = Once::new();
 
@@ -739,6 +749,10 @@ mod tests {
         }
     }
 
+    #[cfg(all(
+        target_os = "linux",
+        any(feature = "net-h2-server", feature = "net-h3-server")
+    ))]
     #[async_trait::async_trait(?Send)]
     impl HAsyncService for EchoServer {
         async fn call<SE: Session>(&mut self, session: &mut SE) -> std::io::Result<()> {
@@ -772,6 +786,11 @@ mod tests {
 
     impl HFactory for EchoServer {
         type Service = Self;
+
+        #[cfg(all(
+            target_os = "linux",
+            any(feature = "net-h2-server", feature = "net-h3-server")
+        ))]
         type HAsyncService = Self;
 
         #[cfg(feature = "net-h1-server")]
