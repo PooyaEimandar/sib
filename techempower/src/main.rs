@@ -1,10 +1,9 @@
 use bytes::Bytes;
 use sib::network::http::{
-    server::HFactory, session::{HService, Session}, util::Status
+    server::{H1Config, HFactory},
+    session::{HService, Session},
 };
-use std::{
-    fs
-};
+use std::fs;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -26,28 +25,26 @@ struct Server;
 
 impl HService for Server {
     fn call<S: Session>(&mut self, session: &mut S) -> std::io::Result<()> {
-        if session.req_path() == Some("/json") {
+        if session.req_path() == "/json" {
             // Respond with JSON
             let json = serde_json::to_vec(&JsonMessage::default())?;
-            session
-                .status_code(Status::Ok)
+            return session
+                .status_code(http::StatusCode::OK)
                 .header_str("Content-Type", "application/json")?
                 .header_str("Content-Length", &json.len().to_string())?
-                .body(&Bytes::from(json))
+                .body(Bytes::from(json))
                 .eom();
-            return Ok(());
         }
         session
-            .status_code(Status::Ok)
+            .status_code(http::StatusCode::OK)
             .header_str("Content-Type", "text/plain")?
             .header_str("Content-Length", "13")?
-            .body(&Bytes::from_static(b"Hello, World!"))
-            .eom();
-        Ok(())
+            .body(Bytes::from_static(b"Hello, World!"))
+            .eom()
     }
 }
 
-impl HFactory for Server{
+impl HFactory for Server {
     type Service = Server;
 
     fn service(&self, _id: usize) -> Server {
@@ -57,10 +54,11 @@ impl HFactory for Server{
 
 fn main() {
     // Print number of CPU cores
+    let stack_size = 256 * 1024; // 256 KB stack
     let cpus = num_cpus::get();
     println!("CPU cores: {cpus}");
 
-    sib::set_num_workers(cpus);
+    sib::init_global_poller(cpus, stack_size);
 
     // Print total RAM in MB
     if let Ok(meminfo) = fs::read_to_string("/proc/meminfo") {
@@ -87,7 +85,13 @@ fn main() {
             let id = std::thread::current().id();
             println!("Listening {addr} on thread: {id:?}");
             Server
-                .start_h1(addr, 0)
+                .start_h1(
+                    addr,
+                    H1Config {
+                        io_timeout: std::time::Duration::from_secs(15),
+                        stack_size,
+                    },
+                )
                 .unwrap_or_else(|_| panic!("h1 server failed to start for thread {id:?}"))
                 .join()
                 .unwrap_or_else(|_| panic!("h1 server failed to joining thread {id:?}"));
