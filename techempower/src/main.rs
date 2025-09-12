@@ -3,7 +3,6 @@ use sib::network::http::{
     server::{H1Config, HFactory},
     session::{HService, Session},
 };
-use std::fs;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -53,28 +52,10 @@ impl HFactory for Server {
 }
 
 fn main() {
-    // Print number of CPU cores
-    let stack_size = 256 * 1024; // 256 KB stack
+    let stack_size = 4 * 1024; // 4 KB stack
     let cpus = num_cpus::get();
-    println!("CPU cores: {cpus}");
 
     sib::init_global_poller(cpus, stack_size);
-
-    // Print total RAM in MB
-    if let Ok(meminfo) = fs::read_to_string("/proc/meminfo") {
-        for line in meminfo.lines() {
-            if line.starts_with("MemTotal:") {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 2 {
-                    if let Ok(kb) = parts[1].parse::<u64>() {
-                        let mb = kb / 1024;
-                        println!("Total RAM: {mb} MB");
-                    }
-                }
-                break;
-            }
-        }
-    }
 
     // Pick a port and start the server
     let addr = "0.0.0.0:8080";
@@ -92,9 +73,9 @@ fn main() {
                         stack_size,
                     },
                 )
-                .unwrap_or_else(|_| panic!("h1 server failed to start for thread {id:?}"))
+                .unwrap_or_else(|_| panic!("H1 server failed to start for thread {id:?}"))
                 .join()
-                .unwrap_or_else(|_| panic!("h1 server failed to joining thread {id:?}"));
+                .unwrap_or_else(|_| panic!("H1 server failed to join thread {id:?}"));
         });
         threads.push(handle);
     }

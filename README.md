@@ -42,12 +42,12 @@ it is designed for **real-time networking**, **low-latency streaming**, and **sc
 
 # ⚙️ Build note
 
-When building with the `sys-boring-ssl` feature enabled, you’ll need to set up the LLVM toolchain and related libraries first.
+When building H1 with the `net-h1-server` feature enabled, you’ll need to set up the LLVM toolchain and related libraries first for boringSSL.
 
 ## 📦 Prerequisites (Ubuntu/Debian)
 
 ```bash
-sudo apt install -y clang lld llvm libclang-dev
+sudo apt install -y cmake clang lld llvm libclang-dev
 ```
 
 ## 📚 Documentation
