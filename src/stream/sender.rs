@@ -135,14 +135,12 @@ impl Sender {
 
             if let Some(br) = pending_bitrate {
                 cfg.bitrate = br;
-                if !needs_restart {
-                    if let Some(enc) = pipeline.by_name("encoder") {
-                        if cfg.codec == Codec::H264 {
-                            enc.set_property("bitrate", br);
-                            println!("GStreamer x264 bitrate updated to {br} kbps");
-                        } else {
-                            println!("GStreamer AV1 CRF update based on bitrate");
-                        }
+                if !needs_restart && let Some(enc) = pipeline.by_name("encoder") {
+                    if cfg.codec == Codec::H264 {
+                        enc.set_property("bitrate", br);
+                        println!("GStreamer x264 bitrate updated to {br} kbps");
+                    } else {
+                        println!("GStreamer AV1 CRF update based on bitrate");
                     }
                 }
             }
