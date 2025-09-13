@@ -22,7 +22,7 @@ pub trait Session {
         timeout: std::time::Duration,
     ) -> Option<std::io::Result<bytes::Bytes>>;
 
-    fn res_with_eom(&mut self, status: &str) -> std::io::Result<()>;
+    fn write_all_eom(&mut self, status: &[u8]) -> std::io::Result<()>;
 
     fn status_code(&mut self, status: http::StatusCode) -> &mut Self;
 

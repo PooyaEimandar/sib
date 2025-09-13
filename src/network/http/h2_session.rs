@@ -198,9 +198,9 @@ impl Session for H2Session {
     }
 
     #[inline]
-    fn res_with_eom(&mut self, status: &str) -> std::io::Result<()> {
+    fn write_all_eom(&mut self, status: &[u8]) -> std::io::Result<()> {
         Err(std::io::Error::other(
-            "res_with_eom is not supported in H2Session",
+            "write_all_eom is not supported in H2Session",
         ))
     }
 

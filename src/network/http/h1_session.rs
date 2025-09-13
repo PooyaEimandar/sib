@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 pub(crate) const BUF_LEN: usize = 8 * 4096;
 pub(crate) const MAX_HEADERS: usize = 32;
-pub(crate) static CURRENT_DATE: once_cell::sync::Lazy<Arc<ArcSwap<Arc<str>>>> =
+pub static CURRENT_DATE: once_cell::sync::Lazy<Arc<ArcSwap<Arc<str>>>> =
     once_cell::sync::Lazy::new(|| {
         let now = httpdate::HttpDate::from(std::time::SystemTime::now()).to_string();
         let swap = Arc::new(ArcSwap::from_pointee(Arc::from(now.into_boxed_str())));
@@ -191,8 +191,8 @@ where
     }
 
     #[inline]
-    fn res_with_eom(&mut self, status: &str) -> std::io::Result<()> {
-        self.rsp_buf.extend_from_slice(status.as_bytes());
+    fn write_all_eom(&mut self, status: &[u8]) -> std::io::Result<()> {
+        self.rsp_buf.extend_from_slice(status);
         Ok(())
     }
 

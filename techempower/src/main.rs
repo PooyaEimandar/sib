@@ -1,4 +1,3 @@
-use bytes::Bytes;
 use sib::network::http::{
     server::{H1Config, HFactory},
     session::{HService, Session},
@@ -24,22 +23,43 @@ struct Server;
 
 impl HService for Server {
     fn call<S: Session>(&mut self, session: &mut S) -> std::io::Result<()> {
+        use core::fmt::Write;
+        use sib::network::http::h1_session;
         if session.req_path() == "/json" {
             // Respond with JSON
+            let mut res: heapless::String<192> = heapless::String::new();
             let json = serde_json::to_vec(&JsonMessage::default())?;
-            return session
-                .status_code(http::StatusCode::OK)
-                .header_str("Content-Type", "application/json")?
-                .header_str("Content-Length", &json.len().to_string())?
-                .body(Bytes::from(json))
-                .eom();
+            write!(
+                res,
+                "HTTP/1.1 200 OK\r\n\
+                Server: sib\r\n\
+                Date: {}\r\n\
+                Content-Type: application/json\r\n\
+                Content-Length: {}\r\n\
+                \r\n\
+                    {}",
+                h1_session::CURRENT_DATE.load(),
+                &json.len().to_string(),
+                String::from_utf8_lossy(&json)
+            )
+            .unwrap();
+            session.write_all_eom(res.as_bytes())
+        } else {
+            let mut res: heapless::String<160> = heapless::String::new();
+            write!(
+                res,
+                "HTTP/1.1 200 OK\r\n\
+             Server: sib\r\n\
+             Date: {}\r\n\
+             Content-Type: text/plain\r\n\
+             Content-Length: 13\r\n\
+             \r\n\
+             Hello, World!",
+                h1_session::CURRENT_DATE.load()
+            )
+            .unwrap();
+            session.write_all_eom(res.as_bytes())
         }
-        session
-            .status_code(http::StatusCode::OK)
-            .header_str("Content-Type", "text/plain")?
-            .header_str("Content-Length", "13")?
-            .body(Bytes::from_static(b"Hello, World!"))
-            .eom()
     }
 }
 
