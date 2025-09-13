@@ -9,12 +9,12 @@ it is designed for **real-time networking**, **low-latency streaming**, and **sc
 
 | Feature          | Description                                                |
 | ---------------- | ---------------------------------------------------------- |
-| `net-h1-server`  | Enable HTTP/1.1 server with coroutine concurrency          |
-| `net-h3-server`  | Enable HTTP/3 QUIC-based server with coroutine concurrency |
+| `net-h1-server`  | Enable HTTP/1.1 server with coroutine (cross platform)     |
+| `net-h2-server`  | Enable HTTP/2 server with io_uring (only on Linux kernel 5.6+)                        |
+| `net-h3-server`  | Enable HTTP/3 QUIC-based server with io_uring (only on Linux kernel 5.6+)              |
 | `db-fdb`         | FoundationDB bindings (requires `libfdb_c`) on macOS/Linux |
 | `stm-sender`     | Real-time video/audio streamer server                      |
 | `stm-receiver`   | Real-time video/audio receiver                             |
-| `sys-boring-ssl` | BoringSSL backend for secure networking                    |
 
 ## 📊 Benchmarks
 
