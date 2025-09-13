@@ -181,7 +181,7 @@ impl Session for H3Session {
     }
 
     #[inline]
-    fn write_all_eom(&mut self, status: &[u8]) -> std::io::Result<()> {
+    fn write_all_eom(&mut self, _status: &[u8]) -> std::io::Result<()> {
         Err(std::io::Error::other(
             "write_all_eom is not supported in H3Session",
         ))

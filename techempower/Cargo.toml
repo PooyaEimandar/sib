@@ -1,6 +1,6 @@
 [package]
 name = "sib-techempower"
-version = "0.0.1"
+version = "0.0.2"
 authors = ["mail@pooya.ai"]
 description = "A high-performance, secure, and cross-platform modules optimized for efficiency, scalability, and reliability."
 documentation = "https://docs.rs/sib"
