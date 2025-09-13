@@ -30,7 +30,7 @@ impl Default for H1Config {
     }
 }
 
-#[cfg(all(feature = "net-h2-server", target_os = "linux"))]
+#[cfg(all(target_os = "linux", feature = "net-h2-server"))]
 #[derive(Debug, Clone)]
 pub struct H2Config {
     pub backlog: usize,
@@ -45,7 +45,7 @@ pub struct H2Config {
     pub num_of_shards: usize,
 }
 
-#[cfg(all(feature = "net-h2-server", target_os = "linux"))]
+#[cfg(all(target_os = "linux", feature = "net-h2-server"))]
 impl Default for H2Config {
     fn default() -> Self {
         Self {
@@ -63,7 +63,7 @@ impl Default for H2Config {
     }
 }
 
-#[cfg(all(feature = "net-h3-server", target_os = "linux"))]
+#[cfg(all(target_os = "linux", feature = "net-h3-server"))]
 #[derive(Debug, Clone)]
 pub struct H3Config {
     pub backlog: usize,
@@ -79,7 +79,7 @@ pub struct H3Config {
     pub send_window: u64,
 }
 
-#[cfg(all(feature = "net-h3-server", target_os = "linux"))]
+#[cfg(all(target_os = "linux", feature = "net-h3-server"))]
 impl Default for H3Config {
     fn default() -> Self {
         Self {
@@ -150,7 +150,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
     #[cfg(feature = "net-h1-server")]
     type Service: crate::network::http::session::HService + Send;
 
-    #[cfg(all(feature = "net-h2-server", target_os = "linux"))]
+    #[cfg(all(target_os = "linux", feature = "net-h2-server"))]
     type HAsyncService: crate::network::http::session::HAsyncService + Send;
 
     // create a new http service for each connection
@@ -158,7 +158,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
     fn service(&self, id: usize) -> Self::Service;
 
     // create a new http async service for each connection
-    #[cfg(all(feature = "net-h2-server", target_os = "linux"))]
+    #[cfg(all(target_os = "linux", feature = "net-h2-server"))]
     fn async_service(&self, id: usize) -> Self::HAsyncService;
 
     /// Start the http service

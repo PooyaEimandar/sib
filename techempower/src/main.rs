@@ -80,7 +80,7 @@ fn main() {
         threads.push(handle);
     }
 
-    // Wait for all threads to complete (they won’t unless crashed)
+    // Wait for all threads to complete
     for handle in threads {
         handle.join().expect("Thread panicked");
     }

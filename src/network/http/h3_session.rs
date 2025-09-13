@@ -74,7 +74,7 @@ impl Session for H3Session {
     #[inline]
     fn req_body(&mut self, _timeout: std::time::Duration) -> std::io::Result<&[u8]> {
         Err(std::io::Error::other(
-            "req_body_h1 not supported in H2Session",
+            "req_body_h1 is not supported in H2Session",
         ))
     }
 
@@ -138,7 +138,7 @@ impl Session for H3Session {
     #[inline]
     fn start_h2_streaming(&mut self) -> std::io::Result<super::h2_session::H2Stream> {
         Err(std::io::Error::other(
-            "start_h2_streaming not supported in H3Session",
+            "start_h2_streaming is not supported in H3Session",
         ))
     }
 
@@ -178,6 +178,13 @@ impl Session for H3Session {
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
         }
         Ok(())
+    }
+
+    #[inline]
+    fn res_with_eom(&mut self, status: &str) -> std::io::Result<()> {
+        Err(std::io::Error::other(
+            "res_with_eom is not supported in H3Session",
+        ))
     }
 
     #[inline]
@@ -236,7 +243,7 @@ impl Session for H3Session {
     // end of message: send the response (headers + body)
     #[inline]
     fn eom(&mut self) -> std::io::Result<()> {
-        Err(std::io::Error::other("eom not supported in H3Session"))
+        Err(std::io::Error::other("eom is not supported in H3Session"))
     }
 
     #[inline]

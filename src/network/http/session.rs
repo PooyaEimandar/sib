@@ -22,6 +22,8 @@ pub trait Session {
         timeout: std::time::Duration,
     ) -> Option<std::io::Result<bytes::Bytes>>;
 
+    fn res_with_eom(&mut self, status: &str) -> std::io::Result<()>;
+
     fn status_code(&mut self, status: http::StatusCode) -> &mut Self;
 
     #[cfg(all(feature = "net-h2-server", target_os = "linux"))]

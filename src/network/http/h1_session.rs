@@ -191,6 +191,12 @@ where
     }
 
     #[inline]
+    fn res_with_eom(&mut self, status: &str) -> std::io::Result<()> {
+        self.rsp_buf.extend_from_slice(status.as_bytes());
+        Ok(())
+    }
+
+    #[inline]
     fn status_code(&mut self, status: http::StatusCode) -> &mut Self {
         const SERVER_NAME: &str =
             concat!("\r\nServer: Sib ", env!("SIB_BUILD_VERSION"), "\r\nDate: ");
@@ -212,7 +218,7 @@ where
     #[inline]
     fn start_h2_streaming(&mut self) -> std::io::Result<super::h2_session::H2Stream> {
         Err(io::Error::other(
-            "start_h2_streaming not supported in H1Session",
+            "start_h2_streaming is not supported in H1Session",
         ))
     }
 
@@ -220,7 +226,7 @@ where
     #[inline]
     async fn start_h3_streaming(&mut self) -> std::io::Result<()> {
         Err(std::io::Error::other(
-            "start_h3_streaming not supported in H1Session",
+            "start_h3_streaming is not supported in H1Session",
         ))
     }
 
@@ -232,7 +238,7 @@ where
         _end_stream: bool,
     ) -> std::io::Result<()> {
         Err(std::io::Error::other(
-            "send_h3_data not supported in H1Session",
+            "send_h3_data is not supported in H1Session",
         ))
     }
 
@@ -305,7 +311,7 @@ where
     ))]
     #[inline]
     async fn eom_async(&mut self) -> std::io::Result<()> {
-        Err(io::Error::other("eom_async not supported in H1Session"))
+        Err(io::Error::other("eom_async is not supported in H1Session"))
     }
 }
 
