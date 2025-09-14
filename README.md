@@ -54,7 +54,6 @@ sudo apt install -y cmake clang lld llvm libclang-dev
 
 - 📦 [Crate](https://crates.io/crates/sib)
 - 📖 [Docs](https://docs.rs/sib)
-- 🧪 [Benchmarks: TechEmpower](https://github.com/TechEmpower/FrameworkBenchmarks)
 
 ## 🔒 Security
 
