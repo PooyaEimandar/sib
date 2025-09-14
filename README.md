@@ -18,7 +18,7 @@ it is designed for **real-time networking**, **low-latency streaming**, and **sc
 
 ## 📊 Benchmarks
 
-### 🔬 [HTTP/1.1 TechEmpower Plaintext Benchmark](https://github.com/TechEmpower/FrameworkBenchmarks/tree/master/frameworks/Rust/sib) - **Ready** for production
+### 🔬 [HTTP/1.1 TechEmpower Plaintext Benchmark](https://github.com/TechEmpower/FrameworkBenchmarks/tree/master/frameworks/Rust/sib)
 
 **Environment:**
 
