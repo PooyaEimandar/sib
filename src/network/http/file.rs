@@ -1354,7 +1354,7 @@ mod tests {
                 http::HeaderValue::from_static("close"),
             );
 
-            let rel_file = "/home/parallels/sib/target/debug/libsib.a"; //file!();
+            let rel_file = file!();
             use crate::network::http::file::serve_h1;
             serve_h1(
                 session,
@@ -1389,7 +1389,7 @@ mod tests {
             const H2_STREAM_CHUNK_SIZE: usize = 128 * 1024; // 128 KB
 
             let mut rsp_headers = HeaderMap::new();
-            let rel_file = "/home/parallels/sib/target/debug/libsib.a"; //file!();
+            let rel_file = file!();
 
             if session.req_http_version() == http::Version::HTTP_2 {
                 rsp_headers.insert(
