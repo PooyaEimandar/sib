@@ -185,23 +185,8 @@ fn make_server(config: &H2Config) -> h2::server::Builder {
     builder
         .initial_connection_window_size(config.initial_connection_window_size)
         .initial_window_size(config.initial_window_size)
-        .max_concurrent_streams(config.max_concurrent_streams.into())
+        .max_concurrent_streams(config.max_concurrent_streams)
         .max_frame_size(config.max_frame_size)
-        .max_header_list_size(config.max_header_list_size as u32);
+        .max_header_list_size(config.max_header_list_size);
     builder
 }
-
-// // // Helper to read a full request body with h2::RecvStream-like API.
-// // // If you already have a Session adapter, replace this with your existing logic.
-// // #[cfg(all(feature = "net-h2-server", not(target_os = "linux")))]
-// async fn hyperlike_read_full(
-//     req: http::Request<h2::RecvStream>,
-// ) -> Result<Vec<u8>, std::io::Error> {
-//     let mut body = req.into_body();
-//     let mut out = Vec::new();
-//     while let Some(result) = body.data().await {
-//         let chunk = result.map_err(|e| std::io::Error::other(format!("h2 body error: {e}")))?;
-//         out.extend_from_slice(&chunk);
-//     }
-//     Ok(out)
-// }
