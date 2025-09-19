@@ -1195,7 +1195,7 @@ pub async fn serve_h2_streaming<S: Session>(
             stream.reserve_capacity(chunk_size);
 
             // Protect against stalls if WINDOW_UPDATEs stop
-            #[cfg(all(target_os = "linux", feature = "rt-glommio"))]
+            #[cfg(all(target_os = "linux", feature = "rt-glommio", not(feature = "rt-tokio")))]
             {
                 cap = match glommio::timer::timeout(TIMEOUT, async {
                     stream
@@ -1215,7 +1215,7 @@ pub async fn serve_h2_streaming<S: Session>(
                 }
             };
 
-            #[cfg(feature = "rt-tokio")]
+            #[cfg(all(feature = "rt-tokio", not(feature = "rt-glommio")))]
             {
                 cap = tokio::select! {
                     res = stream.next_capacity() => res,

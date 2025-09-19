@@ -1126,7 +1126,7 @@ mod tests {
 
     #[cfg(feature = "net-h2-server")]
     #[test]
-    fn test_h2_server_get() {
+    fn test_h2_tls_server_get() {
         let addr = "127.0.0.1:8083";
         let _ = std::thread::spawn(move || {
             let (cert, key) = create_self_signed_tls_pems();
@@ -1169,7 +1169,7 @@ mod tests {
 
     #[cfg(feature = "net-h2-server")]
     #[test]
-    fn test_h2_server_post() {
+    fn test_h2_tls_server_post() {
         let addr = "127.0.0.1:8084";
         let _ = std::thread::spawn(move || {
             let (cert, key) = create_self_signed_tls_pems();
@@ -1210,9 +1210,9 @@ mod tests {
         assert!(body.contains("Hello, World!"));
     }
 
-    #[cfg(all(feature = "net-h2-server", target_os = "linux"))]
+    #[cfg(all(feature = "net-h3-server", target_os = "linux"))]
     #[test]
-    fn test_h3_server_get() {
+    fn test_h3_tls_server_get() {
         let addr = "127.0.0.1:8085";
         let _ = std::thread::spawn(move || {
             let (cert, key) = create_self_signed_tls_pems();
@@ -1249,9 +1249,9 @@ mod tests {
         assert!(body.contains("Hello, World!"));
     }
 
-    #[cfg(all(feature = "net-h2-server", target_os = "linux"))]
+    #[cfg(all(feature = "net-h3-server", target_os = "linux"))]
     #[test]
-    fn test_h3_server_post() {
+    fn test_h3_tls_server_post() {
         let addr = "127.0.0.1:8086";
         let _ = std::thread::spawn(move || {
             let (cert, key) = create_self_signed_tls_pems();

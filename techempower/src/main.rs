@@ -1,3 +1,4 @@
+// TechEmpower benchmark tests for Sib with the `net-h1-server` feature enabled
 use sib::network::http::{
     server::{H1Config, HFactory},
     session::{HService, Session},

@@ -150,7 +150,7 @@ net-h3-server = [
     "tokio",
 ]
 
-rt-glommio = ["glommio", "futures-rustls"]
+rt-glommio = ["futures-rustls", "glommio", "tokio"]
 rt-tokio = ["tokio", "tokio-rustls"]
 
 stm-sender = ["crossbeam", "glib", "gstreamer", "gstreamer-video"]
