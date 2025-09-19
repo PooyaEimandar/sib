@@ -7,14 +7,16 @@ it is designed for **real-time networking**, **low-latency streaming**, and **sc
 
 ## ✨ Features
 
-| Feature          | Description                                                |
-| ---------------- | ---------------------------------------------------------- |
-| `net-h1-server`  | Enable HTTP/1.1 server with coroutine (cross platform)     |
-| `net-h2-server`  | Enable HTTP/2 server with io_uring (only on Linux kernel 5.6+)                        |
-| `net-h3-server`  | Enable HTTP/3 QUIC-based server with io_uring (only on Linux kernel 5.6+)              |
-| `db-fdb`         | FoundationDB bindings (requires `libfdb_c`) on macOS/Linux |
-| `stm-sender`     | Real-time video/audio streamer server                      |
-| `stm-receiver`   | Real-time video/audio receiver                             |
+| Feature          | Description                        
+| ---------------- | --------------------------------- 
+| `net-h1-server`  | Enable HTTP/1.1 server            
+| `net-h2-server`  | Enable HTTP/2 server with either rt-glommio or rt-tokio feature 
+| `net-h3-server`  | Enable HTTP/3 server              
+| `db-fdb`         | FoundationDB bindings      
+| `rt-glommio`     | Enable glommio runtime for HTTP/2/3      
+| `rt-tokio`       | Runtime tokio runtime for HTTP/2/3    
+| `stm-sender`     | Real-time video/audio streamer    
+| `stm-receiver`   | Real-time video/audio receiver    
 
 ## 📊 Benchmarks
 
@@ -26,10 +28,6 @@ it is designed for **real-time networking**, **low-latency streaming**, and **sc
 - 🧮 32 GB RAM
 - 🐳 Docker container
 - ⚙️ `target-cpu=native` on Apple Macbook Pro M2 Max 2023
-- Sib HTTP/1.1 uses:
-  - [`may`](https://github.com/Xudong-Huang/may) for coroutine scheduling.
-  - [`bytes`](https://github.com/tokio-rs/bytes) for zero-copy HTTP parser.
-  - [`mimalloc`](https://github.com/microsoft/mimalloc) a compact general purpose allocator with excellent performance.
 
 | Concurrency | Requests/sec  | Latency (avg) | Transfer/sec |
 | ----------- | ------------- | ------------- | ------------ |

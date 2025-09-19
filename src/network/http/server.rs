@@ -13,6 +13,21 @@ macro_rules! mc {
     };
 }
 
+#[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
+macro_rules! resolve_addr {
+    ($addr:expr) => {
+        $addr.to_socket_addrs()?.next().map_or_else(
+            || {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Could not resolve to any address",
+                ))
+            },
+            |x| Ok(x),
+        )
+    };
+}
+
 #[cfg(feature = "net-h1-server")]
 #[derive(Debug, Clone)]
 pub struct H1Config {
@@ -30,9 +45,10 @@ impl Default for H1Config {
     }
 }
 
-#[cfg(all(target_os = "linux", feature = "net-h2-server"))]
+#[cfg(feature = "net-h2-server")]
 #[derive(Debug, Clone)]
 pub struct H2Config {
+    pub alpn_protocols: Vec<Vec<u8>>,
     pub backlog: usize,
     pub enable_connect_protocol: bool,
     pub initial_connection_window_size: u32,
@@ -45,10 +61,11 @@ pub struct H2Config {
     pub num_of_shards: usize,
 }
 
-#[cfg(all(target_os = "linux", feature = "net-h2-server"))]
+#[cfg(feature = "net-h2-server")]
 impl Default for H2Config {
     fn default() -> Self {
         Self {
+            alpn_protocols: vec![b"h2".to_vec(), b"http/1.1".to_vec()],
             backlog: 512,
             enable_connect_protocol: false,
             initial_connection_window_size: 64 * 1024,
@@ -63,7 +80,7 @@ impl Default for H2Config {
     }
 }
 
-#[cfg(all(target_os = "linux", feature = "net-h3-server"))]
+#[cfg(feature = "net-h3-server")]
 #[derive(Debug, Clone)]
 pub struct H3Config {
     pub backlog: usize,
@@ -79,7 +96,7 @@ pub struct H3Config {
     pub send_window: u64,
 }
 
-#[cfg(all(target_os = "linux", feature = "net-h3-server"))]
+#[cfg(feature = "net-h3-server")]
 impl Default for H3Config {
     fn default() -> Self {
         Self {
@@ -98,10 +115,7 @@ impl Default for H3Config {
     }
 }
 
-#[cfg(all(
-    target_os = "linux",
-    any(feature = "net-h2-server", feature = "net-h3-server")
-))]
+#[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
 fn make_socket(
     addr: SocketAddr,
     protocol: socket2::Protocol,
@@ -146,11 +160,68 @@ fn make_socket(
     Ok(sock)
 }
 
+#[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
+fn make_rustls_config(
+    chain_cert_key: &(Option<&[u8]>, &[u8], &[u8]),
+    h2_cfg: &H2Config,
+) -> std::io::Result<rustls::ServerConfig> {
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    use rustls_pemfile::{certs, pkcs8_private_keys};
+
+    // Load certs & key
+    let certs: Vec<CertificateDer<'static>> = {
+        let mut reader = std::io::Cursor::new(chain_cert_key.1);
+        certs(&mut reader)
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .collect()
+    };
+
+    let key: PrivateKeyDer<'static> = {
+        let mut reader = std::io::Cursor::new(chain_cert_key.2);
+        let keys: Result<Vec<_>, std::io::Error> = pkcs8_private_keys(&mut reader)
+            .map(|res| {
+                res.map_err(|e| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("H2 got a bad private key: {e}"),
+                    )
+                })
+            })
+            .collect();
+        let keys = keys?;
+        if let Some(key) = keys.into_iter().next() {
+            PrivateKeyDer::from(key)
+        } else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "H2 could not find a private key",
+            ));
+        }
+    };
+
+    // TLS config
+    let mut cfg = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("H2 could not load cert/key: {e}"),
+            )
+        })?;
+
+    // set ALPN
+    cfg.alpn_protocols = h2_cfg.alpn_protocols.clone();
+
+    Ok(cfg)
+}
+
 pub trait HFactory: Send + Sync + Sized + 'static {
     #[cfg(feature = "net-h1-server")]
     type Service: crate::network::http::session::HService + Send;
 
-    #[cfg(all(target_os = "linux", feature = "net-h2-server"))]
+    #[cfg(feature = "net-h2-server")]
     type HAsyncService: crate::network::http::session::HAsyncService + Send;
 
     // create a new http service for each connection
@@ -158,7 +229,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
     fn service(&self, id: usize) -> Self::Service;
 
     // create a new http async service for each connection
-    #[cfg(all(target_os = "linux", feature = "net-h2-server"))]
+    #[cfg(feature = "net-h2-server")]
     fn async_service(&self, id: usize) -> Self::HAsyncService;
 
     /// Start the http service
@@ -353,7 +424,8 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         )
     }
 
-    #[cfg(all(feature = "net-h2-server", target_os = "linux"))]
+    /// Start the h2 service with TLS based on glommio on linux
+    #[cfg(all(feature = "net-h2-server", feature = "rt-glommio", target_os = "linux"))]
     fn start_h2_tls<L: ToSocketAddrs>(
         self,
         addr: L,
@@ -361,58 +433,12 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         h2_cfg: H2Config,
         rate_limiter: Option<super::ratelimit::RateLimiterKind>,
     ) -> std::io::Result<()> {
-        use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-        use rustls_pemfile::{certs, pkcs8_private_keys};
-
-        // Load certs & key
-        let certs: Vec<CertificateDer<'static>> = {
-            let mut reader = std::io::Cursor::new(chain_cert_key.1);
-            certs(&mut reader)
-                .collect::<Result<Vec<_>, _>>()?
-                .into_iter()
-                .collect()
-        };
-
-        let key: PrivateKeyDer<'static> = {
-            let mut reader = std::io::Cursor::new(chain_cert_key.2);
-            let keys: Result<Vec<_>, std::io::Error> = pkcs8_private_keys(&mut reader)
-                .map(|res| {
-                    res.map_err(|e| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::InvalidInput,
-                            format!("H2 got a bad private key: {e}"),
-                        )
-                    })
-                })
-                .collect();
-            let keys = keys?;
-            if let Some(key) = keys.into_iter().next() {
-                PrivateKeyDer::from(key)
-            } else {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "H2 could not find a private key",
-                ));
-            }
-        };
-
-        // TLS config
-        let mut cfg = rustls::ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(certs, key)
-            .map_err(|e| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("H2 could not load cert/key: {e}"),
-                )
-            })?;
-
-        // ALPN: h2 then h1.1
-        cfg.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-
-        let tls_acceptor = futures_rustls::TlsAcceptor::from(std::sync::Arc::new(cfg));
-        let socket_addr = addr.to_socket_addrs()?.next().unwrap();
-
+        // get socket address
+        let socket_addr = resolve_addr!(addr)?;
+        // create tls acceptor
+        let tls_acceptor = futures_rustls::TlsAcceptor::from(std::sync::Arc::new(
+            make_rustls_config(&chain_cert_key, &h2_cfg)?,
+        ));
         let factory = std::sync::Arc::new(self);
         let rate_limiter_arc = std::sync::Arc::new(rate_limiter);
 
@@ -527,6 +553,133 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         Ok(())
     }
 
+    /// Start the h2 service with TLS based on tokio on non-linux OS
+    #[cfg(all(feature = "net-h2-server", feature = "rt-tokio"))]
+    fn start_h2_tls<L: ToSocketAddrs>(
+        self,
+        addr: L,
+        chain_cert_key: (Option<&[u8]>, &[u8], &[u8]),
+        h2_cfg: H2Config,
+        rate_limiter: Option<super::ratelimit::RateLimiterKind>,
+    ) -> std::io::Result<()> {
+        use std::sync::Arc;
+        use tokio::{io::AsyncWriteExt, net::TcpListener, sync::Semaphore};
+
+        // Resolve bind address
+        let socket_addr = resolve_addr!(addr)?;
+
+        // Build rustls config + Tokio TLS acceptor
+        let tls_acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(make_rustls_config(
+            &chain_cert_key,
+            &h2_cfg,
+        )?));
+
+        // Build a multi-thread Tokio runtime; the LocalSet will ensure !Send tasks stay on one thread.
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+
+        // Shareables for the async block
+        let factory = Arc::new(self);
+        let rl = Arc::new(rate_limiter);
+        let h2_cfg_arc = Arc::new(h2_cfg);
+
+        rt.block_on(async move {
+            // Bind listener using your socket2 setup (keeps SO_REUSEPORT, nonblocking, etc.)
+            let listener =
+                match make_socket(socket_addr, socket2::Protocol::TCP, h2_cfg_arc.backlog) {
+                    Ok(socket) => {
+                        let std_listener: std::net::TcpListener = socket.into();
+                        std_listener.set_nonblocking(true)?;
+                        TcpListener::from_std(std_listener)
+                            .map_err(|e| std::io::Error::other(format!("tokio from_std: {e}")))?
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to create h2 listener on {socket_addr}: {e}");
+                        return Err(e);
+                    }
+                };
+
+            eprintln!("Tokio H2/TLS listening on {socket_addr}");
+
+            // Concurrency guard per-process (cap active H2 connections)
+            let sem = Arc::new(Semaphore::new(h2_cfg_arc.max_sessions as usize));
+
+            // Run accept + per-conn work on a LocalSet so spawned tasks may be !Send.
+            let local = tokio::task::LocalSet::new();
+            local
+                .run_until(async move {
+                    loop {
+                        let (mut stream, peer_addr) = match listener.accept().await {
+                            Ok(x) => x,
+                            Err(e) => {
+                                eprintln!("accept error: {e}");
+                                continue;
+                            }
+                        };
+
+                        // Good practice for H2
+                        let _ = stream.set_nodelay(true);
+
+                        let peer_ip = peer_addr.ip();
+
+                        // Optional rate limiting
+                        if let Some(rl) = rl.as_ref()
+                            && !peer_ip.is_unspecified()
+                        {
+                            use super::ratelimit::RateLimiter;
+                            let result = rl.check(peer_ip.to_string().into());
+                            if !result.allowed {
+                                let _ = stream.shutdown().await;
+                                continue;
+                            }
+                        }
+
+                        // Acquire a session slot (drop if at capacity)
+                        let permit = match sem.clone().try_acquire_owned() {
+                            Ok(p) => p,
+                            Err(_) => {
+                                let _ = stream.shutdown().await;
+                                continue;
+                            }
+                        };
+
+                        let tls_acceptor = tls_acceptor.clone();
+                        let factory = factory.clone();
+                        let h2_cfg = h2_cfg_arc.clone();
+
+                        // Keep the whole connection (TLS + h2 serve) on the LocalSet thread.
+                        tokio::task::spawn_local(async move {
+                            let _permit = permit;
+
+                            // TLS handshake
+                            let tls_stream = match tls_acceptor.accept(stream).await {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    eprintln!("TLS handshake error from {peer_addr}: {e}");
+                                    return;
+                                }
+                            };
+
+                            // Run one service per H2 connection; per-stream tasks are spawned in `serve()`
+                            use crate::network::http::h2_server::serve;
+                            let service = factory.async_service(0); // use shard id if you have per-core sharding
+
+                            if let Err(e) = serve(tls_stream, service, &h2_cfg, peer_ip).await {
+                                eprintln!("h2 serve error from {peer_addr}: {e}");
+                            }
+                        });
+                    }
+                })
+                .await;
+
+            #[allow(unreachable_code)]
+            Ok::<(), std::io::Error>(())
+        })?;
+
+        Ok(())
+    }
+
     #[cfg(all(feature = "net-h3-server", target_os = "linux"))]
     fn start_h3_tls<L: ToSocketAddrs>(
         self,
@@ -609,7 +762,8 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         let mut server = quinn::ServerConfig::with_crypto(std::sync::Arc::new(quic_tls));
         server.transport = std::sync::Arc::new(transport);
 
-        let socket_addr = addr.to_socket_addrs()?.next().unwrap();
+        let socket_addr = resolve_addr!(addr)?;
+
         let factory = std::sync::Arc::new(self);
         let rate_limiter_arc = std::sync::Arc::new(rate_limiter);
 
@@ -667,7 +821,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                     }
 
                     // Acquire a session slot (or skip if none available)
-                    let sess_token = match std::rc::Rc::clone(&sem).try_acquire_static_permit(1) {
+                    let permit = match std::rc::Rc::clone(&sem).try_acquire_static_permit(1) {
                         Ok(p) => p,
                         Err(_) => {
                             continue;
@@ -679,7 +833,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                     // accept connection
                     glommio::spawn_local(async move {
                         // Hold for the lifetime of the session
-                        let _permit = sess_token;
+                        let _permit = permit;
 
                         match incoming.await {
                             Ok(connection) => {
@@ -712,10 +866,7 @@ mod tests {
     use crate::network::http::session::{HService, Session};
     use std::sync::Once;
 
-    #[cfg(all(
-        target_os = "linux",
-        any(feature = "net-h2-server", feature = "net-h3-server")
-    ))]
+    #[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
     use crate::network::http::session::HAsyncService;
 
     static INIT: Once = Once::new();
@@ -749,10 +900,7 @@ mod tests {
         }
     }
 
-    #[cfg(all(
-        target_os = "linux",
-        any(feature = "net-h2-server", feature = "net-h3-server")
-    ))]
+    #[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
     #[async_trait::async_trait(?Send)]
     impl HAsyncService for EchoServer {
         async fn call<SE: Session>(&mut self, session: &mut SE) -> std::io::Result<()> {
@@ -787,10 +935,7 @@ mod tests {
     impl HFactory for EchoServer {
         type Service = Self;
 
-        #[cfg(all(
-            target_os = "linux",
-            any(feature = "net-h2-server", feature = "net-h3-server")
-        ))]
+        #[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
         type HAsyncService = Self;
 
         #[cfg(feature = "net-h1-server")]
@@ -798,7 +943,7 @@ mod tests {
             EchoServer
         }
 
-        #[cfg(all(feature = "net-h2-server", target_os = "linux"))]
+        #[cfg(feature = "net-h2-server")]
         fn async_service(&self, _id: usize) -> Self::HAsyncService {
             EchoServer
         }
@@ -965,7 +1110,7 @@ mod tests {
         std::thread::sleep(Duration::from_secs(1));
     }
 
-    #[cfg(all(feature = "net-h2-server", target_os = "linux"))]
+    #[cfg(feature = "net-h2-server")]
     #[test]
     fn test_h2_server_get() {
         let addr = "127.0.0.1:8083";
@@ -984,7 +1129,7 @@ mod tests {
                 .expect("start_h2_tls");
         });
 
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        std::thread::sleep(std::time::Duration::from_secs(1));
 
         let client = reqwest::blocking::Client::builder()
             .danger_accept_invalid_certs(true)
@@ -1008,7 +1153,7 @@ mod tests {
         assert!(body.contains("Hello, World!"));
     }
 
-    #[cfg(all(feature = "net-h2-server", target_os = "linux"))]
+    #[cfg(feature = "net-h2-server")]
     #[test]
     fn test_h2_server_post() {
         let addr = "127.0.0.1:8084";
@@ -1027,7 +1172,7 @@ mod tests {
                 .expect("start_h2_tls");
         });
 
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        std::thread::sleep(std::time::Duration::from_secs(1));
 
         let client = reqwest::blocking::Client::builder()
             .danger_accept_invalid_certs(true)
@@ -1066,7 +1211,7 @@ mod tests {
                 .expect("start_h3_tls");
         });
 
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        std::thread::sleep(std::time::Duration::from_secs(1));
 
         let client = reqwest::blocking::Client::builder()
             .danger_accept_invalid_certs(true)
@@ -1105,7 +1250,7 @@ mod tests {
                 .expect("start_h3_tls");
         });
 
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        std::thread::sleep(std::time::Duration::from_secs(1));
 
         let client = reqwest::blocking::Client::builder()
             .danger_accept_invalid_certs(true)

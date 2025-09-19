@@ -328,10 +328,7 @@ fn serve_fn<S: Session>(
     Ok(())
 }
 
-#[cfg(all(
-    target_os = "linux",
-    any(feature = "net-h2-server", feature = "net-h3-server")
-))]
+#[cfg(all(feature = "net-h3-server", target_os = "linux"))]
 async fn serve_async_fn<S: Session>(
     session: &mut S,
     path: &str,
@@ -672,7 +669,7 @@ pub fn serve_h1<S: Session>(
     result
 }
 
-#[cfg(all(feature = "net-h2-server", target_os = "linux"))]
+#[cfg(feature = "net-h2-server")]
 pub async fn serve_h2<S: Session>(
     session: &mut S,
     path: &str,
@@ -1026,7 +1023,7 @@ fn choose_encoding(accept: &HeaderValue, mime: &Mime, order: &[EncodingType]) ->
             continue;
         }
         let mut parts = item.split(';');
-        let token_raw = parts.next().unwrap().trim();
+        let token_raw = parts.next().unwrap_or_default().trim();
         let token = token_raw.to_ascii_lowercase();
         let mut q: f32 = 1.0;
         for p in parts {
@@ -1116,7 +1113,7 @@ pub fn encode_gzip<T: AsRef<[u8]>>(input: T, level: u32) -> std::io::Result<Byte
     Ok(Bytes::from(out))
 }
 
-#[cfg(all(feature = "net-h2-server", target_os = "linux"))]
+#[cfg(feature = "net-h2-server")]
 pub async fn serve_h2_streaming<S: Session>(
     session: &mut S,
     status: http::StatusCode,
@@ -1191,26 +1188,42 @@ pub async fn serve_h2_streaming<S: Session>(
 
     while off < end_usize {
         // Consume any already granted capacity before awaiting new credit
-        let cap = stream.capacity();
+        let mut cap = stream.capacity();
         if cap == 0 {
+            const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3); // seconds
             // Ensure we keep requesting capacity (some peers grant lazily)
             stream.reserve_capacity(chunk_size);
 
             // Protect against stalls if WINDOW_UPDATEs stop
-            let cap = match glommio::timer::timeout(std::time::Duration::from_secs(3), async {
-                stream
-                    .next_capacity()
-                    .await
-                    .map_err(glommio::GlommioError::IoError)
-            })
-            .await
+            #[cfg(all(target_os = "linux", feature = "rt-glommio"))]
             {
-                Ok(c) => c,
-                Err(e) => {
-                    return Err(std::io::Error::other(format!(
-                        "H2 stream capacity error: {e}"
-                    )));
+                cap = match glommio::timer::timeout(TIMEOUT, async {
+                    stream
+                        .next_capacity()
+                        .await
+                        .map_err(glommio::GlommioError::IoError)
+                })
+                .await
+                {
+                    Ok(c) => c,
+                    Err(e) => {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            format!("H2 next_capacity timed out after {:?}", TIMEOUT),
+                        ));
+                    }
                 }
+            };
+
+            #[cfg(feature = "rt-tokio")]
+            {
+                cap = tokio::select! {
+                    res = stream.next_capacity() => res,
+                    _ = tokio::time::sleep(TIMEOUT) => Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!("H2 next_capacity timed out after {:?}", TIMEOUT),
+                    )),
+                }?
             };
 
             if cap == 0 {
@@ -1235,6 +1248,7 @@ pub async fn serve_h2_streaming<S: Session>(
             stream.reserve_capacity(chunk_size);
         }
 
+        #[cfg(all(feature = "rt-glommio", target_os = "linux"))]
         glommio::yield_if_needed().await;
     }
 
@@ -1328,10 +1342,7 @@ mod tests {
     use http::HeaderMap;
     use std::sync::OnceLock;
 
-    #[cfg(all(
-        target_os = "linux",
-        any(feature = "net-h2-server", feature = "net-h3-server")
-    ))]
+    #[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
     use crate::network::http::session::HAsyncService;
 
     struct FileServer<T>(pub T);
@@ -1376,10 +1387,7 @@ mod tests {
         }
     }
 
-    #[cfg(all(
-        target_os = "linux",
-        any(feature = "net-h2-server", feature = "net-h3-server")
-    ))]
+    #[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
     #[async_trait::async_trait(?Send)]
     impl HAsyncService for FileService {
         async fn call<SE: Session>(&mut self, session: &mut SE) -> std::io::Result<()> {
@@ -1424,8 +1432,12 @@ mod tests {
                         .eom();
                 };
             } else {
-                use crate::network::http::file::serve_h3;
-                if let Err(e) = serve_h3(
+                #[cfg(all(
+                    feature = "net-h3-server",
+                    feature = "rt-glommio",
+                    target_os = "linux"
+                ))]
+                if let Err(e) = crate::network::http::file::serve_h3(
                     session,
                     rel_file,
                     get_cache(),
@@ -1460,10 +1472,7 @@ mod tests {
     impl HFactory for FileServer<FileService> {
         type Service = FileService;
 
-        #[cfg(all(
-            target_os = "linux",
-            any(feature = "net-h2-server", feature = "net-h3-server")
-        ))]
+        #[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
         type HAsyncService = FileService;
 
         #[cfg(feature = "net-h1-server")]
@@ -1471,10 +1480,7 @@ mod tests {
             FileService
         }
 
-        #[cfg(all(
-            target_os = "linux",
-            any(feature = "net-h2-server", feature = "net-h3-server")
-        ))]
+        #[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
         fn async_service(&self, _id: usize) -> Self::HAsyncService {
             FileService
         }
@@ -1561,7 +1567,7 @@ mod tests {
         }
 
         cfg_if::cfg_if! {
-            if #[cfg(all(target_os = "linux", feature = "net-h2-server"))] {
+            if #[cfg(feature = "net-h2-server")] {
                 let cert_h2_pem = certs.0.clone();
                 let key_h2_pem = certs.1.clone();
                 let h2_handle = std::thread::spawn(move || {

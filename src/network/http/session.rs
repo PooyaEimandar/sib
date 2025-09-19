@@ -13,10 +13,7 @@ pub trait Session {
     #[cfg(feature = "net-h1-server")]
     fn req_body(&mut self, timeout: std::time::Duration) -> std::io::Result<&[u8]>;
 
-    #[cfg(all(
-        target_os = "linux",
-        any(feature = "net-h2-server", feature = "net-h3-server")
-    ))]
+    #[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
     async fn req_body_async(
         &mut self,
         timeout: std::time::Duration,
@@ -26,13 +23,13 @@ pub trait Session {
 
     fn status_code(&mut self, status: http::StatusCode) -> &mut Self;
 
-    #[cfg(all(feature = "net-h2-server", target_os = "linux"))]
+    #[cfg(feature = "net-h2-server")]
     fn start_h2_streaming(&mut self) -> std::io::Result<super::h2_session::H2Stream>;
 
-    #[cfg(all(feature = "net-h3-server", target_os = "linux"))]
+    #[cfg(feature = "net-h3-server")]
     async fn start_h3_streaming(&mut self) -> std::io::Result<()>;
 
-    #[cfg(all(feature = "net-h3-server", target_os = "linux"))]
+    #[cfg(feature = "net-h3-server")]
     async fn send_h3_data(&mut self, chunk: bytes::Bytes, end_stream: bool) -> std::io::Result<()>;
 
     fn header(&mut self, name: HeaderName, value: HeaderValue) -> std::io::Result<&mut Self>;
@@ -42,10 +39,7 @@ pub trait Session {
     fn body(&mut self, body: bytes::Bytes) -> &mut Self;
     fn eom(&mut self) -> std::io::Result<()>;
 
-    #[cfg(all(
-        target_os = "linux",
-        any(feature = "net-h2-server", feature = "net-h3-server")
-    ))]
+    #[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
     async fn eom_async(&mut self) -> std::io::Result<()>;
 }
 

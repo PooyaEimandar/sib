@@ -178,10 +178,7 @@ where
         Ok(&self.req_buf[..content_length])
     }
 
-    #[cfg(all(
-        target_os = "linux",
-        any(feature = "net-h2-server", feature = "net-h3-server"),
-    ))]
+    #[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
     #[inline]
     async fn req_body_async(
         &mut self,
@@ -214,7 +211,7 @@ where
         self
     }
 
-    #[cfg(all(target_os = "linux", feature = "net-h2-server"))]
+    #[cfg(feature = "net-h2-server")]
     #[inline]
     fn start_h2_streaming(&mut self) -> std::io::Result<super::h2_session::H2Stream> {
         Err(io::Error::other(
@@ -222,7 +219,7 @@ where
         ))
     }
 
-    #[cfg(all(target_os = "linux", feature = "net-h3-server"))]
+    #[cfg(feature = "net-h3-server")]
     #[inline]
     async fn start_h3_streaming(&mut self) -> std::io::Result<()> {
         Err(std::io::Error::other(
@@ -230,7 +227,7 @@ where
         ))
     }
 
-    #[cfg(all(target_os = "linux", feature = "net-h3-server"))]
+    #[cfg(feature = "net-h3-server")]
     #[inline]
     async fn send_h3_data(
         &mut self,
@@ -305,10 +302,7 @@ where
         Ok(())
     }
 
-    #[cfg(all(
-        target_os = "linux",
-        any(feature = "net-h2-server", feature = "net-h3-server")
-    ))]
+    #[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
     #[inline]
     async fn eom_async(&mut self) -> std::io::Result<()> {
         Err(io::Error::other("eom_async is not supported in H1Session"))

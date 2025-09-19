@@ -124,8 +124,6 @@ impl Session for H2Session {
     #[inline]
     async fn req_body_async(&mut self, timeout: Duration) -> Option<std::io::Result<Bytes>> {
         use futures_lite::future::race;
-        use glommio::timer::Timer;
-
         let data_fut = async {
             match self.req.body_mut().data().await {
                 Some(Ok(bytes)) => Some(Ok(bytes)),
@@ -134,15 +132,31 @@ impl Session for H2Session {
             }
         };
 
-        let timeout_fut = async {
-            Timer::new(timeout).await;
-            Some(Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "req_body_h2 timed out",
-            )))
-        };
-
-        race(data_fut, timeout_fut).await
+        cfg_if::cfg_if! {
+            if #[cfg(all(target_os = "linux", feature = "rt-glommio"))] {
+                let timeout_fut = async {
+                    glommio::timer::Timer::new(timeout).await;
+                    Some(Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "req_body_h2 timed out",
+                    )))
+                };
+                race(data_fut, timeout_fut).await
+            }
+            else if #[cfg(feature = "rt-tokio")] {
+                let timeout_fut = async {
+                    tokio::time::sleep(timeout).await;
+                    Some(Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "req_body_h2 timed out",
+                    )))
+                };
+                race(data_fut, timeout_fut).await
+            }
+            else {
+                compile_error!("Either feature `rt-glommio` or `rt-tokio` must be enabled to use h2 server.");
+            }
+        }
     }
 
     /// Start an HTTP/2 streaming response: send headers now, return a `H2Stream`
@@ -177,7 +191,7 @@ impl Session for H2Session {
         Ok(H2Stream { stream: send })
     }
 
-    #[cfg(all(target_os = "linux", feature = "net-h3-server"))]
+    #[cfg(feature = "net-h3-server")]
     #[inline]
     async fn start_h3_streaming(&mut self) -> std::io::Result<()> {
         Err(std::io::Error::other(
@@ -185,7 +199,7 @@ impl Session for H2Session {
         ))
     }
 
-    #[cfg(all(target_os = "linux", feature = "net-h3-server"))]
+    #[cfg(feature = "net-h3-server")]
     #[inline]
     async fn send_h3_data(
         &mut self,
@@ -363,6 +377,7 @@ impl Session for H2Session {
             send.send_data(chunk, end)
                 .map_err(|e| io::Error::other(format!("send_data: {e}")))?;
 
+            #[cfg(all(feature = "rt-glommio", target_os = "linux"))]
             glommio::yield_if_needed().await;
         }
 
