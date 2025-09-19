@@ -1206,7 +1206,7 @@ pub async fn serve_h2_streaming<S: Session>(
                 .await
                 {
                     Ok(c) => c,
-                    Err(e) => {
+                    Err(_) => {
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::TimedOut,
                             format!("H2 next_capacity timed out after {:?}", TIMEOUT),

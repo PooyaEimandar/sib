@@ -1,12 +1,9 @@
 use crate::network::http::server::H2Config;
-use crate::network::http::session::HAsyncService;
-use std::net::IpAddr;
-// use core::task::{Context, Poll};
-// use h2::server::Builder;
 
 cfg_if::cfg_if! {
-    if #[cfg(all(target_os = "linux", feature = "rt-glommio"))] {
+    if #[cfg(all(target_os = "linux", feature = "rt-glommio", not(feature = "rt-tokio")))] {
 
+        use core::task::{Context, Poll};
         use core::pin::Pin;
         struct IoStream<S>(pub S);
 
@@ -51,13 +48,13 @@ cfg_if::cfg_if! {
             stream: S,
             service: T,
             config: &H2Config,
-            peer_addr: IpAddr,
+            peer_addr: std::net::IpAddr,
         ) -> std::io::Result<()>
         where
             S: futures_lite::io::AsyncRead + futures_lite::io::AsyncWrite + Unpin + 'static,
-            T: HAsyncService + Send + 'static,
+            T: crate::network::http::session::HAsyncService + Send + 'static,
         {
-            let mut builder = make_server(config);
+            let builder = make_server(config);
             let mut conn: h2::server::Connection<IoStream<S>, bytes::Bytes> = builder
                 .handshake(IoStream(stream))
                 .await
@@ -112,16 +109,16 @@ cfg_if::cfg_if! {
             Ok(())
         }
     }
-    else if #[cfg(feature = "rt-tokio")] {
+    else if #[cfg(all(feature = "rt-tokio", not(feature = "rt-glommio")))] {
         pub(crate) async fn serve<S, T>(
             stream: S,
             service: T,
             config: &H2Config,
-            peer_addr: IpAddr,
+            peer_addr: std::net::IpAddr,
         ) -> std::io::Result<()>
         where
             S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + 'static,
-            T: HAsyncService + 'static, // no Send required for spawn_local
+            T: crate::network::http::session::HAsyncService + 'static,
         {
             // make h2 server builder
             let builder = make_server(config);
@@ -177,9 +174,6 @@ cfg_if::cfg_if! {
             }
             Ok(())
         }
-    }
-    else {
-        compile_error!("Either feature `rt-glommio` or `rt-tokio` must be enabled to use h2 server.");
     }
 }
 

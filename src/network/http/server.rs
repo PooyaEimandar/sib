@@ -425,7 +425,12 @@ pub trait HFactory: Send + Sync + Sized + 'static {
     }
 
     /// Start the h2 service with TLS based on glommio on linux
-    #[cfg(all(feature = "net-h2-server", feature = "rt-glommio", target_os = "linux"))]
+    #[cfg(all(
+        feature = "net-h2-server",
+        feature = "rt-glommio",
+        not(feature = "rt-tokio"),
+        target_os = "linux",
+    ))]
     fn start_h2_tls<L: ToSocketAddrs>(
         self,
         addr: L,
@@ -554,7 +559,11 @@ pub trait HFactory: Send + Sync + Sized + 'static {
     }
 
     /// Start the h2 service with TLS based on tokio on non-linux OS
-    #[cfg(all(feature = "net-h2-server", feature = "rt-tokio"))]
+    #[cfg(all(
+        feature = "net-h2-server",
+        feature = "rt-tokio",
+        not(feature = "rt-glommio")
+    ))]
     fn start_h2_tls<L: ToSocketAddrs>(
         self,
         addr: L,
@@ -863,8 +872,11 @@ pub trait HFactory: Send + Sync + Sized + 'static {
 #[cfg(test)]
 mod tests {
     use crate::network::http::server::HFactory;
-    use crate::network::http::session::{HService, Session};
+    use crate::network::http::session::Session;
     use std::sync::Once;
+
+    #[cfg(feature = "net-h1-server")]
+    use crate::network::http::session::HService;
 
     #[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
     use crate::network::http::session::HAsyncService;
@@ -873,6 +885,7 @@ mod tests {
 
     struct EchoServer;
 
+    #[cfg(feature = "net-h1-server")]
     impl HService for EchoServer {
         fn call<SE: Session>(&mut self, session: &mut SE) -> std::io::Result<()> {
             let req_method = session.req_method();
@@ -933,6 +946,7 @@ mod tests {
     }
 
     impl HFactory for EchoServer {
+        #[cfg(feature = "net-h1-server")]
         type Service = Self;
 
         #[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
