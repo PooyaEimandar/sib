@@ -153,9 +153,8 @@ net-h3-server = [
 rt-glommio = ["glommio", "futures-rustls"]
 rt-tokio = ["tokio", "tokio-rustls"]
 
-
-# stm-sender = ["crossbeam", "glib", "gstreamer", "gstreamer-video"]
-# stm-receiver = ["glib", "gstreamer", "gstreamer-app", "gstreamer-video"]
+stm-sender = ["crossbeam", "glib", "gstreamer", "gstreamer-video"]
+stm-receiver = ["glib", "gstreamer", "gstreamer-app", "gstreamer-video"]
 
 [dev-dependencies]
 base64 = { version = "0.22.1" }
