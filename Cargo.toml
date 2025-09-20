@@ -141,8 +141,13 @@ net-h2-server = [
     "socket2",
 ]
 net-h3-server = [
+    "async-trait",
+    "bytes",
+    "dashmap",
+    "futures-lite",
     "h3",
     "h3-quinn",
+    "http",
     "quinn",
     "rustls",
     "rustls-pemfile",

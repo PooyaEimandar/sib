@@ -160,7 +160,7 @@ fn make_socket(
     Ok(sock)
 }
 
-#[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
+#[cfg(feature = "net-h2-server")]
 fn make_rustls_config(
     chain_cert_key: &(Option<&[u8]>, &[u8], &[u8]),
     h2_cfg: &H2Config,
@@ -221,7 +221,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
     #[cfg(feature = "net-h1-server")]
     type Service: crate::network::http::session::HService + Send;
 
-    #[cfg(feature = "net-h2-server")]
+    #[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
     type HAsyncService: crate::network::http::session::HAsyncService + Send;
 
     // create a new http service for each connection
@@ -229,7 +229,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
     fn service(&self, id: usize) -> Self::Service;
 
     // create a new http async service for each connection
-    #[cfg(feature = "net-h2-server")]
+    #[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
     fn async_service(&self, id: usize) -> Self::HAsyncService;
 
     /// Start the http service
@@ -957,7 +957,7 @@ mod tests {
             EchoServer
         }
 
-        #[cfg(feature = "net-h2-server")]
+        #[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
         fn async_service(&self, _id: usize) -> Self::HAsyncService {
             EchoServer
         }
