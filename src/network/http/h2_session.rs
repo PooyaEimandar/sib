@@ -330,35 +330,32 @@ impl Session for H2Session {
                 .headers_mut()
                 .ok_or_else(|| io::Error::other("resp builder headers_mut"))?;
             h.extend(self.resp_headers.drain());
-            if !h.contains_key(http::header::CONTENT_LENGTH) {
-                use http::HeaderValue;
-                let len = self.resp_body.len();
-                h.insert(
-                    http::header::CONTENT_LENGTH,
-                    HeaderValue::from_str(&len.to_string())
-                        .map_err(|e| io::Error::other(format!("content-length {len}: {e}")))?,
-                );
-            }
         }
         let resp = builder
             .body(())
             .map_err(|e| io::Error::other(format!("build resp: {e}")))?;
 
-        // Send HEADERS and take the SendStream
+        // Decide end_stream on HEADERS if body is empty
+        let mut body = std::mem::take(&mut self.resp_body);
+        let end_on_headers = body.is_empty();
+
+        // Send HEADERS (end_stream=true if no body)
         let mut send = self
             .res
-            .send_response(resp, false)
+            .send_response(resp, end_on_headers)
             .map_err(|e| io::Error::other(format!("send headers: {e}")))?;
 
-        // Drain BODY with flow control
-        let mut body = std::mem::take(&mut self.resp_body);
-        let mut end = body.is_empty();
+        if end_on_headers {
+            // No DATA frames; stream already closed cleanly.
+            self.res_status = http::StatusCode::OK;
+            return Ok(());
+        }
 
-        // Reserve based on body size
+        // Stream BODY with flow control
         send.reserve_capacity(body.len());
 
-        while !end {
-            // Wait until peer/window grants capacity
+        while !body.is_empty() {
+            // Wait for capacity when needed
             let cap = if send.capacity() == 0 {
                 match poll_fn(|cx| send.poll_capacity(cx)).await {
                     Some(Ok(n)) => n,
@@ -370,20 +367,21 @@ impl Session for H2Session {
             };
 
             let n = std::cmp::min(cap, body.len());
-            // Split off exactly what we can send now
             let chunk = body.split_to(n);
-            end = body.is_empty();
+            let is_end = body.is_empty();
 
-            send.send_data(chunk, end)
+            send.send_data(chunk, is_end)
                 .map_err(|e| io::Error::other(format!("send_data: {e}")))?;
 
             #[cfg(all(feature = "rt-glommio", target_os = "linux"))]
             glommio::yield_if_needed().await;
+
+            #[cfg(all(feature = "rt-tokio", not(feature = "rt-glommio")))]
+            tokio::task::yield_now().await;
         }
 
-        // Reset fields for potential reuse (optional)
+        // Reset for potential reuse
         self.res_status = http::StatusCode::OK;
-        // headers already drained; body already moved
         Ok(())
     }
 }
