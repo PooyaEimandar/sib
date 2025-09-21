@@ -328,7 +328,7 @@ fn serve_fn<S: Session>(
     Ok(())
 }
 
-#[cfg("net-h3-server")]
+#[cfg(feature = "net-h3-server")]
 async fn serve_async_fn<S: Session>(
     session: &mut S,
     path: &str,
