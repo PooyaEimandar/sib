@@ -224,7 +224,7 @@ fn make_quinn_server(
 ) -> std::io::Result<quinn::ServerConfig> {
     // create server config
     let alpn_protocols = vec![b"h3".to_vec()];
-    let cfg = make_rustls_config(&chain_cert_key, alpn_protocols)?;
+    let cfg = make_rustls_config(chain_cert_key, alpn_protocols)?;
 
     // create transport config
     let mut transport = quinn::TransportConfig::default();
@@ -754,12 +754,8 @@ pub trait HFactory: Send + Sync + Sized + 'static {
 
         // Typical server behavior: block by joining the shard threads
         for h in handles {
-            if let Err(e) = h
-                .join()
-                .map_err(|_| std::io::Error::other("A shard thread panicked in start_h2_tls"))?
-            {
-                return Err(e);
-            }
+            h.join()
+                .map_err(|_| std::io::Error::other("A shard thread panicked in start_h2_tls"))??;
         }
 
         Ok(())
