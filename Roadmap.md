@@ -1,6 +1,6 @@
-- [x] HTTP1.1 with boringSSL
-- [x] HTTP2 with rustls
-- [x] HTTP3 with rustls
+- [x] HTTP1.1 with boringSSL and may
+- [x] HTTP2 with rustls (glommio/tokio runtime)
+- [x] HTTP3 with rustls (glommio/tokio runtime)
 - [x] Ratelimit
 - [x] gstreamer
 - [x] Static file server
