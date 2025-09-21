@@ -20,7 +20,7 @@ cfg_if::cfg_if! {
 }
 
 cfg_if::cfg_if! {
-    if #[cfg(all(feature = "net-h3-server", feature = "rt-glommio", target_os = "linux"))] {
+    if #[cfg(feature = "net-h3-server")] {
         pub mod h3_session;
         pub mod h3_server;
     }

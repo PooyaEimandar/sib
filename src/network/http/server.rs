@@ -160,10 +160,10 @@ fn make_socket(
     Ok(sock)
 }
 
-#[cfg(feature = "net-h2-server")]
+#[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
 fn make_rustls_config(
     chain_cert_key: &(Option<&[u8]>, &[u8], &[u8]),
-    h2_cfg: &H2Config,
+    alpn_protocols: Vec<Vec<u8>>,
 ) -> std::io::Result<rustls::ServerConfig> {
     use rustls::pki_types::{CertificateDer, PrivateKeyDer};
     use rustls_pemfile::{certs, pkcs8_private_keys};
@@ -184,7 +184,7 @@ fn make_rustls_config(
                 res.map_err(|e| {
                     std::io::Error::new(
                         std::io::ErrorKind::InvalidInput,
-                        format!("H2 got a bad private key: {e}"),
+                        format!("Server got a bad private key: {e}"),
                     )
                 })
             })
@@ -207,14 +207,51 @@ fn make_rustls_config(
         .map_err(|e| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                format!("H2 could not load cert/key: {e}"),
+                format!("Server could not load cert/key: {e}"),
             )
         })?;
 
     // set ALPN
-    cfg.alpn_protocols = h2_cfg.alpn_protocols.clone();
+    cfg.alpn_protocols = alpn_protocols;
 
     Ok(cfg)
+}
+
+#[cfg(feature = "net-h3-server")]
+fn make_quinn_server(
+    chain_cert_key: &(Option<&[u8]>, &[u8], &[u8]),
+    h3_cfg: &H3Config,
+) -> std::io::Result<quinn::ServerConfig> {
+    // create server config
+    let alpn_protocols = vec![b"h3".to_vec()];
+    let cfg = make_rustls_config(&chain_cert_key, alpn_protocols)?;
+
+    // create transport config
+    let mut transport = quinn::TransportConfig::default();
+    transport.max_idle_timeout(Some(h3_cfg.max_idle_timeout.try_into().map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "H3 could not set idle timeout",
+        )
+    })?));
+    transport.keep_alive_interval(Some(h3_cfg.keep_alive_interval));
+    transport.send_window(h3_cfg.send_window);
+    transport.receive_window(quinn::VarInt::from_u32(h3_cfg.receive_window));
+    transport
+        .max_concurrent_bidi_streams(quinn::VarInt::from_u32(h3_cfg.max_concurrent_bidi_streams));
+    transport
+        .max_concurrent_uni_streams(quinn::VarInt::from_u32(h3_cfg.max_concurrent_uni_streams));
+
+    let quic_tls = quinn::crypto::rustls::QuicServerConfig::try_from(cfg).map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("H3 could not create quic TLS config: {e}"),
+        )
+    })?;
+    let mut server = quinn::ServerConfig::with_crypto(std::sync::Arc::new(quic_tls));
+    server.transport = std::sync::Arc::new(transport);
+
+    Ok(server)
 }
 
 pub trait HFactory: Send + Sync + Sized + 'static {
@@ -442,7 +479,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         let socket_addr = resolve_addr!(addr)?;
         // create tls acceptor
         let tls_acceptor = futures_rustls::TlsAcceptor::from(std::sync::Arc::new(
-            make_rustls_config(&chain_cert_key, &h2_cfg)?,
+            make_rustls_config(&chain_cert_key, h2_cfg.alpn_protocols.clone())?,
         ));
         let factory = std::sync::Arc::new(self);
         let rate_limiter_arc = std::sync::Arc::new(rate_limiter);
@@ -574,122 +611,167 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         use std::sync::Arc;
         use tokio::{io::AsyncWriteExt, net::TcpListener, sync::Semaphore};
 
-        // Resolve bind address
+        // Resolve bind address once
         let socket_addr = resolve_addr!(addr)?;
 
-        // Build rustls config + Tokio TLS acceptor
+        // Shared TLS acceptor
         let tls_acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(make_rustls_config(
             &chain_cert_key,
-            &h2_cfg,
+            h2_cfg.alpn_protocols.clone(),
         )?));
 
-        // Build a multi-thread Tokio runtime; the LocalSet will ensure !Send tasks stay on one thread.
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()?;
-
-        // Shareables for the async block
         let factory = Arc::new(self);
         let rl = Arc::new(rate_limiter);
         let h2_cfg_arc = Arc::new(h2_cfg);
 
-        rt.block_on(async move {
-            // Bind listener using your socket2 setup (keeps SO_REUSEPORT, nonblocking, etc.)
-            let listener =
-                match make_socket(socket_addr, socket2::Protocol::TCP, h2_cfg_arc.backlog) {
-                    Ok(socket) => {
-                        let std_listener: std::net::TcpListener = socket.into();
-                        std_listener.set_nonblocking(true)?;
-                        TcpListener::from_std(std_listener)
-                            .map_err(|e| std::io::Error::other(format!("tokio from_std: {e}")))?
-                    }
-                    Err(e) => {
-                        eprintln!("Failed to create h2 listener on {socket_addr}: {e}");
+        // Prepare listeners (use your make_socket for each shard)
+        let requested_shards = h2_cfg_arc.num_of_shards.max(1);
+        let mut std_listeners: Vec<std::net::TcpListener> = Vec::new();
+
+        for shard_id in 0..requested_shards {
+            match make_socket(socket_addr, socket2::Protocol::TCP, h2_cfg_arc.backlog) {
+                Ok(sock) => {
+                    let std_listener: std::net::TcpListener = sock.into();
+                    std_listeners.push(std_listener);
+                }
+                Err(e) => {
+                    // If additional binds fail (likely no SO_REUSEPORT), fall back to first listener.
+                    if shard_id > 0 && e.kind() == std::io::ErrorKind::AddrInUse {
+                        eprintln!(
+                            "SO_REUSEPORT unavailable; falling back to a single shard ({} -> 1)",
+                            requested_shards
+                        );
+                        // keep only the first listener
+                        std_listeners.truncate(1);
+                        break;
+                    } else {
                         return Err(e);
                     }
-                };
+                }
+            }
+        }
 
-            eprintln!("Tokio H2/TLS listening on {socket_addr}");
+        // One OS thread per shard, each with a current-thread Tokio runtime + LocalSet
+        let mut handles = Vec::with_capacity(std_listeners.len());
+        for (shard_id, std_listener) in std_listeners.into_iter().enumerate() {
+            let tls_acceptor = tls_acceptor.clone();
+            let factory = factory.clone();
+            let rl = rl.clone();
+            let h2_cfg = h2_cfg_arc.clone();
 
-            // Concurrency guard per-process (cap active H2 connections)
-            let sem = Arc::new(Semaphore::new(h2_cfg_arc.max_sessions as usize));
+            handles.push(std::thread::Builder::new()
+            .name(format!("h2-shard-{shard_id}"))
+            .spawn(move || -> std::io::Result<()> {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?;
 
-            // Run accept + per-conn work on a LocalSet so spawned tasks may be !Send.
-            let local = tokio::task::LocalSet::new();
-            local
-                .run_until(async move {
-                    loop {
-                        let (mut stream, peer_addr) = match listener.accept().await {
-                            Ok(x) => x,
-                            Err(e) => {
-                                eprintln!("accept error: {e}");
-                                continue;
-                            }
-                        };
+                rt.block_on(async move {
+                    let listener = TcpListener::from_std(std_listener)
+                        .map_err(|e| std::io::Error::other(format!("tokio from_std: {e}")))?;
 
-                        // Good practice for H2
-                        let _ = stream.set_nodelay(true);
+                    eprintln!(
+                        "Tokio H2/TLS shard {shard_id} listening on {}",
+                        listener.local_addr().unwrap()
+                    );
 
-                        let peer_ip = peer_addr.ip();
+                    // Per-shard concurrency guard
+                    let sem = Arc::new(Semaphore::new(h2_cfg.max_sessions as usize));
+                    let local = tokio::task::LocalSet::new();
 
-                        // Optional rate limiting
-                        if let Some(rl) = rl.as_ref()
-                            && !peer_ip.is_unspecified()
-                        {
-                            use super::ratelimit::RateLimiter;
-                            let result = rl.check(peer_ip.to_string().into());
-                            if !result.allowed {
-                                let _ = stream.shutdown().await;
-                                continue;
-                            }
-                        }
-
-                        // Acquire a session slot (drop if at capacity)
-                        let permit = match sem.clone().try_acquire_owned() {
-                            Ok(p) => p,
-                            Err(_) => {
-                                let _ = stream.shutdown().await;
-                                continue;
-                            }
-                        };
-
-                        let tls_acceptor = tls_acceptor.clone();
-                        let factory = factory.clone();
-                        let h2_cfg = h2_cfg_arc.clone();
-
-                        // Keep the whole connection (TLS + h2 serve) on the LocalSet thread.
-                        tokio::task::spawn_local(async move {
-                            let _permit = permit;
-
-                            // TLS handshake
-                            let tls_stream = match tls_acceptor.accept(stream).await {
-                                Ok(s) => s,
+                    local.run_until(async move {
+                        loop {
+                            let (mut stream, peer_addr) = match listener.accept().await {
+                                Ok(x) => x,
                                 Err(e) => {
-                                    eprintln!("TLS handshake error from {peer_addr}: {e}");
-                                    return;
+                                    eprintln!("accept error (shard {shard_id}): {e}");
+                                    continue;
                                 }
                             };
 
-                            // Run one service per H2 connection; per-stream tasks are spawned in `serve()`
-                            use crate::network::http::h2_server::serve;
-                            let service = factory.async_service(0); // use shard id if you have per-core sharding
+                            let _ = stream.set_nodelay(true);
+                            let peer_ip = peer_addr.ip();
 
-                            if let Err(e) = serve(tls_stream, service, &h2_cfg, peer_ip).await {
-                                eprintln!("h2 serve error from {peer_addr}: {e}");
+                            // Optional rate limit
+                            if let Some(rl) = rl.as_ref() && !peer_ip.is_unspecified() {
+                                use super::ratelimit::RateLimiter;
+                                let result = rl.check(peer_ip.to_string().into());
+                                if !result.allowed {
+                                    let _ = stream.shutdown().await;
+                                    continue;
+                                }
                             }
-                        });
-                    }
-                })
-                .await;
 
-            #[allow(unreachable_code)]
-            Ok::<(), std::io::Error>(())
-        })?;
+                            // Try-acquire a session slot
+                            let permit = match sem.clone().try_acquire_owned() {
+                                Ok(p) => p,
+                                Err(_) => {
+                                    let _ = stream.shutdown().await;
+                                    continue;
+                                }
+                            };
+
+                            let tls_acceptor = tls_acceptor.clone();
+                            let factory = factory.clone();
+                            let h2_cfg2 = h2_cfg.clone();
+
+                            tokio::task::spawn_local(async move {
+                                let _permit = permit;
+
+                                // TLS handshake
+                                let tls_stream = match tls_acceptor.accept(stream).await {
+                                    Ok(s) => s,
+                                    Err(e) => {
+                                        eprintln!(
+                                            "TLS handshake error (shard {shard_id}) from {peer_addr}: {e}"
+                                        );
+                                        return;
+                                    }
+                                };
+
+                                // Serve H2 on this connection
+                                use crate::network::http::h2_server::serve;
+                                let service = factory.async_service(shard_id);
+
+                                if let Err(e) =
+                                    serve(tls_stream, service, &h2_cfg2, peer_ip).await
+                                {
+                                    eprintln!(
+                                        "h2 serve error (shard {shard_id}) from {peer_addr}: {e}"
+                                    );
+                                }
+                            });
+                        }
+                    }).await;
+
+                    #[allow(unreachable_code)]
+                    Ok::<(), std::io::Error>(())
+                })?;
+
+                Ok(())
+            })?);
+        }
+
+        // Typical server behavior: block by joining the shard threads
+        for h in handles {
+            if let Err(e) = h
+                .join()
+                .map_err(|_| std::io::Error::other("A shard thread panicked in start_h2_tls"))?
+            {
+                return Err(e);
+            }
+        }
 
         Ok(())
     }
 
-    #[cfg(all(feature = "net-h3-server", target_os = "linux"))]
+    /// Start the h3 service with TLS based on glommio on linux
+    #[cfg(all(
+        feature = "net-h3-server",
+        feature = "rt-glommio",
+        not(feature = "rt-tokio"),
+        target_os = "linux",
+    ))]
     fn start_h3_tls<L: ToSocketAddrs>(
         self,
         addr: L,
@@ -697,82 +779,8 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         h3_cfg: H3Config,
         rate_limiter: Option<super::ratelimit::RateLimiterKind>,
     ) -> std::io::Result<()> {
-        use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-        use rustls_pemfile::{certs, pkcs8_private_keys};
-
-        // Load certs & key
-        let certs: Vec<CertificateDer<'static>> = {
-            let mut reader = std::io::Cursor::new(chain_cert_key.1);
-            certs(&mut reader)
-                .collect::<Result<Vec<_>, _>>()?
-                .into_iter()
-                .collect()
-        };
-
-        let key: PrivateKeyDer<'static> = {
-            let mut reader = std::io::Cursor::new(chain_cert_key.2);
-            let keys: Result<Vec<_>, std::io::Error> = pkcs8_private_keys(&mut reader)
-                .map(|res| {
-                    res.map_err(|e| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::InvalidInput,
-                            format!("H3 got a bad private key: {e}"),
-                        )
-                    })
-                })
-                .collect();
-            let keys = keys?;
-            if let Some(key) = keys.into_iter().next() {
-                PrivateKeyDer::from(key)
-            } else {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "H3 could not find a private key",
-                ));
-            }
-        };
-
-        // TLS config
-        let mut cfg = rustls::ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(certs, key)
-            .map_err(|e| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("H3 could not load cert/key: {e}"),
-                )
-            })?;
-
-        // ALPN: h3
-        cfg.alpn_protocols = vec![b"h3".to_vec()];
-
-        let mut transport = quinn::TransportConfig::default();
-        transport.max_idle_timeout(Some(h3_cfg.max_idle_timeout.try_into().map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "H3 could not set idle timeout",
-            )
-        })?));
-        transport.keep_alive_interval(Some(h3_cfg.keep_alive_interval));
-        transport.send_window(h3_cfg.send_window);
-        transport.receive_window(quinn::VarInt::from_u32(h3_cfg.receive_window));
-        transport.max_concurrent_bidi_streams(quinn::VarInt::from_u32(
-            h3_cfg.max_concurrent_bidi_streams,
-        ));
-        transport
-            .max_concurrent_uni_streams(quinn::VarInt::from_u32(h3_cfg.max_concurrent_uni_streams));
-
-        let quic_tls = quinn::crypto::rustls::QuicServerConfig::try_from(cfg).map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("H3 could not create quic TLS config: {e}"),
-            )
-        })?;
-        let mut server = quinn::ServerConfig::with_crypto(std::sync::Arc::new(quic_tls));
-        server.transport = std::sync::Arc::new(transport);
-
+        let server = make_quinn_server(&chain_cert_key, &h3_cfg)?;
         let socket_addr = resolve_addr!(addr)?;
-
         let factory = std::sync::Arc::new(self);
         let rate_limiter_arc = std::sync::Arc::new(rate_limiter);
 
@@ -864,6 +872,168 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         })
         .unwrap()
         .join_all();
+
+        Ok(())
+    }
+
+    /// Start the h3 service with TLS based on tokio (multi-shard using num_of_shards + make_socket)
+    #[cfg(all(
+        feature = "net-h3-server",
+        feature = "rt-tokio",
+        not(feature = "rt-glommio")
+    ))]
+    fn start_h3_tls<L: ToSocketAddrs>(
+        self,
+        addr: L,
+        chain_cert_key: (Option<&[u8]>, &[u8], &[u8]),
+        h3_cfg: H3Config,
+        rate_limiter: Option<super::ratelimit::RateLimiterKind>,
+    ) -> std::io::Result<()> {
+        use std::sync::Arc;
+        use tokio::sync::Semaphore;
+
+        let server = make_quinn_server(&chain_cert_key, &h3_cfg)?;
+        let socket_addr = resolve_addr!(addr)?;
+
+        let factory = Arc::new(self);
+        let rl = Arc::new(rate_limiter);
+        let h3_cfg_arc = Arc::new(h3_cfg);
+
+        // Bind one UDP socket per shard using your helper (SO_REUSEPORT when available)
+        let requested_shards = h3_cfg_arc.num_of_shards.max(1);
+        let mut udp_sockets: Vec<std::net::UdpSocket> = Vec::new();
+        for shard_id in 0..requested_shards {
+            match make_socket(socket_addr, socket2::Protocol::UDP, h3_cfg_arc.backlog) {
+                Ok(sock) => udp_sockets.push(sock.into()),
+                Err(e) => {
+                    if shard_id > 0 && e.kind() == std::io::ErrorKind::AddrInUse {
+                        eprintln!(
+                            "H3: SO_REUSEPORT unavailable; falling back to a single shard ({} -> 1)",
+                            requested_shards
+                        );
+                        udp_sockets.truncate(1);
+                        break;
+                    } else {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+
+        // One OS thread per shard; each has a current-thread runtime + LocalSet for !Send tasks
+        let mut handles = Vec::with_capacity(udp_sockets.len());
+        for (shard_id, std_sock) in udp_sockets.into_iter().enumerate() {
+            let server = server.clone();
+            let factory = factory.clone();
+            let rl = rl.clone();
+            let h3_cfg = h3_cfg_arc.clone();
+
+            handles.push(
+                std::thread::Builder::new()
+                    .name(format!("h3-shard-{shard_id}"))
+                    .spawn(move || -> std::io::Result<()> {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()?;
+
+                        rt.block_on(async move {
+                            // Create endpoint on this shard’s UDP socket
+                            let ep_cfg = quinn::EndpointConfig::default();
+                            let runtime = std::sync::Arc::new(quinn::TokioRuntime);
+                            let endpoint =
+                                match quinn::Endpoint::new(ep_cfg, Some(server), std_sock, runtime)
+                                {
+                                    Ok(ep) => ep,
+                                    Err(e) => {
+                                        eprintln!(
+                                            "H3 endpoint creation error (shard {shard_id}): {e}"
+                                        );
+                                        return Err(std::io::Error::other(e));
+                                    }
+                                };
+
+                            println!("Tokio H3/TLS shard {shard_id} listening on {}", socket_addr);
+
+                            let sem = Arc::new(Semaphore::new(h3_cfg.max_sessions as usize));
+                            let local = tokio::task::LocalSet::new();
+
+                            // IMPORTANT: Run the accept loop inside LocalSet so spawn_local is legal.
+                            local
+                                .run_until(async move {
+                                    loop {
+                                        let Some(incoming) = endpoint.accept().await else {
+                                            // Endpoint closed
+                                            break;
+                                        };
+
+                                        // Optional rate limit
+                                        let peer_ip = incoming.remote_address().ip();
+                                        if let Some(rl) = rl.as_ref() {
+                                            if !peer_ip.is_unspecified() {
+                                                use super::ratelimit::RateLimiter;
+                                                let result = rl.check(peer_ip.to_string().into());
+                                                if !result.allowed {
+                                                    // If your quinn exposes `reject()`, prefer it here
+                                                    drop(incoming);
+                                                    continue;
+                                                }
+                                            }
+                                        }
+
+                                        // Try-acquire a session slot (non-blocking)
+                                        let permit = match sem.clone().try_acquire_owned() {
+                                            Ok(p) => p,
+                                            Err(_) => {
+                                                drop(incoming);
+                                                continue;
+                                            }
+                                        };
+
+                                        let factory_cloned = factory.clone();
+
+                                        // Now it's safe to use spawn_local
+                                        tokio::task::spawn_local(async move {
+                                            let _permit = permit;
+                                            match incoming.await {
+                                                Ok(connection) => {
+                                                    use crate::network::http::h3_server::serve;
+                                                    let service =
+                                                        factory_cloned.async_service(shard_id);
+                                                    if let Err(e) =
+                                                        serve(connection, service, peer_ip).await
+                                                    {
+                                                        eprintln!(
+                                                            "h3 serve error (shard {shard_id}): {e}"
+                                                        );
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    eprintln!(
+                                                        "h3 handshake error (shard {shard_id}): {e}"
+                                                    );
+                                                }
+                                            }
+                                        });
+                                    }
+                                })
+                                .await;
+
+                            Ok(())
+                        })?;
+
+                        Ok(())
+                    })?,
+            );
+        }
+
+        // Join shard threads and propagate any error
+        for h in handles {
+            if let Err(e) = h.join().map_err(|_| {
+                std::io::Error::other("A shard thread panicked in start_h3_tls (tokio)")
+            })? {
+                return Err(e);
+            }
+        }
 
         Ok(())
     }
@@ -1210,7 +1380,7 @@ mod tests {
         assert!(body.contains("Hello, World!"));
     }
 
-    #[cfg(all(feature = "net-h3-server", target_os = "linux"))]
+    #[cfg(feature = "net-h3-server")]
     #[test]
     fn test_h3_tls_server_get() {
         let addr = "127.0.0.1:8085";
@@ -1249,7 +1419,7 @@ mod tests {
         assert!(body.contains("Hello, World!"));
     }
 
-    #[cfg(all(feature = "net-h3-server", target_os = "linux"))]
+    #[cfg(feature = "net-h3-server")]
     #[test]
     fn test_h3_tls_server_post() {
         let addr = "127.0.0.1:8086";

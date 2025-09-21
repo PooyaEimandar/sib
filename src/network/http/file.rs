@@ -328,7 +328,7 @@ fn serve_fn<S: Session>(
     Ok(())
 }
 
-#[cfg(all(feature = "net-h3-server", target_os = "linux"))]
+#[cfg("net-h3-server")]
 async fn serve_async_fn<S: Session>(
     session: &mut S,
     path: &str,
@@ -740,7 +740,7 @@ pub async fn serve_h2<S: Session>(
     result
 }
 
-#[cfg(all(feature = "net-h3-server", target_os = "linux"))]
+#[cfg(feature = "net-h3-server")]
 pub async fn serve_h3<S: Session>(
     session: &mut S,
     path: &str,
@@ -1255,7 +1255,7 @@ pub async fn serve_h2_streaming<S: Session>(
     Ok(())
 }
 
-#[cfg(all(feature = "net-h3-server", target_os = "linux"))]
+#[cfg(feature = "net-h3-server")]
 pub async fn serve_h3_streaming<S: Session>(
     session: &mut S,
     status: http::StatusCode,

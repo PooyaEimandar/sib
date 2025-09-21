@@ -95,37 +95,65 @@ impl Session for H3Session {
                 )));
             }
 
+            // Read future
             let read_fut = async {
-                self.stream
-                    .recv_data()
-                    .await
-                    .map_err(|e| std::io::Error::other(e.to_string()))
-                    .map(|opt_buf| opt_buf.map(|mut buf| buf.copy_to_bytes(buf.remaining())))
+                match self.stream.recv_data().await {
+                    Ok(Some(mut buf)) => {
+                        let bytes = buf.copy_to_bytes(buf.remaining());
+                        Some(Ok(bytes))
+                    }
+                    Ok(None) => None, // EOS
+                    Err(e) => Some(Err(std::io::Error::other(e.to_string()))),
+                }
             };
 
-            let timeout_fut = async {
-                glommio::timer::Timer::new(remain).await;
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "body timeout",
-                )) as Result<Option<bytes::Bytes>, std::io::Error>
-            };
+            // Timeout future
+            cfg_if::cfg_if! {
+                if #[cfg(all(target_os = "linux", feature = "rt-glommio"))] {
+                    let timeout_fut = async {
+                        glommio::timer::Timer::new(remain).await;
+                        Some(Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "req_body_h3 timed out",
+                        )))
+                    };
+                } else if #[cfg(feature = "rt-tokio")] {
+                    let timeout_fut = async {
+                        tokio::time::sleep(remain).await;
+                        Some(Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "req_body_h3 timed out",
+                        )))
+                    };
+                } else {
+                    compile_error!("Enable either `rt-glommio` (Linux) or `rt-tokio` to use req_body_async.");
+                }
+            }
 
-            // race returns whichever future completes first
+            // read with timeout
             match race(read_fut, timeout_fut).await {
-                Ok(Some(mut chunk)) => {
-                    let n = chunk.remaining();
-                    if out.len() + n > self.req_body_max_bytes {
-                        // stop the peer from sending more
+                Some(Ok(chunk)) => {
+                    // Enforce max body size
+                    if out.len() + chunk.len() > self.req_body_max_bytes {
+                        // Stop the peer from sending more
                         let _ = self
                             .stream
                             .stop_sending(h3::error::Code::H3_REQUEST_CANCELLED);
                         return Some(Err(std::io::Error::other("payload too large")));
                     }
-                    out.extend_from_slice(&chunk.copy_to_bytes(n));
+                    out.extend_from_slice(&chunk);
                 }
-                Ok(None) => break,             // EOS
-                Err(e) => return Some(Err(e)), // read error OR timeout
+                Some(Err(e)) => return Some(Err(e)), // read error OR timeout
+                None => break,                       // EOS
+            }
+
+            // Cooperative yield per RT
+            cfg_if::cfg_if! {
+                if #[cfg(all(target_os = "linux", feature = "rt-glommio"))] {
+                    glommio::yield_if_needed().await;
+                } else if #[cfg(feature = "rt-tokio")] {
+                    tokio::task::yield_now().await;
+                }
             }
         }
 
