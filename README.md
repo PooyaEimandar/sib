@@ -14,7 +14,7 @@ it is designed for **real-time networking**, **low-latency streaming**, and **sc
 | `net-h3-server`  | Enable HTTP/3 server              
 | `db-fdb`         | FoundationDB bindings      
 | `rt-glommio`     | Enable glommio runtime for HTTP/2/3      
-| `rt-tokio`       | Runtime tokio runtime for HTTP/2/3    
+| `rt-tokio`       | Enable tokio runtime for HTTP/2/3    
 | `stm-sender`     | Real-time video/audio streamer    
 | `stm-receiver`   | Real-time video/audio receiver    
 
