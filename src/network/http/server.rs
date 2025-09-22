@@ -195,7 +195,7 @@ fn make_rustls_config(
         } else {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "H2 could not find a private key",
+                "Server could not find a private key",
             ));
         }
     };
