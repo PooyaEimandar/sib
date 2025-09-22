@@ -141,14 +141,15 @@ fn make_socket(
     sock.set_nonblocking(true)?;
     sock.bind(&addr.into())?;
 
+    const DEFAULT_BACKLOG: i32 = 512;
     let backlog: i32 = if backlog == 0 {
-        512
+        DEFAULT_BACKLOG
     } else {
         match i32::try_from(backlog) {
             Ok(y) => y,
             Err(_) => {
-                eprintln!("backlog too large, using 512");
-                1024
+                eprintln!("backlog too large, using {}", DEFAULT_BACKLOG);
+                DEFAULT_BACKLOG
             }
         }
     };
@@ -517,19 +518,20 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                 let sem = std::rc::Rc::new(glommio::sync::Semaphore::new(h2_cfg.max_sessions));
 
                 loop {
-                    // Acquire a session slot or skip if none available
-                    let sess_token = match std::rc::Rc::clone(&sem).try_acquire_static_permit(1) {
-                        Ok(p) => p,
-                        Err(_) => {
-                            continue;
-                        }
-                    };
-
                     // Accept from listener
                     let stream = match listener.accept().await {
                         Ok(s) => s,
                         Err(e) => {
                             eprintln!("H2 accept got an error on shard {shard_id}: {e}");
+                            continue;
+                        }
+                    };
+
+                    // Try-acquire a session slot now; if none, close fast to drain the listen queue.
+                    let sess_token = match std::rc::Rc::clone(&sem).try_acquire_static_permit(1) {
+                        Ok(p) => p,
+                        Err(_) => {
+                            let _ = stream.shutdown(std::net::Shutdown::Both).await;
                             continue;
                         }
                     };
@@ -837,6 +839,8 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                     let permit = match std::rc::Rc::clone(&sem).try_acquire_static_permit(1) {
                         Ok(p) => p,
                         Err(_) => {
+                            // Tell the peer immediately; don't just drop.
+                            incoming.refuse();
                             continue;
                         }
                     };
@@ -980,7 +984,8 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                                         let permit = match sem.clone().try_acquire_owned() {
                                             Ok(p) => p,
                                             Err(_) => {
-                                                drop(incoming);
+                                                // Prefer refusing so the client learns quickly.
+                                                incoming.refuse();
                                                 continue;
                                             }
                                         };
