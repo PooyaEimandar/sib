@@ -1324,7 +1324,11 @@ pub async fn serve_h3_streaming<S: Session>(
 
         off += to_send;
 
+        #[cfg(all(feature = "rt-glommio", not(feature = "rt-tokio"), target_os = "linux"))]
         glommio::yield_if_needed().await;
+
+        #[cfg(all(feature = "rt-tokio", not(feature = "rt-glommio")))]
+        tokio::task::yield_now().await;
     }
 
     Ok(())
