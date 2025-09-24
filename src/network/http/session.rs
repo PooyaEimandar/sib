@@ -3,6 +3,7 @@ use http::{HeaderName, HeaderValue};
 #[async_trait::async_trait(?Send)]
 pub trait Session {
     fn peer_addr(&self) -> &std::net::IpAddr;
+    fn req_host(&self) -> Option<(String, Option<u16>)>;
     fn req_method(&self) -> http::Method;
     fn req_method_str(&self) -> Option<&str>;
     fn req_path(&self) -> String;

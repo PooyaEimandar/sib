@@ -84,6 +84,24 @@ impl Session for H2Session {
     }
 
     #[inline]
+    fn req_host(&self) -> Option<(String, Option<u16>)> {
+        // Prefer :authority (exposed as URI authority)
+        if let Some(a) = self.req.uri().authority()
+            && let Some(x) = super::server::parse_authority(a.as_str())
+        {
+            return Some(x);
+        }
+        // Fallback to Host header if a client sent one
+        if let Some(hv) = self.req.headers().get(http::header::HOST)
+            && let Ok(s) = hv.to_str()
+            && let Some(x) = super::server::parse_authority(s.trim())
+        {
+            return Some(x);
+        }
+        None
+    }
+
+    #[inline]
     fn req_method(&self) -> http::Method {
         self.req.method().clone()
     }

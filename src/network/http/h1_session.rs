@@ -58,6 +58,46 @@ where
     }
 
     #[inline]
+    fn req_host(&self) -> Option<(String, Option<u16>)> {
+        use super::server::parse_authority;
+        // Host header (HTTP/1.1)
+        if let Some(host) = self
+            .req
+            .headers
+            .iter()
+            .find(|h| h.name.eq_ignore_ascii_case("host"))
+            .and_then(|h| std::str::from_utf8(h.value).ok())
+        {
+            if let Some(a) = parse_authority(host.trim()) {
+                return Some(a);
+            }
+        }
+
+        // CONNECT authority-form: "CONNECT host:port HTTP/1.1"
+        if matches!(self.req.method, Some("CONNECT")) {
+            if let Some(path) = self.req.path {
+                if let Some(a) = parse_authority(path.trim()) {
+                    return Some(a);
+                }
+            }
+        }
+
+        // Absolute-form: "GET http://example.com:8080/path HTTP/1.1"
+        if let Some(path) = self.req.path {
+            if let Some((scheme, rest)) = path.split_once("://") {
+                if scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https") {
+                    let auth_end = rest.find('/').unwrap_or(rest.len());
+                    if let Some(a) = parse_authority(rest[..auth_end].trim()) {
+                        return Some(a);
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    #[inline]
     fn req_method(&self) -> http::Method {
         if let Some(str) = self.req.method {
             return http::Method::from_str(str).unwrap_or_default();

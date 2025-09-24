@@ -1040,6 +1040,54 @@ pub trait HFactory: Send + Sync + Sized + 'static {
     }
 }
 
+#[cfg(any(
+    feature = "net-h1-server",
+    feature = "net-h2-server",
+    feature = "net-h3-server"
+))]
+/// Parse an authority of the form:
+/// - "example.com"
+/// - "example.com:8080"
+/// - "[::1]"
+/// - "[::1]:8443"
+// --- shared ---
+pub(crate) fn parse_authority(s: &str) -> Option<(String, Option<u16>)> {
+    if s.is_empty() {
+        return None;
+    }
+
+    let trim = s.trim();
+    if trim.is_empty() {
+        return None;
+    }
+
+    if trim.starts_with('[') {
+        let close = trim.find(']')?;
+        let host = &trim[1..close];
+        let rest = &trim[close + 1..];
+        if rest.is_empty() {
+            return Some((host.to_string(), None));
+        }
+        if let Some(port_str) = rest.strip_prefix(':') {
+            if let Ok(p) = port_str.parse::<u16>() {
+                return Some((host.to_string(), Some(p)));
+            }
+        }
+        return None;
+    }
+
+    if let Some(colon) = trim.rfind(':') {
+        let (h, p) = trim.split_at(colon);
+        let p = &p[1..];
+        if !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) {
+            if let Ok(port) = p.parse::<u16>() {
+                return Some((h.to_string(), Some(port)));
+            }
+        }
+    }
+    Some((trim.to_string(), None))
+}
+
 #[cfg(test)]
 mod tests {
     use crate::network::http::server::HFactory;
@@ -1059,12 +1107,13 @@ mod tests {
     #[cfg(feature = "net-h1-server")]
     impl HService for EchoServer {
         fn call<SE: Session>(&mut self, session: &mut SE) -> std::io::Result<()> {
+            let req_host = session.req_host();
             let req_method = session.req_method();
             let req_path = session.req_path();
             let http_version = session.req_http_version();
             let req_body = session.req_body(std::time::Duration::from_secs(5))?;
             let body = bytes::Bytes::from(format!(
-                "Http version: {http_version:?}, Echo: {req_method:?} {req_path:?}\r\nBody: {req_body:?}"
+                "Http version: {http_version:?}, Echo: {req_method:?} {req_host:?} {req_path:?}\r\nBody: {req_body:?}"
             ));
 
             session
@@ -1088,6 +1137,7 @@ mod tests {
     #[async_trait::async_trait(?Send)]
     impl HAsyncService for EchoServer {
         async fn call<SE: Session>(&mut self, session: &mut SE) -> std::io::Result<()> {
+            let req_host = session.req_host();
             let req_method = session.req_method();
             let req_path = session.req_path().to_owned();
             let http_version = session.req_http_version();
@@ -1095,7 +1145,7 @@ mod tests {
                 .req_body_async(std::time::Duration::from_secs(5))
                 .await;
             let body = bytes::Bytes::from(format!(
-                "Http version: {http_version:?}, Echo: {req_method:?} {req_path:?}\r\nBody: {req_body:?}"
+                "Http version: {http_version:?}, Echo: {req_method:?} {req_host:?} {req_path:?}\r\nBody: {req_body:?}"
             ));
 
             let content_len = body.len().to_string();
