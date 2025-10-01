@@ -1,6 +1,6 @@
 use dashmap::DashMap;
-use std::collections::VecDeque;
 use std::borrow::Cow;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
@@ -88,10 +88,7 @@ pub struct SlidingWindowLimiter {
 
 impl SlidingWindowLimiter {
     pub fn new(window: Duration, limit: usize, max_queue_len: usize) -> Self {
-        assert!(
-            max_queue_len >= limit,
-            "max_queue_len must be >= limit"
-        );
+        assert!(max_queue_len >= limit, "max_queue_len must be >= limit");
         Self {
             window,
             limit,
@@ -107,10 +104,15 @@ impl RateLimiter for SlidingWindowLimiter {
         let key: Cow<'static, str> = Cow::Owned(key.into_owned());
 
         // Occasionally perform global cleanup
-        if CLEANUP_COUNTER.fetch_add(1, Ordering::Relaxed) % 100 == 0 {
+        if CLEANUP_COUNTER
+            .fetch_add(1, Ordering::Relaxed)
+            .is_multiple_of(100)
+        {
             let window = self.window;
             self.state.retain(|_, queue| {
-                queue.back().is_some_and(|&t| now.duration_since(t) <= window)
+                queue
+                    .back()
+                    .is_some_and(|&t| now.duration_since(t) <= window)
             });
         }
 
@@ -142,14 +144,18 @@ impl RateLimiter for SlidingWindowLimiter {
                 remaining: (self.limit - queue.len()) as u32,
                 limit: self.limit as u32,
                 retry_after_secs: None,
-                reset_after_secs: queue
-                    .front()
-                    .map(|&t| self.window.as_secs().saturating_sub(now.duration_since(t).as_secs())),
+                reset_after_secs: queue.front().map(|&t| {
+                    self.window
+                        .as_secs()
+                        .saturating_sub(now.duration_since(t).as_secs())
+                }),
             }
         } else {
-            let retry_after = queue
-                .front()
-                .map(|&t| self.window.as_secs().saturating_sub(now.duration_since(t).as_secs()));
+            let retry_after = queue.front().map(|&t| {
+                self.window
+                    .as_secs()
+                    .saturating_sub(now.duration_since(t).as_secs())
+            });
             RateLimitResult {
                 allowed: false,
                 remaining: 0,
