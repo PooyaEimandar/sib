@@ -75,21 +75,21 @@ where
 
         // CONNECT authority-form: "CONNECT host:port HTTP/1.1"
         if matches!(self.req.method, Some("CONNECT")) {
-            if let Some(path) = self.req.path {
-                if let Some(a) = parse_authority(path.trim()) {
-                    return Some(a);
-                }
+            if let Some(path) = self.req.path
+                && let Some(a) = parse_authority(path.trim())
+            {
+                return Some(a);
             }
         }
 
         // Absolute-form: "GET http://example.com:8080/path HTTP/1.1"
         if let Some(path) = self.req.path {
-            if let Some((scheme, rest)) = path.split_once("://") {
-                if scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https") {
-                    let auth_end = rest.find('/').unwrap_or(rest.len());
-                    if let Some(a) = parse_authority(rest[..auth_end].trim()) {
-                        return Some(a);
-                    }
+            if let Some((scheme, rest)) = path.split_once("://")
+                && (scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
+            {
+                let auth_end = rest.find('/').unwrap_or(rest.len());
+                if let Some(a) = parse_authority(rest[..auth_end].trim()) {
+                    return Some(a);
                 }
             }
         }
@@ -347,6 +347,49 @@ where
     async fn eom_async(&mut self) -> std::io::Result<()> {
         Err(io::Error::other("eom_async is not supported in H1Session"))
     }
+
+    #[cfg(feature = "net-ws-server")]
+    #[inline]
+    fn is_ws(&self) -> bool {
+        self.req.headers.iter().any(|h| {
+            h.name.eq_ignore_ascii_case("upgrade") && h.value.eq_ignore_ascii_case(b"websocket")
+        })
+    }
+
+    #[cfg(feature = "net-ws-server")]
+    #[inline]
+    fn upgrade_to_ws(&mut self) -> std::io::Result<()> {
+        use crate::network::http::ws::*;
+        let header_val = match self.req_header(&HeaderName::from_static("Sec-WebSocket-Key")) {
+            Some(val) => val,
+            None => {
+                return self
+                    .status_code(http::StatusCode::BAD_REQUEST)
+                    .header_str("Connection", "close")?
+                    .eom();
+            }
+        };
+        let accept = compute_accept(&header_val);
+
+        // complete handshake (101)
+        let mut resp = format!(
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n"
+        );
+        if let Some(sub_protocol) =
+            self.req_header(&HeaderName::from_static("Sec-WebSocket-Protocol"))
+        {
+            resp.push_str(&format!(
+                "Sec-WebSocket-Protocol: {}\r\n",
+                sub_protocol.to_str().unwrap_or("")
+            ));
+        }
+        resp.push_str("\r\n");
+        self.stream.write_all(resp.as_bytes())?;
+
+        // start ws main loop
+
+        Ok(())
+    }
 }
 
 pub fn new_session<'header, 'buf, 'stream, S>(
@@ -364,17 +407,17 @@ where
     let status = match req.parse_with_uninit_headers(buf, headers) {
         Ok(s) => s,
         Err(e) => {
-            let msg = format!("failed to parse http request: {e:?}");
-            //s_error!("{msg}");
-            return Err(io::Error::other(msg));
+            return Err(io::Error::other(format!(
+                "failed to parse http request: {e:?}"
+            )));
         }
     };
 
-    let len = match status {
-        httparse::Status::Complete(amt) => amt,
+    let count = match status {
+        httparse::Status::Complete(num) => num,
         httparse::Status::Partial => return Ok(None),
     };
-    req_buf.advance(len);
+    req_buf.advance(count);
 
     // reserve rsp_buf
     let rem = rsp_buf.capacity() - rsp_buf.len();

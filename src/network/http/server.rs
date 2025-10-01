@@ -1068,10 +1068,10 @@ pub(crate) fn parse_authority(s: &str) -> Option<(String, Option<u16>)> {
         if rest.is_empty() {
             return Some((host.to_string(), None));
         }
-        if let Some(port_str) = rest.strip_prefix(':') {
-            if let Ok(p) = port_str.parse::<u16>() {
-                return Some((host.to_string(), Some(p)));
-            }
+        if let Some(port_str) = rest.strip_prefix(':')
+            && let Ok(p) = port_str.parse::<u16>()
+        {
+            return Some((host.to_string(), Some(p)));
         }
         return None;
     }
@@ -1079,10 +1079,11 @@ pub(crate) fn parse_authority(s: &str) -> Option<(String, Option<u16>)> {
     if let Some(colon) = trim.rfind(':') {
         let (h, p) = trim.split_at(colon);
         let p = &p[1..];
-        if !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) {
-            if let Ok(port) = p.parse::<u16>() {
-                return Some((h.to_string(), Some(port)));
-            }
+        if !p.is_empty()
+            && p.chars().all(|c| c.is_ascii_digit())
+            && let Ok(port) = p.parse::<u16>()
+        {
+            return Some((h.to_string(), Some(port)));
         }
     }
     Some((trim.to_string(), None))
