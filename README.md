@@ -10,7 +10,7 @@ it is designed for **real-time networking**, **low-latency streaming**, and **sc
 | Feature          | Description                        
 | ---------------- | --------------------------------- 
 | `net-h1-server`  | Enable HTTP/1.1 server            
-| `net-h2-server`  | Enable HTTP/2 server with either rt-glommio or rt-tokio feature 
+| `net-h2-server`  | Enable HTTP/2 server
 | `net-h3-server`  | Enable HTTP/3 server              
 | `db-fdb`         | FoundationDB bindings      
 | `rt-glommio`     | Enable glommio runtime for HTTP/2/3      
