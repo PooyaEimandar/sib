@@ -2,6 +2,8 @@
 {
   "rust-analyzer.cargo.allFeatures": false,
   "rust-analyzer.cargo.features": [
+    "net-h1-server",
+    "net-ws-server",
   ],
   "rust-analyzer.cargo.noDefaultFeatures": true
 }

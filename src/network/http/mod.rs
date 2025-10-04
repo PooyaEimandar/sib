@@ -10,8 +10,8 @@ cfg_if::cfg_if! {
         pub mod h1_session;
         pub mod h1_server;
 
-        // #[cfg(feature = "net-ws-server")]
-        // pub mod ws;
+        #[cfg(feature = "net-ws-server")]
+        pub mod ws;
     }
 }
 

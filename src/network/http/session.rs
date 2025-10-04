@@ -42,6 +42,26 @@ pub trait Session {
 
     #[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
     async fn eom_async(&mut self) -> std::io::Result<()>;
+
+    #[cfg(feature = "net-ws-server")]
+    fn is_ws(&self) -> bool;
+
+    #[cfg(feature = "net-ws-server")]
+    fn ws_upgrade(&mut self) -> std::io::Result<()>;
+
+    #[cfg(feature = "net-ws-server")]
+    fn ws_read(&mut self) -> std::io::Result<(crate::network::http::ws::OpCode, &[u8], bool)>;
+
+    #[cfg(feature = "net-ws-server")]
+    fn ws_write(
+        &mut self,
+        op: crate::network::http::ws::OpCode,
+        payload: &[u8],
+        fin: bool,
+    ) -> std::io::Result<()>;
+
+    #[cfg(feature = "net-ws-server")]
+    fn ws_close(&mut self, reason: Option<&[u8]>) -> std::io::Result<()>;
 }
 
 pub trait HService {

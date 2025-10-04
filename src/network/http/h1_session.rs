@@ -185,6 +185,7 @@ where
                 continue;
             }
 
+            // SAFETY: req_buf has contiguous spare capacity after reserve
             let buf =
                 unsafe { std::slice::from_raw_parts_mut(spare.as_mut_ptr() as *mut u8, to_read) };
 
@@ -196,6 +197,7 @@ where
                     ));
                 }
                 Ok(n) => {
+                    // SAFETY: we have just initialized `n` bytes above
                     unsafe {
                         self.req_buf.advance_mut(n);
                     }
@@ -355,9 +357,9 @@ where
 
     #[cfg(feature = "net-ws-server")]
     #[inline]
-    fn upgrade_to_ws(&mut self) -> std::io::Result<()> {
+    fn ws_upgrade(&mut self) -> std::io::Result<()> {
         use crate::network::http::ws::*;
-        let header_val = match self.req_header(&HeaderName::from_static("Sec-WebSocket-Key")) {
+        let header_val = match self.req_header(&HeaderName::from_static("sec-websocket-key")) {
             Some(val) => val,
             None => {
                 return self
@@ -373,7 +375,7 @@ where
             "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n"
         );
         if let Some(sub_protocol) =
-            self.req_header(&HeaderName::from_static("Sec-WebSocket-Protocol"))
+            self.req_header(&HeaderName::from_static("sec-websocket-protocol"))
         {
             resp.push_str(&format!(
                 "Sec-WebSocket-Protocol: {}\r\n",
@@ -383,8 +385,136 @@ where
         resp.push_str("\r\n");
         self.stream.write_all(resp.as_bytes())?;
 
-        // start ws main loop
+        // stream is ready for websocket frames
+        Ok(())
+    }
 
+    #[cfg(feature = "net-ws-server")]
+    #[inline]
+    fn ws_read(&mut self) -> std::io::Result<(crate::network::http::ws::OpCode, &[u8], bool)> {
+        use crate::network::http::ws::OpCode;
+
+        // read first two bytes
+        let mut b2 = [0u8; 2];
+        read_exact_blocking(&mut self.stream, &mut b2)?;
+        let fin = (b2[0] & 0x80) != 0;
+        let opcode = match b2[0] & 0x0F {
+            0x0 => OpCode::Continue,
+            0x1 => OpCode::Text,
+            0x2 => OpCode::Binary,
+            0x8 => OpCode::Close,
+            0x9 => OpCode::Ping,
+            0xA => OpCode::Pong,
+            x => return Err(std::io::Error::other(format!("unsupported opcode {x}"))),
+        };
+
+        // length & mask
+        let masked = (b2[1] & 0x80) != 0;
+        if !masked {
+            return Err(std::io::Error::other("client frame not masked"));
+        }
+        let mut len = (b2[1] & 0x7F) as u64;
+        if len == 126 {
+            let mut e = [0; 2];
+            read_exact_blocking(&mut self.stream, &mut e)?;
+            len = u16::from_be_bytes(e) as u64;
+        } else if len == 127 {
+            let mut e = [0; 8];
+            read_exact_blocking(&mut self.stream, &mut e)?;
+            len = u64::from_be_bytes(e);
+        }
+        if len > (isize::MAX as u64) {
+            return Err(std::io::Error::other("frame too large"));
+        }
+
+        let mut mask = [0u8; 4];
+        read_exact_blocking(&mut self.stream, &mut mask)?;
+
+        let need = len as usize;
+        self.req_buf.clear();
+        self.req_buf.reserve(need);
+
+        if need > 0 {
+            // SAFETY: req_buf has contiguous spare capacity after reserve
+            let buf = unsafe {
+                std::slice::from_raw_parts_mut(
+                    self.req_buf.spare_capacity_mut().as_mut_ptr() as *mut u8,
+                    need,
+                )
+            };
+            read_exact_blocking(&mut self.stream, buf)?;
+            // SAFETY: we have just initialized `need` bytes above
+            unsafe {
+                self.req_buf.advance_mut(need);
+            }
+
+            // unmask in place
+            for (i, b) in self.req_buf[..need].iter_mut().enumerate() {
+                *b ^= mask[i & 3];
+            }
+        }
+
+        Ok((opcode, &self.req_buf[..need], fin))
+    }
+
+    #[cfg(feature = "net-ws-server")]
+    #[inline]
+    fn ws_write(
+        &mut self,
+        code: crate::network::http::ws::OpCode,
+        payload: &[u8],
+        fin: bool,
+    ) -> std::io::Result<()> {
+        let mut hdr = [0u8; 10];
+        let mut pos = 0;
+
+        hdr[pos] = (if fin { 0x80 } else { 0 }) | (code as u8);
+        pos += 1;
+
+        let len = payload.len();
+        if len < 126 {
+            hdr[pos] = len as u8;
+            pos += 1;
+        } else if len <= 0xFFFF {
+            hdr[pos] = 126;
+            pos += 1;
+            hdr[pos..pos + 2].copy_from_slice(&(len as u16).to_be_bytes());
+            pos += 2;
+        } else {
+            hdr[pos] = 127;
+            pos += 1;
+            hdr[pos..pos + 8].copy_from_slice(&(len as u64).to_be_bytes());
+            pos += 8;
+        }
+
+        write_all_blocking(&mut self.stream, &hdr[..pos])?;
+        write_all_blocking(&mut self.stream, payload)?;
+        Ok(())
+    }
+
+    #[cfg(feature = "net-ws-server")]
+    #[inline]
+    fn ws_close(&mut self, reason: Option<&[u8]>) -> std::io::Result<()> {
+        let mut payload = [0u8; 2 + 123]; // 2 for code + up to 123 bytes reason (fits <126)
+        payload[..2].copy_from_slice(&1000u16.to_be_bytes());
+        let rlen = reason.map(|r| r.len()).unwrap_or(0);
+        if rlen > 123 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "close reason too long",
+            ));
+        }
+        if let Some(r) = reason {
+            payload[2..2 + rlen].copy_from_slice(r);
+        }
+        let total = 2 + rlen;
+
+        let mut hdr = [0u8; 4];
+        hdr[0] = 0x88; // FIN|Close
+        hdr[1] = total as u8; // <126 ensured above
+
+        write_all_blocking(&mut self.stream, &hdr[..2])?;
+        write_all_blocking(&mut self.stream, &payload[..total])?;
         Ok(())
     }
 }
@@ -400,6 +530,8 @@ where
     S: Read + Write,
 {
     let mut req = httparse::Request::new(&mut []);
+
+    // SAFETY: headers is MaybeUninit, we are initializing it now
     let buf: &[u8] = unsafe { std::mem::transmute(req_buf.chunk()) };
     let status = match req.parse_with_uninit_headers(buf, headers) {
         Ok(s) => s,
@@ -430,4 +562,60 @@ where
         rsp_buf,
         stream,
     }))
+}
+
+#[cfg(feature = "net-ws-server")]
+#[inline]
+fn read_exact_blocking<R: std::io::Read>(
+    stream: &mut R,
+    mut buf: &mut [u8],
+) -> std::io::Result<()> {
+    while !buf.is_empty() {
+        match stream.read(buf) {
+            Ok(0) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "connection closed while reading",
+                ));
+            }
+            Ok(n) => {
+                let tmp = buf;
+                buf = &mut tmp[n..];
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // cooperate with may’s scheduler until the socket is writable again
+                may::coroutine::yield_now();
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                // retry on EINTR
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "net-ws-server")]
+#[inline]
+fn write_all_blocking<W: std::io::Write>(mut w: W, mut buf: &[u8]) -> std::io::Result<()> {
+    while !buf.is_empty() {
+        match w.write(buf) {
+            Ok(0) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "write returned 0 on nonblocking socket",
+                ));
+            }
+            Ok(n) => buf = &buf[n..],
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                may::coroutine::yield_now();
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
 }

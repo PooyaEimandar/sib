@@ -1117,6 +1117,103 @@ mod tests {
                 "Http version: {http_version:?}, Echo: {req_method:?} {req_host:?} {req_path:?}\r\nBody: {req_body:?}"
             ));
 
+            if session.is_ws() {
+                if session.ws_upgrade().is_ok() {
+                    use crate::network::http::ws::OpCode;
+
+                    // if you want: keep a small buffer for fragmented messages
+                    let mut frag_buf: Vec<u8> = Vec::new();
+                    let mut expecting_continuation = false;
+                    let mut initial_opcode = OpCode::Text; // track Text/Binary for fragmented
+
+                    loop {
+                        let (code, payload, fin) = session.ws_read()?;
+                        // Clone payload to break the borrow before next mutable borrow
+                        let payload_cloned = payload.to_vec();
+
+                        match code {
+                            OpCode::Ping => {
+                                // Echo back the same payload per RFC 6455
+                                session.ws_write(OpCode::Pong, &payload_cloned, true)?;
+                                continue;
+                            }
+                            OpCode::Pong => {
+                                // ignore
+                                continue;
+                            }
+                            OpCode::Close => {
+                                session.ws_close(Some(b"Normal close"))?;
+                                break;
+                            }
+                            OpCode::Text | OpCode::Binary => {
+                                if !fin {
+                                    // start a fragmented message
+                                    frag_buf.clear();
+                                    frag_buf.extend_from_slice(payload);
+                                    expecting_continuation = true;
+                                    initial_opcode = code;
+                                    continue;
+                                }
+
+                                // single-frame message
+                                if code == OpCode::Text {
+                                    if let Ok(msg) = std::str::from_utf8(payload) {
+                                        println!(
+                                            "WS server got: code={:?}, fin={}, msg={:?}",
+                                            code, fin, msg
+                                        );
+                                    }
+                                    session.ws_write(OpCode::Text, b"hello ws client!", true)?;
+                                } else {
+                                    println!("WS server got binary ({} bytes)", payload.len());
+                                    session.ws_write(OpCode::Binary, &payload_cloned, true)?;
+                                }
+                            }
+
+                            OpCode::Continue => {
+                                if !expecting_continuation {
+                                    // protocol error (unexpected continuation)
+                                    session.ws_close(None)?;
+                                    break;
+                                }
+                                frag_buf.extend_from_slice(payload);
+                                if fin {
+                                    // message complete
+                                    expecting_continuation = false;
+                                    match initial_opcode {
+                                        OpCode::Text => {
+                                            if let Ok(msg) = std::str::from_utf8(&frag_buf) {
+                                                println!("WS server got (fragmented text): {msg}");
+                                            }
+                                            session.ws_write(
+                                                OpCode::Text,
+                                                b"hello ws client!",
+                                                true,
+                                            )?;
+                                        }
+                                        OpCode::Binary => {
+                                            println!(
+                                                "WS server got (fragmented binary): {} bytes",
+                                                frag_buf.len()
+                                            );
+                                            session.ws_write(OpCode::Binary, &frag_buf, true)?;
+                                        }
+                                        _ => {}
+                                    }
+                                    frag_buf.clear();
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // finally close the connection
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionAborted,
+                    "ws done",
+                ));
+            }
+
             session
                 .status_code(http::StatusCode::OK)
                 .header_str("Content-Type", "text/plain")?
@@ -1343,6 +1440,47 @@ mod tests {
         });
 
         may::join!(server_handle, client_handler);
+        std::thread::sleep(Duration::from_secs(1));
+    }
+
+    #[cfg(feature = "net-ws-server")]
+    #[test]
+    fn test_ws_server() {
+        use crate::network::http::server::H1Config;
+        use std::time::Duration;
+
+        let addr = "127.0.0.1:8081";
+        let server_handler = std::thread::spawn(move || {
+            const NUMBER_OF_WORKERS: usize = 1;
+            crate::init_global_poller(NUMBER_OF_WORKERS, 2 * 1024 * 1024);
+
+            // Pick a port and start the server
+            EchoServer
+                .start_h1(addr, H1Config::default())
+                .expect("h1 start server")
+        });
+
+        std::thread::sleep(Duration::from_millis(500));
+        // Connect to websocket server
+        let (mut socket, response) = tungstenite::client::connect(format!("ws://{}", addr))
+            .expect("websocket handshake failed");
+
+        eprintln!("WS GET Response: {response:?}");
+
+        if socket.can_write() {
+            socket
+                .write(tungstenite::Message::Text("hello ws server".into()))
+                .expect("ws write");
+            socket.flush().expect("ws flush");
+        }
+        if socket.can_read() {
+            let msg = socket.read().expect("ws read");
+            eprintln!("WS client got: {msg:?}");
+        }
+        socket.close(None).expect("close failed");
+
+        may::join!(server_handler);
+
         std::thread::sleep(Duration::from_secs(1));
     }
 
