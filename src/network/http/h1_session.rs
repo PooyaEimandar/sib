@@ -209,7 +209,7 @@ where
                 Err(e) => return Err(e),
             }
 
-            if read % 1024 == 0 {
+            if read.is_multiple_of(1024) {
                 may::coroutine::yield_now();
             }
         }
