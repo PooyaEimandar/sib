@@ -1117,6 +1117,7 @@ mod tests {
                 "Http version: {http_version:?}, Echo: {req_method:?} {req_host:?} {req_path:?}\r\nBody: {req_body:?}"
             ));
 
+            #[cfg(feature = "net-ws-server")]
             if session.is_ws() {
                 if session.ws_upgrade().is_ok() {
                     use crate::network::http::ws::OpCode;
