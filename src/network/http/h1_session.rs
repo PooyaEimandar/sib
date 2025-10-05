@@ -459,13 +459,19 @@ where
             bytes::Bytes::new()
         } else {
             // fill exactly needed bytes
-            let p = take_exact_nb(self.stream, self.req_buf, need)?;
-            // unmask in place
-            self.req_buf.clear();
-            self.req_buf.extend_from_slice(&p);
-            for (i, b) in self.req_buf.iter_mut().enumerate() {
-                *b ^= mask[i & 3];
+            ensure_bytes(self.stream, self.req_buf, need)?;
+
+            // Unmask in place on the first `need` bytes
+            {
+                let data = &mut self.req_buf[..need];
+                // `mask` is a Bytes; indexing is cheap
+                for i in 0..need {
+                    data[i] ^= mask[i & 3];
+                }
             }
+
+            // Hand out the exact payload as Bytes, leaving any extra bytes
+            // (next frame) in req_buf.
             self.req_buf.split_to(need).freeze()
         };
 
@@ -480,10 +486,15 @@ where
         payload: &bytes::Bytes,
         fin: bool,
     ) -> std::io::Result<()> {
+        use crate::network::http::h1_server::write;
+        use std::io::{ErrorKind, IoSlice};
+
+        // Build WS header (server frames are unmasked)
         let mut hdr = [0u8; 10];
         let mut pos = 0;
         hdr[pos] = (if fin { 0x80 } else { 0 }) | (code as u8);
         pos += 1;
+
         let len = payload.len();
         if len < 126 {
             hdr[pos] = len as u8;
@@ -499,11 +510,57 @@ where
             hdr[pos..pos + 8].copy_from_slice(&(len as u64).to_be_bytes());
             pos += 8;
         }
-        self.rsp_buf.extend_from_slice(&hdr[..pos]);
-        self.rsp_buf.extend_from_slice(payload);
 
-        // drain all
-        use crate::network::http::h1_server::write;
+        // If we already have bytes queued, preserve order: buffer + drain.
+        if !self.rsp_buf.is_empty() {
+            self.rsp_buf.extend_from_slice(&hdr[..pos]);
+            self.rsp_buf.extend_from_slice(payload);
+            while !self.rsp_buf.is_empty() {
+                let (_, blocked) = write(self.stream, self.rsp_buf)?;
+                if blocked && !self.rsp_buf.is_empty() {
+                    may::coroutine::yield_now();
+                }
+            }
+            return Ok(());
+        }
+
+        // Fast path: try one zero-copy vectored write (header + payload)
+        let total = pos + len;
+        let bufs = [IoSlice::new(&hdr[..pos]), IoSlice::new(payload)];
+        match self.stream.write_vectored(&bufs) {
+            Ok(n) if n == total => {
+                // All done, nothing buffered.
+                return Ok(());
+            }
+            Ok(n) => {
+                // Partial write: buffer whatever remains, then drain.
+                let mut remaining_hdr_off = 0usize;
+                let mut remaining_payload_off = 0usize;
+
+                if n < pos {
+                    remaining_hdr_off = n;
+                } else {
+                    remaining_payload_off = n - pos;
+                }
+
+                if remaining_hdr_off < pos {
+                    self.rsp_buf.extend_from_slice(&hdr[remaining_hdr_off..pos]);
+                }
+                if remaining_payload_off < len {
+                    // Copies only the tail we couldn't write
+                    self.rsp_buf
+                        .extend_from_slice(&payload[remaining_payload_off..]);
+                }
+            }
+            Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
+                // Socket not ready: buffer entire frame, then drain later.
+                self.rsp_buf.extend_from_slice(&hdr[..pos]);
+                self.rsp_buf.extend_from_slice(payload);
+            }
+            Err(e) => return Err(e),
+        }
+
+        // Buffered drain using your existing nonblocking writer
         while !self.rsp_buf.is_empty() {
             let (_, blocked) = write(self.stream, self.rsp_buf)?;
             if blocked && !self.rsp_buf.is_empty() {
@@ -638,4 +695,21 @@ fn take_exact_nb<S: Read + Write>(
         }
     }
     Ok(buf.split_to(need).freeze())
+}
+
+#[cfg(feature = "net-ws-server")]
+#[inline]
+fn ensure_bytes<S: Read + Write>(
+    stream: &mut S,
+    buf: &mut BytesMut,
+    need: usize,
+) -> std::io::Result<()> {
+    use crate::network::http::h1_server::read;
+    while buf.len() < need {
+        let _ = read(stream, buf)?; // fills buf.chunk_mut()
+        if buf.len() < need {
+            may::coroutine::yield_now(); // cooperate with may
+        }
+    }
+    Ok(())
 }
