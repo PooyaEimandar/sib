@@ -402,4 +402,45 @@ impl Session for H2Session {
         self.res_status = http::StatusCode::OK;
         Ok(())
     }
+
+    #[cfg(feature = "net-ws-server")]
+    #[inline]
+    fn is_ws(&self) -> bool {
+        self.req.method() == http::Method::CONNECT
+            && self
+                .req
+                .headers()
+                .get(http::header::HeaderName::from_static(":protocol"))
+                .and_then(|v| v.to_str().ok())
+                .map(|v| v.eq_ignore_ascii_case("websocket"))
+                .unwrap_or(false)
+    }
+
+    #[cfg(all(feature = "net-ws-server", feature = "net-h1-server"))]
+    #[inline]
+    fn ws_accept(&mut self) -> std::io::Result<()> {
+        Err(io::Error::other("ws_accept is not supported in H2Session"))
+    }
+
+    #[cfg(all(feature = "net-ws-server", feature = "net-h1-server"))]
+    #[inline]
+    fn ws_read(&mut self) -> std::io::Result<(crate::network::http::ws::OpCode, &[u8], bool)> {
+        Err(io::Error::other("ws_read is not supported in H2Session"))
+    }
+
+    #[cfg(all(feature = "net-ws-server", feature = "net-h1-server"))]
+    #[inline]
+    fn ws_write(
+        &mut self,
+        op: crate::network::http::ws::OpCode,
+        payload: &[u8],
+        fin: bool,
+    ) -> std::io::Result<()> {
+        Err(io::Error::other("ws_write is not supported in H2Session"))
+    }
+
+    #[cfg(all(feature = "net-ws-server", feature = "net-h1-server"))]
+    fn ws_close(&mut self, reason: Option<&[u8]>) -> std::io::Result<()> {
+        Err(io::Error::other("ws_close is not supported in H2Session"))
+    }
 }

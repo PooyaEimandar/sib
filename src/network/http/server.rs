@@ -1119,7 +1119,7 @@ mod tests {
 
             #[cfg(feature = "net-ws-server")]
             if session.is_ws() {
-                if session.ws_upgrade().is_ok() {
+                if session.ws_accept().is_ok() {
                     use crate::network::http::ws::OpCode;
 
                     // if you want: keep a small buffer for fragmented messages
@@ -1444,9 +1444,9 @@ mod tests {
         std::thread::sleep(Duration::from_secs(1));
     }
 
-    #[cfg(feature = "net-ws-server")]
+    #[cfg(all(feature = "net-ws-server", feature = "net-h1-server"))]
     #[test]
-    fn test_ws_server() {
+    fn test_h1_ws_server() {
         use crate::network::http::server::H1Config;
         use std::time::Duration;
 

@@ -46,13 +46,13 @@ pub trait Session {
     #[cfg(feature = "net-ws-server")]
     fn is_ws(&self) -> bool;
 
-    #[cfg(feature = "net-ws-server")]
-    fn ws_upgrade(&mut self) -> std::io::Result<()>;
+    #[cfg(all(feature = "net-ws-server", feature = "net-h1-server"))]
+    fn ws_accept(&mut self) -> std::io::Result<()>;
 
-    #[cfg(feature = "net-ws-server")]
+    #[cfg(all(feature = "net-ws-server", feature = "net-h1-server"))]
     fn ws_read(&mut self) -> std::io::Result<(crate::network::http::ws::OpCode, &[u8], bool)>;
 
-    #[cfg(feature = "net-ws-server")]
+    #[cfg(all(feature = "net-ws-server", feature = "net-h1-server"))]
     fn ws_write(
         &mut self,
         op: crate::network::http::ws::OpCode,
@@ -60,7 +60,7 @@ pub trait Session {
         fin: bool,
     ) -> std::io::Result<()>;
 
-    #[cfg(feature = "net-ws-server")]
+    #[cfg(all(feature = "net-ws-server", feature = "net-h1-server"))]
     fn ws_close(&mut self, reason: Option<&[u8]>) -> std::io::Result<()>;
 }
 

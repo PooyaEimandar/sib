@@ -5,7 +5,7 @@
 - [x] gstreamer
 - [x] Static file server
 - [x] io_uring
+- [x] Websocket server
 - [ ] Webtransport server
-- [ ] Websocket server
 - [ ] Log with clickhouse
 - [ ] RAFT

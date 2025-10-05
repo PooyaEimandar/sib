@@ -1,9 +1,8 @@
+#[cfg(feature = "net-file-server")]
+pub mod file;
 pub mod ratelimit;
 pub mod server;
 pub mod session;
-
-#[cfg(feature = "net-file-server")]
-pub mod file;
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "net-h1-server")] {
