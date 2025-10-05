@@ -50,18 +50,20 @@ pub trait Session {
     fn ws_accept(&mut self) -> std::io::Result<()>;
 
     #[cfg(all(feature = "net-ws-server", feature = "net-h1-server"))]
-    fn ws_read(&mut self) -> std::io::Result<(crate::network::http::ws::OpCode, &[u8], bool)>;
+    fn ws_read(
+        &mut self,
+    ) -> std::io::Result<(crate::network::http::ws::OpCode, bytes::Bytes, bool)>;
 
     #[cfg(all(feature = "net-ws-server", feature = "net-h1-server"))]
     fn ws_write(
         &mut self,
         op: crate::network::http::ws::OpCode,
-        payload: &[u8],
+        payload: &bytes::Bytes,
         fin: bool,
     ) -> std::io::Result<()>;
 
     #[cfg(all(feature = "net-ws-server", feature = "net-h1-server"))]
-    fn ws_close(&mut self, reason: Option<&[u8]>) -> std::io::Result<()>;
+    fn ws_close(&mut self, reason: Option<&bytes::Bytes>) -> std::io::Result<()>;
 }
 
 pub trait HService {

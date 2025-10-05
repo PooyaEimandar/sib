@@ -358,7 +358,6 @@ where
     #[cfg(feature = "net-ws-server")]
     #[inline]
     fn ws_accept(&mut self) -> std::io::Result<()> {
-        use crate::network::http::ws::*;
         let header_val = match self.req_header(&HeaderName::from_static("sec-websocket-key")) {
             Some(val) => val,
             None => {
@@ -391,70 +390,86 @@ where
 
     #[cfg(feature = "net-ws-server")]
     #[inline]
-    fn ws_read(&mut self) -> std::io::Result<(crate::network::http::ws::OpCode, &[u8], bool)> {
+    fn ws_read(
+        &mut self,
+    ) -> std::io::Result<(crate::network::http::ws::OpCode, bytes::Bytes, bool)> {
         use crate::network::http::ws::OpCode;
 
-        // read first two bytes
-        let mut b2 = [0u8; 2];
-        read_exact_blocking(&mut self.stream, &mut b2)?;
-        let fin = (b2[0] & 0x80) != 0;
-        let opcode = match b2[0] & 0x0F {
+        // get first two bytes
+        let h = take_exact_nb(self.stream, self.req_buf, 2)?;
+        let b0 = h[0];
+        let b1 = h[1];
+        let fin = (b0 & 0x80) != 0;
+        if (b0 & 0x70) != 0 {
+            return Err(std::io::Error::other("WS RSV set"));
+        }
+
+        let opcode = match b0 & 0x0F {
             0x0 => OpCode::Continue,
             0x1 => OpCode::Text,
             0x2 => OpCode::Binary,
             0x8 => OpCode::Close,
             0x9 => OpCode::Ping,
             0xA => OpCode::Pong,
-            x => return Err(std::io::Error::other(format!("unsupported opcode {x}"))),
+            x => return Err(std::io::Error::other(format!("bad WS opcode {x}"))),
         };
 
-        // length & mask
-        let masked = (b2[1] & 0x80) != 0;
-        if !masked {
-            return Err(std::io::Error::other("client frame not masked"));
+        let is_control = matches!(opcode, OpCode::Close | OpCode::Ping | OpCode::Pong);
+        if is_control && !fin {
+            return Err(std::io::Error::other("WS control fragmented"));
         }
-        let mut len = (b2[1] & 0x7F) as u64;
+
+        if (b1 & 0x80) == 0 {
+            return Err(std::io::Error::other("WS client not masked"));
+        }
+        let mut len = (b1 & 0x7F) as u64;
         if len == 126 {
-            let mut e = [0; 2];
-            read_exact_blocking(&mut self.stream, &mut e)?;
-            len = u16::from_be_bytes(e) as u64;
+            len = u16::from_be_bytes(
+                take_exact_nb(self.stream, self.req_buf, 2)?
+                    .as_ref()
+                    .try_into()
+                    .unwrap(),
+            ) as u64;
         } else if len == 127 {
-            let mut e = [0; 8];
-            read_exact_blocking(&mut self.stream, &mut e)?;
-            len = u64::from_be_bytes(e);
+            len = u64::from_be_bytes(
+                take_exact_nb(self.stream, self.req_buf, 8)?
+                    .as_ref()
+                    .try_into()
+                    .unwrap(),
+            );
+        }
+        if is_control && len > 125 {
+            return Err(std::io::Error::other("WS control too long"));
         }
         if len > (isize::MAX as u64) {
-            return Err(std::io::Error::other("frame too large"));
+            return Err(std::io::Error::other("WS frame too large"));
         }
 
-        let mut mask = [0u8; 4];
-        read_exact_blocking(&mut self.stream, &mut mask)?;
-
+        let mask = take_exact_nb(self.stream, self.req_buf, 4)?;
         let need = len as usize;
-        self.req_buf.clear();
-        self.req_buf.reserve(need);
+        if need > BUF_LEN {
+            return Err(std::io::Error::other(format!(
+                "max WS frame is {}",
+                BUF_LEN
+            )));
+        }
 
-        if need > 0 {
-            // SAFETY: req_buf has contiguous spare capacity after reserve
-            let buf = unsafe {
-                std::slice::from_raw_parts_mut(
-                    self.req_buf.spare_capacity_mut().as_mut_ptr() as *mut u8,
-                    need,
-                )
-            };
-            read_exact_blocking(&mut self.stream, buf)?;
-            // SAFETY: we have just initialized `need` bytes above
-            unsafe {
-                self.req_buf.advance_mut(need);
-            }
-
+        // read payload into req_buf then unmask in place
+        let payload = if need == 0 {
+            bytes::Bytes::new()
+        } else {
+            // fill exactly needed bytes
+            let p = take_exact_nb(self.stream, self.req_buf, need)?;
             // unmask in place
-            for (i, b) in self.req_buf[..need].iter_mut().enumerate() {
+            self.req_buf.clear();
+            self.req_buf.extend_from_slice(&p);
+            for (i, b) in self.req_buf.iter_mut().enumerate() {
                 *b ^= mask[i & 3];
             }
-        }
+            self.req_buf.split_to(need).freeze()
+        };
 
-        Ok((opcode, &self.req_buf[..need], fin))
+        Ok((opcode, payload, fin))
     }
 
     #[cfg(feature = "net-ws-server")]
@@ -462,15 +477,13 @@ where
     fn ws_write(
         &mut self,
         code: crate::network::http::ws::OpCode,
-        payload: &[u8],
+        payload: &bytes::Bytes,
         fin: bool,
     ) -> std::io::Result<()> {
         let mut hdr = [0u8; 10];
         let mut pos = 0;
-
         hdr[pos] = (if fin { 0x80 } else { 0 }) | (code as u8);
         pos += 1;
-
         let len = payload.len();
         if len < 126 {
             hdr[pos] = len as u8;
@@ -486,17 +499,29 @@ where
             hdr[pos..pos + 8].copy_from_slice(&(len as u64).to_be_bytes());
             pos += 8;
         }
+        self.rsp_buf.extend_from_slice(&hdr[..pos]);
+        self.rsp_buf.extend_from_slice(payload);
 
-        write_all_blocking(&mut self.stream, &hdr[..pos])?;
-        write_all_blocking(&mut self.stream, payload)?;
+        // drain all
+        use crate::network::http::h1_server::write;
+        while !self.rsp_buf.is_empty() {
+            let (_, blocked) = write(self.stream, self.rsp_buf)?;
+            if blocked && !self.rsp_buf.is_empty() {
+                may::coroutine::yield_now();
+            }
+        }
         Ok(())
     }
 
     #[cfg(feature = "net-ws-server")]
     #[inline]
-    fn ws_close(&mut self, reason: Option<&[u8]>) -> std::io::Result<()> {
-        let mut payload = [0u8; 2 + 123]; // 2 for code + up to 123 bytes reason (fits <126)
-        payload[..2].copy_from_slice(&1000u16.to_be_bytes());
+    fn ws_close(&mut self, reason: Option<&bytes::Bytes>) -> std::io::Result<()> {
+        use crate::network::http::h1_server::write;
+
+        // RFC 6455 §5.5.1 — Close frame payload: 2-byte code + UTF-8 reason (optional)
+        let mut payload = [0u8; 2 + 123]; // max 125 total (control frame limit)
+        payload[..2].copy_from_slice(&1000u16.to_be_bytes()); // normal closure
+
         let rlen = reason.map(|r| r.len()).unwrap_or(0);
         if rlen > 123 {
             return Err(std::io::Error::new(
@@ -504,17 +529,37 @@ where
                 "close reason too long",
             ));
         }
+
         if let Some(r) = reason {
+            // RFC requires UTF-8 for reason string
+            if std::str::from_utf8(r).is_err() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "close reason not utf8",
+                ));
+            }
             payload[2..2 + rlen].copy_from_slice(r);
         }
+
         let total = 2 + rlen;
 
+        // Build the WS frame header (FIN | CLOSE opcode)
         let mut hdr = [0u8; 4];
-        hdr[0] = 0x88; // FIN|Close
-        hdr[1] = total as u8; // <126 ensured above
+        hdr[0] = 0x88; // FIN + opcode = Close (0x8)
+        hdr[1] = total as u8; // always <126 (control frame limit)
 
-        write_all_blocking(&mut self.stream, &hdr[..2])?;
-        write_all_blocking(&mut self.stream, &payload[..total])?;
+        // Append to the shared rsp_buf
+        self.rsp_buf.extend_from_slice(&hdr[..2]);
+        self.rsp_buf.extend_from_slice(&payload[..total]);
+
+        // Non-blocking drain using same helper as HTTP
+        while !self.rsp_buf.is_empty() {
+            let (_, blocked) = write(&mut self.stream, &mut self.rsp_buf)?;
+            if blocked && !self.rsp_buf.is_empty() {
+                may::coroutine::yield_now();
+            }
+        }
+
         Ok(())
     }
 }
@@ -580,56 +625,17 @@ fn compute_accept(sec_key: &http::HeaderValue) -> String {
 
 #[cfg(feature = "net-ws-server")]
 #[inline]
-fn read_exact_blocking<R: std::io::Read>(
-    stream: &mut R,
-    mut buf: &mut [u8],
-) -> std::io::Result<()> {
-    while !buf.is_empty() {
-        match stream.read(buf) {
-            Ok(0) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "connection closed while reading",
-                ));
-            }
-            Ok(n) => {
-                let tmp = buf;
-                buf = &mut tmp[n..];
-            }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // cooperate with may’s scheduler until the socket is writable again
-                may::coroutine::yield_now();
-            }
-            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {
-                // retry on EINTR
-                continue;
-            }
-            Err(e) => return Err(e),
+fn take_exact_nb<S: Read + Write>(
+    stream: &mut S,
+    buf: &mut BytesMut,
+    need: usize,
+) -> std::io::Result<bytes::Bytes> {
+    use crate::network::http::h1_server::read;
+    while buf.len() < need {
+        let _blocked = read(stream, buf)?;
+        if buf.len() < need {
+            may::coroutine::yield_now();
         }
     }
-    Ok(())
-}
-
-#[cfg(feature = "net-ws-server")]
-#[inline]
-fn write_all_blocking<W: std::io::Write>(mut w: W, mut buf: &[u8]) -> std::io::Result<()> {
-    while !buf.is_empty() {
-        match w.write(buf) {
-            Ok(0) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::WriteZero,
-                    "write returned 0 on nonblocking socket",
-                ));
-            }
-            Ok(n) => buf = &buf[n..],
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                may::coroutine::yield_now();
-            }
-            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {
-                continue;
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(())
+    Ok(buf.split_to(need).freeze())
 }

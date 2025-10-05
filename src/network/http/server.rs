@@ -1108,112 +1108,130 @@ mod tests {
     #[cfg(feature = "net-h1-server")]
     impl HService for EchoServer {
         fn call<SE: Session>(&mut self, session: &mut SE) -> std::io::Result<()> {
-            let req_host = session.req_host();
-            let req_method = session.req_method();
-            let req_path = session.req_path();
-            let http_version = session.req_http_version();
-            let req_body = session.req_body(std::time::Duration::from_secs(5))?;
-            let body = bytes::Bytes::from(format!(
-                "Http version: {http_version:?}, Echo: {req_method:?} {req_host:?} {req_path:?}\r\nBody: {req_body:?}"
-            ));
-
+            // WebSocket upgrade path
             #[cfg(feature = "net-ws-server")]
             if session.is_ws() {
-                if session.ws_accept().is_ok() {
-                    use crate::network::http::ws::OpCode;
+                if let Err(e) = session.ws_accept() {
+                    session
+                        .status_code(http::StatusCode::BAD_REQUEST)
+                        .header_str("Connection", "close")?
+                        .eom()?;
+                    return Err(e);
+                }
 
-                    // if you want: keep a small buffer for fragmented messages
-                    let mut frag_buf: Vec<u8> = Vec::new();
-                    let mut expecting_continuation = false;
-                    let mut initial_opcode = OpCode::Text; // track Text/Binary for fragmented
+                use crate::network::http::ws::OpCode;
+                use bytes::{Bytes, BytesMut};
 
-                    loop {
-                        let (code, payload, fin) = session.ws_read()?;
-                        // Clone payload to break the borrow before next mutable borrow
-                        let payload_cloned = payload.to_vec();
+                let mut frag_buf = BytesMut::new();
+                let mut expecting_cont = false;
+                let mut initial_is_text = false;
 
-                        match code {
-                            OpCode::Ping => {
-                                // Echo back the same payload per RFC 6455
-                                session.ws_write(OpCode::Pong, &payload_cloned, true)?;
-                                continue;
-                            }
-                            OpCode::Pong => {
-                                // ignore
-                                continue;
-                            }
-                            OpCode::Close => {
-                                session.ws_close(Some(b"Normal close"))?;
+                // Pre-allocate small static replies as Bytes to satisfy &Bytes params
+                let reply_text = Bytes::from_static(b"hello ws client!");
+                let err_protocol = Bytes::from_static(b"protocol error");
+                let err_unexpected = Bytes::from_static(b"unexpected continuation");
+                let err_utf8 = Bytes::from_static(b"invalid utf8");
+
+                loop {
+                    let (code, payload, fin) = session.ws_read()?; // payload: Bytes
+
+                    match code {
+                        OpCode::Ping => {
+                            // Echo same payload
+                            session.ws_write(OpCode::Pong, &payload, true)?;
+                        }
+                        OpCode::Pong => {
+                            // ignore
+                        }
+                        OpCode::Close => {
+                            // Echo client's Close payload back
+                            session.ws_write(OpCode::Close, &payload, true)?;
+                            break;
+                        }
+                        OpCode::Text | OpCode::Binary => {
+                            if expecting_cont {
+                                // Protocol error: new data frame while fragmented message pending
+                                session.ws_close(Some(&err_protocol))?;
                                 break;
                             }
-                            OpCode::Text | OpCode::Binary => {
-                                if !fin {
-                                    // start a fragmented message
-                                    frag_buf.clear();
-                                    frag_buf.extend_from_slice(payload);
-                                    expecting_continuation = true;
-                                    initial_opcode = code;
-                                    continue;
-                                }
 
-                                // single-frame message
-                                if code == OpCode::Text {
-                                    if let Ok(msg) = std::str::from_utf8(payload) {
-                                        println!(
-                                            "WS server got: code={:?}, fin={}, msg={:?}",
-                                            code, fin, msg
-                                        );
-                                    }
-                                    session.ws_write(OpCode::Text, b"hello ws client!", true)?;
-                                } else {
-                                    println!("WS server got binary ({} bytes)", payload.len());
-                                    session.ws_write(OpCode::Binary, &payload_cloned, true)?;
-                                }
+                            if !fin {
+                                // Start fragmented message; accumulate only if needed
+                                frag_buf.clear();
+                                frag_buf.extend_from_slice(payload.as_ref());
+                                expecting_cont = true;
+                                initial_is_text = matches!(code, OpCode::Text);
+                                continue;
                             }
 
-                            OpCode::Continue => {
-                                if !expecting_continuation {
-                                    // protocol error (unexpected continuation)
-                                    session.ws_close(None)?;
+                            // Single-frame message
+                            if matches!(code, OpCode::Text) {
+                                if let Ok(msg) = std::str::from_utf8(payload.as_ref()) {
+                                    println!(
+                                        "WS server got: Text ({} bytes): {msg}",
+                                        payload.len()
+                                    );
+                                    session.ws_write(OpCode::Text, &reply_text, true)?;
+                                } else {
+                                    session.ws_close(Some(&err_utf8))?;
                                     break;
                                 }
-                                frag_buf.extend_from_slice(payload);
-                                if fin {
-                                    // message complete
-                                    expecting_continuation = false;
-                                    match initial_opcode {
-                                        OpCode::Text => {
-                                            if let Ok(msg) = std::str::from_utf8(&frag_buf) {
-                                                println!("WS server got (fragmented text): {msg}");
-                                            }
-                                            session.ws_write(
-                                                OpCode::Text,
-                                                b"hello ws client!",
-                                                true,
-                                            )?;
-                                        }
-                                        OpCode::Binary => {
-                                            println!(
-                                                "WS server got (fragmented binary): {} bytes",
-                                                frag_buf.len()
-                                            );
-                                            session.ws_write(OpCode::Binary, &frag_buf, true)?;
-                                        }
-                                        _ => {}
+                            } else {
+                                println!("WS server got Binary ({} bytes)", payload.len());
+                                session.ws_write(OpCode::Binary, &payload, true)?;
+                            }
+                        }
+                        OpCode::Continue => {
+                            if !expecting_cont {
+                                session.ws_close(Some(&err_unexpected))?;
+                                break;
+                            }
+
+                            frag_buf.extend_from_slice(payload.as_ref());
+
+                            if fin {
+                                // Complete fragmented message
+                                let whole = frag_buf.as_ref();
+                                if initial_is_text {
+                                    if let Ok(msg) = std::str::from_utf8(whole) {
+                                        println!("WS server got (fragmented text): {msg}");
+                                        session.ws_write(OpCode::Text, &reply_text, true)?;
+                                    } else {
+                                        session.ws_close(Some(&err_utf8))?;
+                                        break;
                                     }
-                                    frag_buf.clear();
+                                } else {
+                                    println!(
+                                        "WS server got (fragmented binary): {} bytes",
+                                        whole.len()
+                                    );
+                                    let whole_bytes = Bytes::copy_from_slice(whole);
+                                    session.ws_write(OpCode::Binary, &whole_bytes, true)?;
                                 }
+                                frag_buf.clear();
+                                expecting_cont = false;
                             }
                         }
                     }
                 }
 
-                // finally close the connection
+                // Tell the outer loop to stop using this socket
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::ConnectionAborted,
                     "ws done",
                 ));
             }
+
+            // Normal HTTP echo path
+            let req_host = session.req_host();
+            let req_method = session.req_method();
+            let req_path = session.req_path();
+            let http_version = session.req_http_version();
+            let req_body = session.req_body(std::time::Duration::from_secs(5))?;
+
+            let body = bytes::Bytes::from(format!(
+                "Http version: {http_version:?}, Echo: {req_method:?} {req_host:?} {req_path:?}\r\nBody: {req_body:?}"
+            ));
 
             session
                 .status_code(http::StatusCode::OK)
@@ -1222,12 +1240,14 @@ mod tests {
                 .body(body)
                 .eom()?;
 
-            if req_method == "POST" {
+            if req_method == http::Method::POST {
+                // Preserve your existing test behavior
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::WouldBlock,
                     "H1 POST should return WouldBlock",
                 ));
             }
+
             Ok(())
         }
     }

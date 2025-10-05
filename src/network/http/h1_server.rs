@@ -97,7 +97,7 @@ pub(crate) fn serve<T: HService>(stream: &mut TcpStream, mut service: T) -> io::
 
 #[cfg(unix)]
 #[inline]
-fn read(stream: &mut impl std::io::Read, buf: &mut BytesMut) -> std::io::Result<bool> {
+pub(crate) fn read(stream: &mut impl std::io::Read, buf: &mut BytesMut) -> std::io::Result<bool> {
     // reserve buffer
     let rem = buf.capacity() - buf.len();
     if rem < 1024 {
@@ -131,7 +131,10 @@ fn read(stream: &mut impl std::io::Read, buf: &mut BytesMut) -> std::io::Result<
 
 #[cfg(unix)]
 #[inline]
-fn write(stream: &mut impl Write, rsp_buf: &mut BytesMut) -> std::io::Result<(usize, bool)> {
+pub(crate) fn write(
+    stream: &mut impl Write,
+    rsp_buf: &mut BytesMut,
+) -> std::io::Result<(usize, bool)> {
     use bytes::Buf;
     use std::io::IoSlice;
 
