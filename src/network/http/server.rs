@@ -591,7 +591,12 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                 }
             }
         })
-        .unwrap()
+        .map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to create H2 Glommio executor pool: {e}"),
+            )
+        })?
         .join_all();
 
         Ok(())
@@ -674,7 +679,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
 
                     eprintln!(
                         "Tokio H2/TLS shard {shard_id} listening on {}",
-                        listener.local_addr().unwrap()
+                        listener.local_addr().map_err(|e| std::io::Error::other(format!("local_addr: {e}")))?,
                     );
 
                     // Per-shard concurrency guard
@@ -870,7 +875,12 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                 }
             }
         })
-        .unwrap()
+        .map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to create H3 Glommio executor pool: {e}"),
+            )
+        })?
         .join_all();
 
         Ok(())

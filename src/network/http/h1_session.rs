@@ -19,7 +19,7 @@ pub static CURRENT_DATE: once_cell::sync::Lazy<Arc<ArcSwap<Arc<str>>>> =
             let now = std::time::SystemTime::now();
             let subsec = now
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .unwrap_or_default()
                 .subsec_millis();
             let delay = 1_000u64.saturating_sub(subsec as u64);
             may::coroutine::sleep(std::time::Duration::from_millis(delay));
@@ -428,15 +428,15 @@ where
                 take_exact_nb(self.stream, self.req_buf, 2)?
                     .as_ref()
                     .try_into()
-                    .unwrap(),
+                    .map_err(|e| std::io::Error::other(format!("failed to read ws length: {e}")))?,
             ) as u64;
         } else if len == 127 {
             len = u64::from_be_bytes(
                 take_exact_nb(self.stream, self.req_buf, 8)?
                     .as_ref()
                     .try_into()
-                    .unwrap(),
-            );
+                    .map_err(|e| std::io::Error::other(format!("failed to read ws length: {e}")))?,
+            ) as u64;
         }
         if is_control && len > 125 {
             return Err(std::io::Error::other("WS control too long"));
