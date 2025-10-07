@@ -2,6 +2,13 @@
 pub mod file;
 pub mod ratelimit;
 pub mod server;
+
+#[cfg(any(
+    feature = "net-h1-server",
+    feature = "net-h2-server",
+    feature = "net-h3-server",
+    feature = "net-ws-server",
+))]
 pub mod session;
 
 cfg_if::cfg_if! {
@@ -27,3 +34,6 @@ cfg_if::cfg_if! {
         pub mod h3_server;
     }
 }
+
+#[cfg(feature = "net-wt-server")]
+pub mod wt;

@@ -9,5 +9,7 @@ compile_error!("Features `rt-glommio` and `rt-tokio` are mutually exclusive. Pic
     feature = "net-h1-server",
     feature = "net-h2-server",
     feature = "net-h3-server",
+    feature = "net-ws-server",
+    feature = "net-wt-server",
 ))]
 pub mod http;

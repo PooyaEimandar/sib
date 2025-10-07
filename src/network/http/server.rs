@@ -1,5 +1,3 @@
-use std::net::{SocketAddr, ToSocketAddrs};
-
 #[cfg(feature = "net-h1-server")]
 macro_rules! mc {
     ($exp: expr) => {
@@ -117,7 +115,7 @@ impl Default for H3Config {
 
 #[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
 fn make_socket(
-    addr: SocketAddr,
+    addr: std::net::SocketAddr,
     protocol: socket2::Protocol,
     backlog: usize,
 ) -> std::io::Result<socket2::Socket> {
@@ -262,6 +260,9 @@ pub trait HFactory: Send + Sync + Sized + 'static {
     #[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
     type HAsyncService: crate::network::http::session::HAsyncService + Send;
 
+    #[cfg(feature = "net-wt-server")]
+    type WtService: crate::network::http::wt::WtService + Send;
+
     // create a new http service for each connection
     #[cfg(feature = "net-h1-server")]
     fn service(&self, id: usize) -> Self::Service;
@@ -270,9 +271,13 @@ pub trait HFactory: Send + Sync + Sized + 'static {
     #[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
     fn async_service(&self, id: usize) -> Self::HAsyncService;
 
+    // create a new webtransport service for each connection
+    #[cfg(feature = "net-wt-server")]
+    fn wt_service(&self, id: usize) -> Self::WtService;
+
     /// Start the http service
     #[cfg(feature = "net-h1-server")]
-    fn start_h1<L: ToSocketAddrs>(
+    fn start_h1<L: std::net::ToSocketAddrs>(
         self,
         addr: L,
         cfg: H1Config,
@@ -300,7 +305,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                     let mut stream = mc!(stream);
 
                     // get the client IP address
-                    let peer_addr = stream.peer_addr().unwrap_or(SocketAddr::new(
+                    let peer_addr = stream.peer_addr().unwrap_or(std::net::SocketAddr::new(
                         std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
                         0,
                     ));
@@ -325,7 +330,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
     }
 
     #[cfg(feature = "net-h1-server")]
-    fn start_h1_tls<L: ToSocketAddrs>(
+    fn start_h1_tls<L: std::net::ToSocketAddrs>(
         self,
         addr: L,
         chain_cert_key: (Option<&[u8]>, &[u8], &[u8]),
@@ -408,7 +413,10 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                     let _ = stream.set_read_timeout(Some(cfg.io_timeout));
 
                     let peer_addr = stream.peer_addr().unwrap_or_else(|_| {
-                        SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0)
+                        std::net::SocketAddr::new(
+                            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                            0,
+                        )
                     });
                     let ip = peer_addr.ip();
 
@@ -469,7 +477,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         not(feature = "rt-tokio"),
         target_os = "linux",
     ))]
-    fn start_h2_tls<L: ToSocketAddrs>(
+    fn start_h2_tls<L: std::net::ToSocketAddrs>(
         self,
         addr: L,
         chain_cert_key: (Option<&[u8]>, &[u8], &[u8]),
@@ -543,7 +551,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                     let peer_ip = stream
                         .peer_addr()
                         .unwrap_or_else(|_| {
-                            SocketAddr::new(
+                            std::net::SocketAddr::new(
                                 std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
                                 0,
                             )
@@ -592,10 +600,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
             }
         })
         .map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Failed to create H2 Glommio executor pool: {e}"),
-            )
+            std::io::Error::other(format!("Failed to create H2 Glommio executor pool: {e}"))
         })?
         .join_all();
 
@@ -608,7 +613,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         feature = "rt-tokio",
         not(feature = "rt-glommio")
     ))]
-    fn start_h2_tls<L: ToSocketAddrs>(
+    fn start_h2_tls<L: std::net::ToSocketAddrs>(
         self,
         addr: L,
         chain_cert_key: (Option<&[u8]>, &[u8], &[u8]),
@@ -686,7 +691,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                     let sem = Arc::new(Semaphore::new(h2_cfg.max_sessions as usize));
                     let local = tokio::task::LocalSet::new();
 
-                    local.run_until(async move {
+                    let res = local.run_until(async move {
                         loop {
                             let (mut stream, peer_addr) = match listener.accept().await {
                                 Ok(x) => x,
@@ -749,10 +754,11 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                                 }
                             });
                         }
+                        #[allow(unreachable_code)]
+                        Ok::<(), std::io::Error>(())
                     }).await;
 
-                    #[allow(unreachable_code)]
-                    Ok::<(), std::io::Error>(())
+                    res
                 })?;
 
                 Ok(())
@@ -775,7 +781,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         not(feature = "rt-tokio"),
         target_os = "linux",
     ))]
-    fn start_h3_tls<L: ToSocketAddrs>(
+    fn start_h3_tls<L: std::net::ToSocketAddrs>(
         self,
         addr: L,
         chain_cert_key: (Option<&[u8]>, &[u8], &[u8]),
@@ -876,10 +882,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
             }
         })
         .map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Failed to create H3 Glommio executor pool: {e}"),
-            )
+            std::io::Error::other(format!("Failed to create H3 Glommio executor pool: {e}"))
         })?
         .join_all();
 
@@ -892,7 +895,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         feature = "rt-tokio",
         not(feature = "rt-glommio")
     ))]
-    fn start_h3_tls<L: ToSocketAddrs>(
+    fn start_h3_tls<L: std::net::ToSocketAddrs>(
         self,
         addr: L,
         chain_cert_key: (Option<&[u8]>, &[u8], &[u8]),
@@ -967,7 +970,6 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                             let sem = Arc::new(Semaphore::new(h3_cfg.max_sessions as usize));
                             let local = tokio::task::LocalSet::new();
 
-                            // IMPORTANT: Run the accept loop inside LocalSet so spawn_local is legal.
                             local
                                 .run_until(async move {
                                     loop {
@@ -1048,6 +1050,206 @@ pub trait HFactory: Send + Sync + Sized + 'static {
 
         Ok(())
     }
+
+    #[cfg(feature = "net-wt-server")]
+    fn start_wt_tls<L: std::net::ToSocketAddrs>(
+        self,
+        addr: L,
+        chain_cert_key: (&[u8], &[u8]),
+        wt_cfg: crate::network::http::wt::WTConfig,
+        rate_limiter: Option<super::ratelimit::RateLimiterKind>,
+    ) -> std::io::Result<()> {
+        use std::sync::Arc;
+        use tokio::sync::Semaphore;
+
+        // Load full certificate chain (PEM or DER)
+        fn load_cert_chain_pem(pem: &[u8]) -> std::io::Result<Vec<Vec<u8>>> {
+            let mut reader = std::io::Cursor::new(pem);
+            let mut ders = Vec::new();
+            for item in rustls_pemfile::certs(&mut reader) {
+                let der =
+                    item.map_err(|e| std::io::Error::other(format!("Invalid cert in PEM: {e}")))?;
+                ders.push(der.to_vec());
+            }
+            if ders.is_empty() {
+                Err(std::io::Error::other("No certificates found in PEM"))
+            } else {
+                Ok(ders)
+            }
+        }
+
+        fn load_cert_chain_der_or_pem(bytes: &[u8]) -> std::io::Result<Vec<Vec<u8>>> {
+            // Heuristic: if it looks like PEM, parse as PEM; otherwise assume DER (single cert)
+            let is_pem = bytes.starts_with(b"-----BEGIN");
+            if is_pem {
+                load_cert_chain_pem(bytes)
+            } else {
+                // Single DER cert
+                Ok(vec![bytes.to_vec()])
+            }
+        }
+
+        fn load_private_key_der_or_pem(
+            bytes: &[u8],
+        ) -> std::io::Result<wtransport::tls::PrivateKey> {
+            if bytes.starts_with(b"-----BEGIN") {
+                // Try PKCS#8
+                {
+                    let mut r = std::io::Cursor::new(bytes);
+                    let keys = rustls_pemfile::pkcs8_private_keys(&mut r)
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(|e| {
+                            std::io::Error::other(format!("Invalid PKCS#8 PEM key: {e}"))
+                        })?;
+                    if let Some(k) = keys.into_iter().next() {
+                        return Ok(wtransport::tls::PrivateKey::from_der_pkcs8(
+                            k.secret_pkcs8_der().to_vec(),
+                        ));
+                    }
+                }
+                Err(std::io::Error::other("No usable private key found in PEM"))
+            } else {
+                // Assume DER PKCS#8 by default; you can add a toggle if you need PKCS#1 here
+                Ok(wtransport::tls::PrivateKey::from_der_pkcs8(bytes.to_vec()))
+            }
+        }
+
+        let cert_chain_ders = load_cert_chain_der_or_pem(chain_cert_key.0)?;
+        // Build wtransport cert chain
+        let chain = {
+            let mut v = Vec::with_capacity(cert_chain_ders.len());
+            for der in cert_chain_ders {
+                let c = wtransport::tls::Certificate::from_der(der)
+                    .map_err(|e| std::io::Error::other(format!("Certificate DER error: {e}")))?;
+                v.push(c);
+            }
+            wtransport::tls::CertificateChain::new(v)
+        };
+
+        let key = load_private_key_der_or_pem(chain_cert_key.1)?;
+
+        // Resolve address coherently
+        let bind = match addr.to_socket_addrs()?.next() {
+            Some(socket_addr) => socket_addr,
+            None => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Could not resolve address",
+                ));
+            }
+        };
+
+        let num_shards = wt_cfg.num_of_shards.max(1);
+        let factory = Arc::new(self);
+        let rl = Arc::new(rate_limiter);
+        let wt_cfg_arc = Arc::new(wt_cfg);
+
+        let mut handles = Vec::with_capacity(num_shards as usize);
+        for shard_id in 0..num_shards {
+            let factory = factory.clone();
+            let rl = rl.clone();
+            let wt_cfg = wt_cfg_arc.clone();
+            let chain = chain.clone();
+            let key = key.clone_key();
+
+            handles.push(
+                std::thread::Builder::new()
+                    .name(format!("wt-shard-{shard_id}"))
+                    .spawn(move || -> std::io::Result<()> {
+                        let identity = wtransport::Identity::new(chain, key);
+                        // Clone the identity for each thread
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()?;
+
+                        rt.block_on(async move {
+                            let cfg = wtransport::ServerConfig::builder()
+                                .with_bind_address(bind)
+                                .with_identity(identity)
+                                .keep_alive_interval(Some(wt_cfg.keep_alive_interval))
+                                // .with_udp_socket(your_reuseport_socket)? // if the API supports it
+                                .build();
+                            let endpoint = wtransport::Endpoint::server(cfg).map_err(|e| {
+                                std::io::Error::other(format!(
+                                    "WT shard {shard_id} failed to create endpoint: {e}"
+                                ))
+                            })?;
+
+                            eprintln!("WT shard {shard_id} listening on {bind}");
+
+                            let sem = Arc::new(Semaphore::new(wt_cfg.max_sessions));
+                            let local = tokio::task::LocalSet::new();
+
+                            local
+                                .run_until(async move {
+                                    loop {
+                                        let incoming = endpoint.accept().await;
+
+                                        // Admission control: cheap non-blocking gate
+                                        let Ok(permit) = sem.clone().try_acquire_owned() else {
+                                            // No capacity: drop incoming fast; client will see refusal/timeout early
+                                            continue;
+                                        };
+
+                                        let service = factory.wt_service(shard_id);
+                                        let rl = rl.clone();
+                                        tokio::task::spawn_local(async move {
+                                            let _permit = permit;
+
+                                            let session_req = match incoming.await {
+                                                Ok(s) => s,
+                                                Err(e) => {
+                                                    eprintln!("WT session request error: {e}");
+                                                    return;
+                                                }
+                                            };
+
+                                            // Optional rate-limit by remote IP
+                                            if let Some(rl) = rl.as_ref() {
+                                                let ip = session_req.remote_address().ip();
+                                                if !ip.is_unspecified() {
+                                                    use super::ratelimit::RateLimiter;
+                                                    let res = rl.check(ip.to_string().into());
+                                                    if !res.allowed {
+                                                        // Refuse by not accepting
+                                                        return;
+                                                    }
+                                                }
+                                            }
+
+                                            // Accept the WT session (Extended CONNECT)
+                                            let conn = match session_req.accept().await {
+                                                Ok(c) => c,
+                                                Err(e) => {
+                                                    eprintln!("WT accept error: {e}");
+                                                    return;
+                                                }
+                                            };
+
+                                            // Hand off to your service
+                                            use crate::network::http::wt::{WtService, WtSession};
+                                            let mut svc = service;
+                                            let mut sess = WtSession::new(conn);
+                                            if let Err(e) = svc.call(&mut sess).await {
+                                                eprintln!("WT service error: {e}");
+                                            }
+                                        });
+                                    }
+                                })
+                                .await;
+                            Ok(())
+                        })
+                    })?,
+            );
+        }
+
+        for h in handles {
+            h.join()
+                .map_err(|_| std::io::Error::other("WT shard panicked"))??;
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(any(
@@ -1102,16 +1304,25 @@ pub(crate) fn parse_authority(s: &str) -> Option<(String, Option<u16>)> {
 #[cfg(test)]
 mod tests {
     use crate::network::http::server::HFactory;
-    use crate::network::http::session::Session;
-    use std::sync::Once;
 
     #[cfg(feature = "net-h1-server")]
     use crate::network::http::session::HService;
 
     #[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
     use crate::network::http::session::HAsyncService;
+    cfg_if::cfg_if! {
+        if #[cfg(any(
+            feature = "net-h1-server",
+            feature = "net-h2-server",
+            feature = "net-h3-server",
+            feature = "net-ws-server"))]
+        {
+            use crate::network::http::session::Session;
+            use std::sync::Once;
 
-    static INIT: Once = Once::new();
+            static INIT: Once = Once::new();
+        }
+    }
 
     struct EchoServer;
 
@@ -1302,6 +1513,9 @@ mod tests {
         #[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
         type HAsyncService = Self;
 
+        #[cfg(feature = "net-wt-server")]
+        type WtService = Self;
+
         #[cfg(feature = "net-h1-server")]
         fn service(&self, _id: usize) -> Self::Service {
             EchoServer
@@ -1311,8 +1525,33 @@ mod tests {
         fn async_service(&self, _id: usize) -> Self::HAsyncService {
             EchoServer
         }
+
+        #[cfg(feature = "net-wt-server")]
+        fn wt_service(&self, _id: usize) -> Self::WtService {
+            EchoServer
+        }
     }
 
+    #[cfg(feature = "net-wt-server")]
+    use crate::network::http::wt::{WtService, WtSession};
+
+    #[cfg(feature = "net-wt-server")]
+    #[async_trait::async_trait(?Send)]
+    impl WtService for EchoServer {
+        async fn call(&mut self, _session: &mut WtSession) -> std::io::Result<()> {
+            // keep-alive window for manual testing via the browser
+            use tokio::time::Duration;
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            Ok(())
+        }
+    }
+
+    #[cfg(any(
+        feature = "net-h1-server",
+        feature = "net-h2-server",
+        feature = "net-h3-server",
+        feature = "net-ws-server"
+    ))]
     fn create_self_signed_tls_pems() -> (String, String) {
         use base64::{Engine as _, engine::general_purpose::STANDARD as b64};
         use rcgen::{

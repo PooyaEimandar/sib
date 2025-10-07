@@ -86,6 +86,9 @@ tokio-rustls = { version = "0.26.4", optional = true, default-features = false, 
     "aws-lc-rs",
     "tls12",
 ] }
+wtransport = { version = "0.6.1", optional = true, default-features = false, features = [
+    "ring",
+] }
 zstd = { version = "0.13.3", optional = true }
 
 # unix (non-android/ios) only deps
@@ -161,6 +164,14 @@ net-h3-server = [
     "tokio",
 ]
 net-ws-server = ["base64", "sha1"]
+net-wt-server = [
+    "async-trait",
+    "bytes",
+    "dashmap",
+    "rustls-pemfile",
+    "tokio",
+    "wtransport",
+]
 
 rt-glommio = ["futures-rustls", "glommio", "tokio"]
 rt-tokio = ["tokio", "tokio-rustls"]
