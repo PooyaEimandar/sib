@@ -113,7 +113,7 @@ quinn = { version = "0.11.9", optional = true, default-features = false, feature
 
 [features]
 default = []
-db-fdb = ["foundationdb-sys"]
+db-fdb = ["foundationdb-sys", "crossbeam"]
 net-file-server = [
     "brotli",
     "dashmap",
@@ -175,6 +175,7 @@ net-wt-server = [
 
 rt-glommio = ["futures-rustls", "glommio", "tokio"]
 rt-tokio = ["tokio", "tokio-rustls"]
+rt-may = ["may"]
 
 stm-sender = ["crossbeam", "glib", "gstreamer", "gstreamer-video"]
 stm-receiver = ["glib", "gstreamer", "gstreamer-app", "gstreamer-video"]
