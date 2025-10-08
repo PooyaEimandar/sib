@@ -12,10 +12,12 @@ it is designed for **real-time networking**, **low-latency streaming**, and **sc
 | `net-h1-server`  | Enable HTTP/1.1 server            
 | `net-h2-server`  | Enable HTTP/2 server
 | `net-h3-server`  | Enable HTTP/3 server
-| `net-ws-server`  | Enable WebSocket server                 
+| `net-ws-server`  | Enable WebSocket server   
+| `net-wt-server`  | Enable WebTransport server   
 | `db-fdb`         | FoundationDB bindings      
 | `rt-glommio`     | Enable glommio runtime for HTTP/2/3      
-| `rt-tokio`       | Enable tokio runtime for HTTP/2/3    
+| `rt-tokio`       | Enable tokio runtime for HTTP/2/3 and/or db-fdb
+| `rt-may`         | Enable may runtime for db-fdb
 | `stm-sender`     | Real-time video/audio streamer    
 | `stm-receiver`   | Real-time video/audio receiver    
 
