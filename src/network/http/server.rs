@@ -1476,7 +1476,7 @@ mod tests {
     #[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
     #[async_trait::async_trait(?Send)]
     impl HAsyncService for EchoServer {
-        async fn call<SE: Session>(&mut self, session: &mut SE) -> std::io::Result<()> {
+        async fn call<S: Session>(&mut self, session: &mut S) -> std::io::Result<()> {
             let req_host = session.req_host();
             let req_method = session.req_method();
             let req_path = session.req_path().to_owned();

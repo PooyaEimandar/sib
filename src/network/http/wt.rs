@@ -119,5 +119,5 @@ impl WtSession {
 #[cfg(feature = "net-wt-server")]
 #[async_trait::async_trait(?Send)]
 pub trait WtService: Send {
-    async fn call(&mut self, session: &mut WtSession) -> std::io::Result<()>;
+    async fn call<W: WtSession>(&mut self, session: &mut W) -> std::io::Result<()>;
 }
