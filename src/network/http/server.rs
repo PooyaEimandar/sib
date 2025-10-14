@@ -691,7 +691,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                     let sem = Arc::new(Semaphore::new(h2_cfg.max_sessions as usize));
                     let local = tokio::task::LocalSet::new();
 
-                    let res = local.run_until(async move {
+                    local.run_until(async move {
                         loop {
                             let (mut stream, peer_addr) = match listener.accept().await {
                                 Ok(x) => x,
@@ -756,9 +756,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                         }
                         #[allow(unreachable_code)]
                         Ok::<(), std::io::Error>(())
-                    }).await;
-
-                    res
+                    }).await
                 })?;
 
                 Ok(())
