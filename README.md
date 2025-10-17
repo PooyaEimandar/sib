@@ -56,11 +56,6 @@ sudo apt install -y cmake clang lld llvm libclang-dev
 - 📦 [Crate](https://crates.io/crates/sib)
 - 📖 [Docs](https://docs.rs/sib)
 
-## 🔐 Security
-
-For security issues, please contact me privately:  
-- 💬 [Telegram](https://t.me/PooyaEimandar)
-
 ## 📄 License
 
 SIB is licensed under either of:
@@ -70,11 +65,11 @@ SIB is licensed under either of:
 
 at your option.
 
-## 🧭 ROADMAP.md
+## 🧭 [Roadmap](https://github.com/PooyaEimandar/sib/blob/main/ROADMAP.md)
 
-## 🏛️ GOVERNANCE
+## 🤝 [Contributing](https://github.com/PooyaEimandar/sib/blob/main/CONTRIBUTING.md)
 
-## 🤝 CONTRIBUTING
+## 📜 [Code of conduct](https://github.com/PooyaEimandar/sib/blob/main/CODE_OF_CONDUCT.md)
 
-## 📜 CODE_OF_CONDUCT
+## 🔐 [Security](https://github.com/PooyaEimandar/sib/blob/main/SECURITY.md)
 
