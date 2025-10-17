@@ -1,7 +1,7 @@
 # SIB 🚀 powered by Rust 🦀 [![Build](https://github.com/PooyaEimandar/sib/actions/workflows/build.yml/badge.svg)](https://github.com/PooyaEimandar/sib/actions/workflows/build.yml)
 
 **SIB** is a high-performance, secure, and cross-platform modules optimized for efficiency, scalability, and reliability.
-it is designed for **real-time networking**, **low-latency streaming**, and **scalable HTTP services**.
+it is designed for **real-time streaming**, **low-latency networking**, and **scalable HTTP services**.
 
 > 🏷️ _"Sib" means **apple** in Persian (سیب)._
 
@@ -56,11 +56,10 @@ sudo apt install -y cmake clang lld llvm libclang-dev
 - 📦 [Crate](https://crates.io/crates/sib)
 - 📖 [Docs](https://docs.rs/sib)
 
-## 🔒 Security
+## 🔐 Security
 
 For security issues, please contact me privately:  
 - 💬 [Telegram](https://t.me/PooyaEimandar)
-
 
 ## 📄 License
 
@@ -70,4 +69,12 @@ SIB is licensed under either of:
 - [MIT license](https://github.com/PooyaEimandar/sib/blob/main/LICENSE-MIT)
 
 at your option.
+
+## 🧭 ROADMAP.md
+
+## 🏛️ GOVERNANCE
+
+## 🤝 CONTRIBUTING
+
+## 📜 CODE_OF_CONDUCT
 
