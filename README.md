@@ -14,7 +14,7 @@ it is designed for **real-time streaming**, **low-latency networking**, and **sc
 | `net-h3-server`  | Enable HTTP/3 server
 | `net-ws-server`  | Enable WebSocket server   
 | `net-wt-server`  | Enable WebTransport server   
-| `db-fdb`         | FoundationDB bindings      
+| `db-fdb`         | FoundationDB client database + cache      
 | `rt-glommio`     | Enable glommio runtime for HTTP/2/3      
 | `rt-tokio`       | Enable tokio runtime for HTTP/2/3 and/or db-fdb
 | `rt-may`         | Enable may runtime for db-fdb

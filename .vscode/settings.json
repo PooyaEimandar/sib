@@ -2,7 +2,8 @@
 {
   "rust-analyzer.cargo.allFeatures": false,
   "rust-analyzer.cargo.features": [
-    "net-wt-server",
+    "db-fdb",
+    "rt-tokio",
   ],
   "rust-analyzer.cargo.noDefaultFeatures": true
 }
