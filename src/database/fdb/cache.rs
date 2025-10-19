@@ -98,12 +98,7 @@ impl BucketTtlCache {
     }
 
     #[cfg(feature = "rt-tokio")]
-    pub async fn set_with_ttl(
-        &self,
-        key: &[u8],
-        value: &[u8],
-        ttl: Duration,
-    ) -> std::io::Result<()> {
+    pub async fn set(&self, key: &[u8], value: &[u8], ttl: Duration) -> std::io::Result<()> {
         let pool = self.pool.clone();
         let ns = self.ns.clone();
         let bucket_ms = self.bucket_ms;
@@ -155,7 +150,7 @@ impl BucketTtlCache {
     }
 
     #[cfg(feature = "rt-may")]
-    pub fn set_with_ttl(&self, key: &[u8], value: &[u8], ttl: Duration) -> std::io::Result<()> {
+    pub fn set(&self, key: &[u8], value: &[u8], ttl: Duration) -> std::io::Result<()> {
         use crate::database::fdb::trans::FDBTransaction;
 
         let loan = self
@@ -533,9 +528,9 @@ mod tests {
         cache.gc_batch = 512;
 
         cache
-            .set_with_ttl(b"k1", b"v1", Duration::from_millis(150))
+            .set(b"k1", b"v1", Duration::from_millis(150))
             .await
-            .expect("set_with_ttl");
+            .expect("set");
 
         let v = cache.get(b"k1").await.expect("get");
         assert_eq!(v.as_deref(), Some(&b"v1"[..]));
@@ -548,7 +543,7 @@ mod tests {
             let k = [b't', i];
             let val = [b'v', i];
             cache
-                .set_with_ttl(&k, &val, Duration::from_millis(150))
+                .set(&k, &val, Duration::from_millis(150))
                 .await
                 .expect("set batch");
         }
@@ -576,7 +571,7 @@ mod tests {
         let cache = BucketTtlCache::new(pool.clone(), "test_delete");
 
         cache
-            .set_with_ttl(b"delkey", b"val", Duration::from_secs(5))
+            .set(b"delkey", b"val", Duration::from_secs(5))
             .await
             .expect("set");
         assert!(cache.get(b"delkey").await.unwrap().is_some());
@@ -600,8 +595,8 @@ mod tests {
         cache.gc_batch = 512;
 
         cache
-            .set_with_ttl(b"k1", b"v1", Duration::from_millis(150))
-            .expect("set_with_ttl");
+            .set(b"k1", b"v1", Duration::from_millis(150))
+            .expect("set");
 
         let v = cache.get(b"k1").expect("get");
         assert_eq!(v.as_deref(), Some(&b"v1"[..]));
@@ -614,7 +609,7 @@ mod tests {
             let k = [b'm', i];
             let val = [b'v', i];
             cache
-                .set_with_ttl(&k, &val, Duration::from_millis(150))
+                .set(&k, &val, Duration::from_millis(150))
                 .expect("set batch");
         }
 
@@ -641,7 +636,7 @@ mod tests {
         let cache = BucketTtlCache::new(pool.clone(), "test_delete");
 
         cache
-            .set_with_ttl(b"delkey", b"val", Duration::from_secs(5))
+            .set(b"delkey", b"val", Duration::from_secs(5))
             .expect("set");
         assert!(cache.get(b"delkey").expect("get").is_some());
 
