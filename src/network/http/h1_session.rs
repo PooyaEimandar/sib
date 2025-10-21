@@ -45,6 +45,50 @@ where
     rsp_buf: &'buf mut BytesMut,
     // stream to read body from
     stream: &'stream mut S,
+    // status
+    status_written: bool,
+    // headers flush state
+    headers_flushed: bool,
+    // number of pending headers
+    pending_headers_count: usize,
+    // pending headers
+    pending_headers: [MaybeUninit<(HeaderName, HeaderValue)>; MAX_HEADERS],
+}
+
+impl<'buf, 'header, 'stream, S> H1Session<'buf, 'header, 'stream, S>
+where
+    S: Read + Write,
+{
+    #[inline]
+    fn write_header_line(&mut self, name: &HeaderName, value: &HeaderValue) {
+        self.rsp_buf.extend_from_slice(name.as_str().as_bytes());
+        self.rsp_buf.extend_from_slice(b": ");
+        self.rsp_buf.extend_from_slice(value.as_bytes());
+        self.rsp_buf.extend_from_slice(b"\r\n");
+        self.rsp_headers_len += 1;
+    }
+
+    #[inline]
+    fn flush_pending_headers(&mut self) {
+        if self.headers_flushed {
+            return;
+        }
+        // SAFETY: we initialized exactly `pending_count` slots
+        for i in 0..self.pending_headers_count {
+            let (n_ref, v_ref) = unsafe { self.pending_headers.get_unchecked(i).assume_init_ref() };
+            self.write_header_line(&n_ref.clone(), &v_ref.clone());
+        }
+        self.headers_flushed = true;
+    }
+
+    #[inline]
+    fn ensure_header_section_closed(&mut self) {
+        self.flush_pending_headers();
+        // add CRLF once between headers and body
+        if !self.rsp_buf.ends_with(b"\r\n\r\n") {
+            self.rsp_buf.extend_from_slice(b"\r\n");
+        }
+    }
 }
 
 #[async_trait::async_trait(?Send)]
@@ -237,6 +281,7 @@ where
         const SERVER_NAME: &str =
             concat!("\r\nServer: Sib ", env!("SIB_BUILD_VERSION"), "\r\nDate: ");
 
+        // status line
         self.rsp_buf.extend_from_slice(b"HTTP/1.1 ");
         self.rsp_buf.extend_from_slice(status.as_str().as_bytes());
         self.rsp_buf.extend_from_slice(b" ");
@@ -247,6 +292,11 @@ where
         self.rsp_buf
             .extend_from_slice(CURRENT_DATE.load().as_bytes());
         self.rsp_buf.extend_from_slice(b"\r\n");
+
+        self.status_written = true;
+
+        // Now that the status line exists, flush any headers that were added earlier.
+        self.flush_pending_headers();
         self
     }
 
@@ -280,34 +330,34 @@ where
 
     #[inline]
     fn header(&mut self, name: HeaderName, value: HeaderValue) -> std::io::Result<&mut Self> {
-        if self.rsp_headers_len >= MAX_HEADERS {
+        // enforce limit across both pending and written headers
+        if self.rsp_headers_len + self.pending_headers_count >= MAX_HEADERS {
             return Err(io::Error::new(
                 io::ErrorKind::ArgumentListTooLong,
                 "too many headers",
             ));
         }
-        self.rsp_buf.extend_from_slice(format!("{name}").as_bytes());
-        self.rsp_buf.extend_from_slice(b": ");
-        self.rsp_buf.extend_from_slice(value.as_bytes());
-        self.rsp_buf.extend_from_slice(b"\r\n");
-        self.rsp_headers_len += 1;
+
+        if self.status_written {
+            // write directly
+            self.write_header_line(&name, &value);
+        } else {
+            // SAFETY: index is < MAX_HEADERS enforced above, so we can store pending with no heap growth
+            unsafe {
+                self.pending_headers
+                    .get_unchecked_mut(self.pending_headers_count)
+                    .write((name, value));
+            }
+            self.pending_headers_count += 1;
+        }
         Ok(self)
     }
 
     #[inline]
     fn header_str(&mut self, name: &str, value: &str) -> std::io::Result<&mut Self> {
-        if self.rsp_headers_len >= MAX_HEADERS {
-            return Err(io::Error::new(
-                io::ErrorKind::ArgumentListTooLong,
-                "too many headers",
-            ));
-        }
-        self.rsp_buf.extend_from_slice(name.as_bytes());
-        self.rsp_buf.extend_from_slice(b": ");
-        self.rsp_buf.extend_from_slice(value.as_bytes());
-        self.rsp_buf.extend_from_slice(b"\r\n");
-        self.rsp_headers_len += 1;
-        Ok(self)
+        let hn = HeaderName::from_str(name).map_err(|e| io::Error::other(e.to_string()))?;
+        let hv = HeaderValue::from_str(value).map_err(|e| io::Error::other(e.to_string()))?;
+        self.header(hn, hv)
     }
 
     #[inline]
@@ -328,7 +378,8 @@ where
 
     #[inline]
     fn body(&mut self, body: bytes::Bytes) -> &mut Self {
-        self.rsp_buf.extend_from_slice(b"\r\n");
+        // make sure headers are flushed and CRLF is written before body
+        self.ensure_header_section_closed();
         self.rsp_buf.extend_from_slice(&body);
         self
     }
@@ -663,6 +714,10 @@ where
         rsp_headers_len: 0,
         rsp_buf,
         stream,
+        status_written: false,
+        headers_flushed: false,
+        pending_headers_count: 0,
+        pending_headers: unsafe { MaybeUninit::uninit().assume_init() },
     }))
 }
 
