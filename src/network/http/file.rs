@@ -320,6 +320,7 @@ fn serve_fn<S: Session>(
             .eom();
     }
 
+    session.headers(&rsp_headers)?;
     *file_tuple = Some((status, file_path, start, end));
     Ok(())
 }
@@ -333,6 +334,8 @@ async fn serve_async_fn<S: Session>(
     min_max_compress_thresholds: (u64, u64),
     file_tuple: &mut Option<(StatusCode, PathBuf, u64, u64)>,
 ) -> std::io::Result<()> {
+    use crate::network::http::session;
+
     let min_bytes_on_the_fly_size = min_max_compress_thresholds.0;
     let max_bytes_on_the_fly_size = min_max_compress_thresholds.1;
 
@@ -604,6 +607,7 @@ async fn serve_async_fn<S: Session>(
             .await;
     }
 
+    session.headers(&rsp_headers)?;
     *file_tuple = Some((status, file_path, start, end));
     Ok(())
 }
