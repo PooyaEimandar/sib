@@ -1,183 +1,486 @@
-use dashmap::DashMap;
-use std::borrow::Cow;
-use std::collections::VecDeque;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use crate::network::http::rlid::RlidSigner;
+use bytes::Bytes;
+use governor::{Quota, RateLimiter as GovLimiter};
+use http::{HeaderName, StatusCode, header};
+use std::{
+    num::NonZeroU32,
+    {net::IpAddr, sync::Arc},
+};
 
-static CLEANUP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+pub type IpLimiter = governor::DefaultKeyedRateLimiter<IpAddr>;
+pub type UserLimiter = governor::DefaultKeyedRateLimiter<String>;
 
-/// Result of a rate limit check
-pub struct RateLimitResult {
-    pub allowed: bool,
-    pub remaining: u32,
-    pub limit: u32,
-    pub retry_after_secs: Option<u64>,
-    pub reset_after_secs: Option<u64>,
+#[derive(Clone)]
+pub struct RLGuards {
+    pub accept_ip: Arc<IpLimiter>,
+    pub user_req: Arc<UserLimiter>,
 }
 
-/// Rate limiter trait for pluggable strategies
-pub trait RateLimiter {
-    fn check(&self, key: Cow<str>) -> RateLimitResult;
-}
-
-/// Fixed window rate limiter
-pub struct FixedWindowLimiter {
-    window: Duration,
-    limit: u32,
-    state: DashMap<Cow<'static, str>, (Instant, u32)>, // (window_start, count)
-}
-
-impl FixedWindowLimiter {
-    pub fn new(window: Duration, limit: u32) -> Self {
-        Self {
-            window,
-            limit,
-            state: DashMap::new(),
-        }
+pub fn build(
+    ip_window_sec: NonZeroU32,
+    ip_max_burst: NonZeroU32,
+    user_window_sec: NonZeroU32,
+    user_max_burst: NonZeroU32,
+) -> RLGuards {
+    let ip_quota = Quota::per_second(ip_window_sec).allow_burst(ip_max_burst);
+    let user_quota = Quota::per_second(user_window_sec).allow_burst(user_max_burst);
+    RLGuards {
+        accept_ip: Arc::new(GovLimiter::keyed(ip_quota)),
+        user_req: Arc::new(GovLimiter::keyed(user_quota)),
     }
 }
 
-impl RateLimiter for FixedWindowLimiter {
-    fn check(&self, key: Cow<str>) -> RateLimitResult {
-        let now = Instant::now();
-        let key: Cow<'static, str> = Cow::Owned(key.into_owned());
-
-        let mut entry = self.state.entry(key.clone()).or_insert((now, 0));
-        let (start, count) = *entry;
-        let elapsed = now.duration_since(start);
-
-        if elapsed > self.window {
-            *entry = (now, 1);
-            return RateLimitResult {
-                allowed: true,
-                remaining: self.limit - 1,
-                limit: self.limit,
-                retry_after_secs: None,
-                reset_after_secs: Some(self.window.as_secs()),
-            };
-        }
-
-        if count < self.limit {
-            entry.1 += 1;
-            RateLimitResult {
-                allowed: true,
-                remaining: self.limit - entry.1,
-                limit: self.limit,
-                retry_after_secs: None,
-                reset_after_secs: Some((self.window - elapsed).as_secs()),
-            }
-        } else {
-            RateLimitResult {
-                allowed: false,
-                remaining: 0,
-                limit: self.limit,
-                retry_after_secs: Some((self.window - elapsed).as_secs()),
-                reset_after_secs: Some((self.window - elapsed).as_secs()),
-            }
-        }
-    }
+#[derive(Clone)]
+pub struct RLKey {
+    pub cookie_name: &'static str,
+    pub trusted_proxies: Vec<IpAddr>,
 }
 
-/// Sliding window rate limiter with queue pruning and global cleanup
-pub struct SlidingWindowLimiter {
-    window: Duration,
-    limit: usize,
-    max_queue_len: usize,
-    state: DashMap<Cow<'static, str>, VecDeque<Instant>>,
-}
-
-impl SlidingWindowLimiter {
-    pub fn new(window: Duration, limit: usize, max_queue_len: usize) -> Self {
-        assert!(max_queue_len >= limit, "max_queue_len must be >= limit");
-        Self {
-            window,
-            limit,
-            max_queue_len,
-            state: DashMap::new(),
-        }
-    }
-}
-
-impl RateLimiter for SlidingWindowLimiter {
-    fn check(&self, key: Cow<str>) -> RateLimitResult {
-        let now = Instant::now();
-        let key: Cow<'static, str> = Cow::Owned(key.into_owned());
-
-        // Occasionally perform global cleanup
-        if CLEANUP_COUNTER
-            .fetch_add(1, Ordering::Relaxed)
-            .is_multiple_of(100)
+impl RLKey {
+    pub fn make_key<S: super::session::Session>(&self, sess: &S) -> String {
+        // Get Bearer or API Key
+        if let Some(h) = sess
+            .req_header(&http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok().map(|s| s.to_owned()))
         {
-            let window = self.window;
-            self.state.retain(|_, queue| {
-                queue
-                    .back()
-                    .is_some_and(|&t| now.duration_since(t) <= window)
-            });
+            if let Some(b) = h.strip_prefix("Bearer ") {
+                return format!("jwt:{b}");
+            }
+            if let Some(k) = h.strip_prefix("ApiKey ") {
+                return format!("key:{k}");
+            }
+        }
+        // try for X-API-Key header
+        if let Some(h) = sess
+            .req_header(&HeaderName::from_static("x-api-key"))
+            .and_then(|v| v.to_str().ok().map(|s| s.to_owned()))
+        {
+            return format!("key:{h}");
         }
 
-        // Access or insert queue
-        let mut entry = self.state.entry(key.clone()).or_default();
-        let queue = entry.value_mut();
-
-        // Prune expired timestamps
-        while let Some(&front) = queue.front() {
-            if now.duration_since(front) > self.window {
-                queue.pop_front();
-            } else {
-                break;
+        // Signed cookie
+        if let Some(c) = sess
+            .req_header(&http::header::COOKIE)
+            .and_then(|v| v.to_str().ok().map(|s| s.to_owned()))
+        {
+            if let Some(v) = c
+                .split(';')
+                .map(str::trim)
+                .find_map(|p| p.strip_prefix(&format!("{}=", self.cookie_name)))
+            {
+                return format!("ck:{v}");
             }
         }
 
-        // Remove empty queues to save memory
-        if queue.is_empty() {
-            self.state.remove(&key);
+        // If behind a trusted proxy, trust first X-Forwarded-For hop
+        let peer = *sess.peer_addr();
+        if self.trusted_proxies.iter().any(|ip| *ip == peer) {
+            if let Some(xff) = sess
+                .req_header(&HeaderName::from_static("x-forwarded-for"))
+                .and_then(|v| v.to_str().ok().map(|s| s.to_owned()))
+            {
+                if let Some(first) = xff.split(',').next().map(str::trim) {
+                    return format!("ip:{first}");
+                }
+            }
         }
 
-        // Allow request if under limit
-        if queue.len() < self.limit {
-            if queue.len() < self.max_queue_len {
-                queue.push_back(now);
-            }
-            RateLimitResult {
-                allowed: true,
-                remaining: (self.limit - queue.len()) as u32,
-                limit: self.limit as u32,
-                retry_after_secs: None,
-                reset_after_secs: queue.front().map(|&t| {
-                    self.window
-                        .as_secs()
-                        .saturating_sub(now.duration_since(t).as_secs())
-                }),
-            }
-        } else {
-            let retry_after = queue.front().map(|&t| {
-                self.window
-                    .as_secs()
-                    .saturating_sub(now.duration_since(t).as_secs())
-            });
-            RateLimitResult {
-                allowed: false,
-                remaining: 0,
-                limit: self.limit as u32,
-                retry_after_secs: retry_after,
-                reset_after_secs: retry_after,
-            }
-        }
+        // Fallback to peer IP
+        format!("ip:{peer}")
     }
 }
 
-/// Enum wrapper for dynamic strategy switching
-pub enum RateLimiterKind {
-    Fixed(FixedWindowLimiter),
-    Sliding(SlidingWindowLimiter),
+pub struct RateLimitedService<Svc> {
+    inner: Svc,
+    user_rl: Arc<UserLimiter>,
+    ip_rl: Arc<IpLimiter>,
+    key_policy: RLKey,
+    rlid_signer: Arc<RlidSigner>,
 }
 
-impl RateLimiter for RateLimiterKind {
-    fn check(&self, ip: Cow<str>) -> RateLimitResult {
-        match self {
-            RateLimiterKind::Fixed(f) => f.check(ip),
-            RateLimiterKind::Sliding(s) => s.check(ip),
+impl<Svc> RateLimitedService<Svc> {
+    pub fn new(
+        inner: Svc,
+        user_rl: Arc<UserLimiter>,
+        ip_rl: Arc<IpLimiter>,
+        key_policy: RLKey,
+        rlid_signer: Arc<RlidSigner>,
+    ) -> Self {
+        Self {
+            inner,
+            user_rl,
+            ip_rl,
+            key_policy,
+            rlid_signer,
         }
+    }
+
+    #[cfg(feature = "net-h1-server")]
+    fn stamp_429<S: super::session::Session>(sess: &mut S) -> std::io::Result<()> {
+        let body = Bytes::from_static(b"Too Many Requests");
+        sess.status_code(StatusCode::TOO_MANY_REQUESTS)
+            .header(
+                header::CONTENT_TYPE,
+                header::HeaderValue::from_static("text/plain"),
+            )?
+            .header(
+                header::CONTENT_LENGTH,
+                header::HeaderValue::from_static("18"),
+            )?
+            .body(body)
+            .eom()
+    }
+
+    #[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
+    async fn stamp_429<S: super::session::Session>(sess: &mut S) -> std::io::Result<()> {
+        let body = Bytes::from_static(b"Too Many Requests");
+        sess.status_code(StatusCode::TOO_MANY_REQUESTS)
+            .header(
+                header::CONTENT_TYPE,
+                header::HeaderValue::from_static("text/plain"),
+            )?
+            .header(
+                header::CONTENT_LENGTH,
+                header::HeaderValue::from_static("18"),
+            )?
+            .body(body)
+            .eom_async()
+            .await
+    }
+
+    fn user_key_and_cookie<S: super::session::Session>(
+        &self,
+        sess: &S,
+    ) -> (String, Option<String>) {
+        let cookie_header = sess
+            .req_header(&header::COOKIE)
+            .and_then(|v| v.to_str().ok().map(|s| s.to_owned()));
+        let rlid_val = cookie_header.and_then(|c| {
+            c.split(';').map(str::trim).find_map(|p| {
+                p.strip_prefix(self.rlid_signer.cookie_name)
+                    .map(|s| s.to_owned())
+            })
+        });
+        let rlid_val = rlid_val.and_then(|v| v.strip_prefix("=").map(|s| s.to_owned()));
+
+        let chk = self.rlid_signer.verify_or_new(rlid_val.as_deref());
+        let user_key = format!("ck:{}", chk.id);
+
+        let set_cookie = if chk.must_issue {
+            Some(self.rlid_signer.issue_set_cookie(
+                &chk.id,
+                /*secure=*/ true,
+                /*domain=*/ None,
+                /*path=*/ Some("/"),
+            ))
+        } else {
+            None
+        };
+
+        (user_key, set_cookie)
+    }
+}
+
+#[cfg(feature = "net-h1-server")]
+impl<Svc> super::session::HService for RateLimitedService<Svc>
+where
+    Svc: super::session::HService,
+{
+    fn call<SE: super::session::Session>(&mut self, sess: &mut SE) -> std::io::Result<()> {
+        let (anon_user_key, set_cookie) = self.user_key_and_cookie(sess);
+        let cascaded_key = {
+            let k = self.key_policy.make_key(sess);
+            if k.starts_with("ck:") {
+                anon_user_key
+            } else {
+                k
+            }
+        };
+
+        let ip_key = *sess.peer_addr();
+        let user_ok = self.user_rl.check_key(&cascaded_key).is_ok();
+        let ip_ok = self.ip_rl.check_key(&ip_key).is_ok();
+
+        if let Some(sc) = set_cookie.as_ref() {
+            let _ = sess.header_str("Set-Cookie", sc);
+        }
+
+        if !(user_ok && ip_ok) {
+            return Self::stamp_429(sess);
+        }
+        self.inner.call(sess)
+    }
+}
+
+#[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
+#[async_trait::async_trait(?Send)]
+impl<Svc> super::session::HAsyncService for RateLimitedService<Svc>
+where
+    Svc: super::session::HAsyncService,
+{
+    async fn call<SE: super::session::Session>(&mut self, sess: &mut SE) -> std::io::Result<()> {
+        let (anon_user_key, set_cookie) = self.user_key_and_cookie(sess);
+        let cascaded_key = {
+            let k = self.key_policy.make_key(sess);
+            if k.starts_with("ck:") {
+                anon_user_key
+            } else {
+                k
+            }
+        };
+
+        let ip_key = *sess.peer_addr();
+        let user_ok = self.user_rl.check_key(&cascaded_key).is_ok();
+        let ip_ok = self.ip_rl.check_key(&ip_key).is_ok();
+
+        if let Some(sc) = set_cookie.as_ref() {
+            let _ = sess.header_str("Set-Cookie", sc);
+        }
+
+        if !(user_ok && ip_ok) {
+            return Self::stamp_429(sess).await;
+        }
+        self.inner.call(sess).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::network::http::ratelimit::RateLimitedService;
+    use crate::network::http::server::tests::EchoServer;
+    use crate::network::http::{
+        ratelimit::{IpLimiter, UserLimiter},
+        rlid::RlidSigner,
+        server::HFactory,
+    };
+    use nonzero_ext::nonzero;
+    use reqwest::blocking::Client;
+    use reqwest::header::{COOKIE, HeaderMap, HeaderValue, SET_COOKIE};
+    use std::sync::Arc;
+
+    fn do_req(client: &Client, url: &str, cookie: Option<&str>) -> (u16, HeaderMap, String) {
+        let mut req = client.get(url);
+        if let Some(c) = cookie {
+            req = req.header(COOKIE, HeaderValue::from_str(c).expect("cookie hdr"));
+        }
+        let resp = req.send().expect("send");
+        let status = resp.status().as_u16();
+        let headers = resp.headers().clone();
+        let body = resp.text().unwrap_or_default();
+        (status, headers, body)
+    }
+
+    // Generous IP limiter, strict per-user: 2 total tokens in any 1s window (1 rps + burst 1)
+    fn build_test_limiters() -> (Arc<IpLimiter>, Arc<UserLimiter>) {
+        use governor::{Quota, RateLimiter as GovLimiter};
+        use nonzero_ext::nonzero;
+
+        let ip = Arc::new(GovLimiter::keyed(
+            Quota::per_second(nonzero!(1000u32)).allow_burst(nonzero!(1000u32)),
+        ));
+
+        // 2 total tokens in any given second: rate 1/sec + burst 1
+        // => 1st OK, 2nd OK, 3rd within the same second -> 429
+        let user = Arc::new(GovLimiter::keyed(
+            Quota::per_second(nonzero!(1u32)).allow_burst(nonzero!(1u32)),
+        ));
+        (ip, user)
+    }
+
+    fn build_signer() -> Arc<RlidSigner> {
+        let cur: [u8; 32] = [1u8; 32];
+        let old: [u8; 32] = [2u8; 32];
+        Arc::new(RlidSigner::new(
+            "rlid",
+            std::time::Duration::from_secs(60),
+            (1, cur),
+            vec![(0, old)],
+        ))
+    }
+
+    struct RlEchoFactory {
+        user_rl: Arc<UserLimiter>,
+        ip_rl: Arc<IpLimiter>,
+        signer: Arc<RlidSigner>,
+    }
+
+    impl HFactory for RlEchoFactory {
+        #[cfg(feature = "net-h1-server")]
+        type Service = RateLimitedService<EchoServer>;
+
+        #[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
+        type HAsyncService = RateLimitedService<EchoServer>;
+
+        #[cfg(feature = "net-wt-server")]
+        type WtService = EchoServer;
+
+        #[cfg(feature = "net-h1-server")]
+        fn service(&self, _id: usize) -> Self::Service {
+            use crate::network::http::ratelimit::RLKey;
+            RateLimitedService::new(
+                EchoServer,
+                self.user_rl.clone(),
+                self.ip_rl.clone(),
+                RLKey {
+                    cookie_name: "rlid",
+                    trusted_proxies: vec![],
+                },
+                self.signer.clone(),
+            )
+        }
+
+        #[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
+        fn async_service(&self, _id: usize) -> Self::HAsyncService {
+            use crate::network::http::ratelimit::RLKey;
+            RateLimitedService::new(
+                EchoServer,
+                self.user_rl.clone(),
+                self.ip_rl.clone(),
+                RLKey {
+                    cookie_name: "rlid",
+                    trusted_proxies: vec![],
+                },
+                self.signer.clone(),
+            )
+        }
+
+        #[cfg(feature = "net-wt-server")]
+        fn wt_service(&self, _id: usize) -> Self::WtService {
+            super::EchoServer
+        }
+    }
+
+    #[cfg(feature = "net-h1-server")]
+    #[test]
+    fn test_ratelimit_h1_server() {
+        use crate::network::http::server::{H1Config, HFactory};
+        use std::time::Duration;
+
+        const NUMBER_OF_WORKERS: usize = 1;
+        crate::init_global_poller(NUMBER_OF_WORKERS, 1 * 1024 * 1024);
+
+        let (ip_rl, user_rl) = build_test_limiters();
+        let signer = build_signer();
+        let factory = RlEchoFactory {
+            user_rl,
+            ip_rl,
+            signer,
+        };
+
+        let addr = "127.0.0.1:8091";
+        let url = format!("http://{addr}/test");
+
+        let server_handle = factory
+            .start_h1(addr, H1Config::default())
+            .expect("start h1 RL server");
+
+        // Let server start
+        may::coroutine::sleep(Duration::from_millis(300));
+
+        // reqwest client
+        let client = Client::builder().build().expect("client");
+
+        // 1) First request (no cookie): expect 200 and Set-Cookie: rlid=...
+        let (s1, h1, _b1) = do_req(&client, &url, None);
+        assert_eq!(s1, 200, "first request should be 200 OK, got: {s1}");
+        let set_cookie_line = h1
+            .get_all(SET_COOKIE)
+            .iter()
+            .find_map(|hv| hv.to_str().ok())
+            .expect("Set-Cookie header missing on first response");
+        assert!(
+            set_cookie_line.contains("rlid=v1."),
+            "rlid cookie not issued: {set_cookie_line}"
+        );
+
+        // Extract "rlid=..." pair to echo back
+        let cookie_pair = {
+            let first_seg = set_cookie_line.split(';').next().unwrap().trim();
+            first_seg.to_string() // "rlid=...."
+        };
+
+        // 2) Second request with same cookie => still under per-user budget => 200
+        let (s2, _h2, _b2) = do_req(&client, &url, Some(&cookie_pair));
+        assert_eq!(s2, 200, "second request should be 200 OK, got: {s2}");
+
+        // 3) Third request with same cookie => exceed per-user budget => 429
+        let (s3, _h3, _b3) = do_req(&client, &url, Some(&cookie_pair));
+        assert_eq!(s3, 429, "third request should be 429, got: {s3}");
+
+        // cleanup
+        may::coroutine::sleep(Duration::from_millis(100));
+        unsafe { server_handle.coroutine().cancel() };
+    }
+
+    #[cfg(all(
+        feature = "net-h2-server",
+        any(feature = "rt-tokio", feature = "rt-glommio")
+    ))]
+    #[test]
+    fn test_ratelimit_h2_tls_server() {
+        use crate::network::http::server::{H2Config, HFactory};
+        use reqwest::blocking::Client;
+        use std::time::Duration;
+
+        // Spin up H2/TLS server
+        let addr = "127.0.0.1:8092";
+        let url = format!("https://{addr}/test");
+
+        let (ip_rl, user_rl) = build_test_limiters();
+        let signer = build_signer();
+        let factory = RlEchoFactory {
+            user_rl,
+            ip_rl,
+            signer,
+        };
+
+        let (cert_pem, key_pem) =
+            crate::network::http::server::tests::create_self_signed_tls_pems();
+        let _server_thread = std::thread::spawn(move || {
+            factory
+                .start_h2_tls(
+                    addr,
+                    (None, cert_pem.as_bytes(), key_pem.as_bytes()),
+                    H2Config::default(),
+                )
+                .expect("start_h2_tls rl server");
+        });
+
+        std::thread::sleep(Duration::from_millis(500));
+
+        // HTTP/2 client
+        let client = Client::builder()
+            .danger_accept_invalid_certs(true)
+            .http2_adaptive_window(true)
+            .build()
+            .expect("client");
+
+        // 1) First request (no cookie): expect 200 + Set-Cookie: rlid=...
+        let (s1, h1, _b1) = do_req(&client, &url, None);
+        assert_eq!(s1, 200, "first request should be 200 OK, got: {s1}");
+        let set_cookie_line = h1
+            .get_all(SET_COOKIE)
+            .iter()
+            .find_map(|hv| hv.to_str().ok())
+            .expect("Set-Cookie header missing on first response");
+        assert!(
+            set_cookie_line.contains("rlid=v1."),
+            "rlid cookie not issued: {set_cookie_line}"
+        );
+        // Extract "rlid=..." pair
+        let cookie_pair = set_cookie_line
+            .split(';')
+            .next()
+            .unwrap()
+            .trim()
+            .to_string();
+
+        // 2) Second request with same cookie => 200
+        let (s2, _h2, _b2) = do_req(&client, &url, Some(&cookie_pair));
+        assert_eq!(s2, 200, "second request should be 200 OK, got: {s2}");
+
+        // 3) Third request with same cookie within same second => 429
+        let (s3, _h3, _b3) = do_req(&client, &url, Some(&cookie_pair));
+        assert_eq!(s3, 429, "third request should be 429, got: {s3}");
     }
 }

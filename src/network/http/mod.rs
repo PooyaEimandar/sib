@@ -1,6 +1,5 @@
 #[cfg(feature = "net-file-server")]
 pub mod file;
-pub mod ratelimit;
 pub mod server;
 
 #[cfg(any(
@@ -10,6 +9,13 @@ pub mod server;
     feature = "net-ws-server",
 ))]
 pub mod session;
+
+cfg_if::cfg_if! {
+    if #[cfg(feature = "net-ratelimiter")] {
+        pub mod ratelimit;
+        pub mod rlid;
+    }
+}
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "net-h1-server")] {

@@ -26,9 +26,8 @@ SIB aims to become a next-generation, high-performance Rust-based networking run
 - [x] Websocket server
 - [x] Webtransport server
 - [x] Auto benchmark mode (TechEmpower-compatible)
-- [x] Ratelimit over ip
-- [ ] Ratelimit over session
-- [ ] ACID cache over FoundationDB
+- [x] ACID cache over FoundationDB
+- [x] Ratelimit per ip/session
 - [ ] Integration with ClickHouse
 
 ## Milestone 2 : Observability & Security

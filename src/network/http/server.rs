@@ -335,7 +335,6 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         addr: L,
         chain_cert_key: (Option<&[u8]>, &[u8], &[u8]),
         cfg: H1Config,
-        rate_limiter: Option<super::ratelimit::RateLimiterKind>,
     ) -> std::io::Result<may::coroutine::JoinHandle<()>> {
         use std::net::Shutdown;
 
@@ -418,18 +417,6 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                             0,
                         )
                     });
-                    let ip = peer_addr.ip();
-
-                    if let Some(rl) = &rate_limiter
-                        && !ip.is_unspecified()
-                    {
-                        use super::ratelimit::RateLimiter;
-                        let result = rl.check(ip.to_string().into());
-                        if !result.allowed {
-                            let _ = stream.shutdown(Shutdown::Both);
-                            continue;
-                        }
-                    }
 
                     #[cfg(unix)]
                     let id = stream.as_raw_fd() as usize;
@@ -618,7 +605,6 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         addr: L,
         chain_cert_key: (Option<&[u8]>, &[u8], &[u8]),
         h2_cfg: H2Config,
-        rate_limiter: Option<super::ratelimit::RateLimiterKind>,
     ) -> std::io::Result<()> {
         use std::sync::Arc;
         use tokio::{io::AsyncWriteExt, net::TcpListener, sync::Semaphore};
@@ -633,7 +619,6 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         )?));
 
         let factory = Arc::new(self);
-        let rl = Arc::new(rate_limiter);
         let h2_cfg_arc = Arc::new(h2_cfg);
 
         // Prepare listeners (use your make_socket for each shard)
@@ -668,7 +653,6 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         for (shard_id, std_listener) in std_listeners.into_iter().enumerate() {
             let tls_acceptor = tls_acceptor.clone();
             let factory = factory.clone();
-            let rl = rl.clone();
             let h2_cfg = h2_cfg_arc.clone();
 
             handles.push(std::thread::Builder::new()
@@ -703,16 +687,6 @@ pub trait HFactory: Send + Sync + Sized + 'static {
 
                             let _ = stream.set_nodelay(true);
                             let peer_ip = peer_addr.ip();
-
-                            // Optional rate limit
-                            if let Some(rl) = rl.as_ref() && !peer_ip.is_unspecified() {
-                                use super::ratelimit::RateLimiter;
-                                let result = rl.check(peer_ip.to_string().into());
-                                if !result.allowed {
-                                    let _ = stream.shutdown().await;
-                                    continue;
-                                }
-                            }
 
                             // Try-acquire a session slot
                             let permit = match sem.clone().try_acquire_owned() {
@@ -1300,7 +1274,7 @@ pub(crate) fn parse_authority(s: &str) -> Option<(String, Option<u16>)> {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use crate::network::http::server::HFactory;
 
     #[cfg(feature = "net-h1-server")]
@@ -1322,7 +1296,7 @@ mod tests {
         }
     }
 
-    struct EchoServer;
+    pub struct EchoServer;
 
     #[cfg(feature = "net-h1-server")]
     impl HService for EchoServer {
@@ -1550,7 +1524,7 @@ mod tests {
         feature = "net-h3-server",
         feature = "net-ws-server"
     ))]
-    fn create_self_signed_tls_pems() -> (String, String) {
+    pub fn create_self_signed_tls_pems() -> (String, String) {
         use base64::{Engine as _, engine::general_purpose::STANDARD as b64};
         use rcgen::{
             CertificateParams, DistinguishedName, DnType, KeyPair, SanType, date_time_ymd,
@@ -1615,7 +1589,6 @@ mod tests {
                 addr,
                 (None, cert_pem.as_bytes(), key_pem.as_bytes()),
                 H1Config::default(),
-                None,
             )
             .expect("H1 TLS server failed to start");
 
@@ -1766,7 +1739,6 @@ mod tests {
                     addr,
                     (None, cert.as_bytes(), key.as_bytes()),
                     H2Config::default(),
-                    None,
                 )
                 .expect("start_h2_tls");
         });
@@ -1809,7 +1781,6 @@ mod tests {
                     addr,
                     (None, cert.as_bytes(), key.as_bytes()),
                     H2Config::default(),
-                    None,
                 )
                 .expect("start_h2_tls");
         });
