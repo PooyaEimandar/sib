@@ -246,57 +246,18 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::network::http::ratelimit::RateLimitedService;
-    use crate::network::http::server::tests::EchoServer;
     use crate::network::http::{
-        ratelimit::{IpLimiter, UserLimiter},
+        ratelimit::{IpLimiter, RateLimitedService, UserLimiter},
         rlid::RlidSigner,
         server::HFactory,
+        server::tests::EchoServer,
     };
     use nonzero_ext::nonzero;
-    use reqwest::blocking::Client;
-    use reqwest::header::{COOKIE, HeaderMap, HeaderValue, SET_COOKIE};
+    use reqwest::{
+        blocking::Client,
+        header::{COOKIE, HeaderMap, HeaderValue, SET_COOKIE},
+    };
     use std::sync::Arc;
-
-    fn do_req(client: &Client, url: &str, cookie: Option<&str>) -> (u16, HeaderMap, String) {
-        let mut req = client.get(url);
-        if let Some(c) = cookie {
-            req = req.header(COOKIE, HeaderValue::from_str(c).expect("cookie hdr"));
-        }
-        let resp = req.send().expect("send");
-        let status = resp.status().as_u16();
-        let headers = resp.headers().clone();
-        let body = resp.text().unwrap_or_default();
-        (status, headers, body)
-    }
-
-    // Generous IP limiter, strict per-user: 2 total tokens in any 1s window (1 rps + burst 1)
-    fn build_test_limiters() -> (Arc<IpLimiter>, Arc<UserLimiter>) {
-        use governor::{Quota, RateLimiter as GovLimiter};
-        use nonzero_ext::nonzero;
-
-        let ip = Arc::new(GovLimiter::keyed(
-            Quota::per_second(nonzero!(1000u32)).allow_burst(nonzero!(1000u32)),
-        ));
-
-        // 2 total tokens in any given second: rate 1/sec + burst 1
-        // => 1st OK, 2nd OK, 3rd within the same second -> 429
-        let user = Arc::new(GovLimiter::keyed(
-            Quota::per_second(nonzero!(1u32)).allow_burst(nonzero!(1u32)),
-        ));
-        (ip, user)
-    }
-
-    fn build_signer() -> Arc<RlidSigner> {
-        let cur: [u8; 32] = [1u8; 32];
-        let old: [u8; 32] = [2u8; 32];
-        Arc::new(RlidSigner::new(
-            "rlid",
-            std::time::Duration::from_secs(60),
-            (1, cur),
-            vec![(0, old)],
-        ))
-    }
 
     struct RlEchoFactory {
         user_rl: Arc<UserLimiter>,
@@ -350,6 +311,82 @@ mod tests {
         }
     }
 
+    fn do_req(
+        client: &Client,
+        url: &str,
+        cookie: Option<&str>,
+        version: reqwest::Version,
+    ) -> (u16, HeaderMap, String) {
+        let mut req = client.get(url).version(version);
+        if let Some(c) = cookie {
+            req = req.header(COOKIE, HeaderValue::from_str(c).expect("cookie hdr"));
+        }
+        let resp = req.send().expect("send");
+        let status = resp.status().as_u16();
+        let headers = resp.headers().clone();
+        let body = resp.text().unwrap_or_default();
+        (status, headers, body)
+    }
+
+    // Generous IP limiter, strict per-user: 2 total tokens in any 1s window (1 rps + burst 1)
+    fn build_test_limiters() -> (Arc<IpLimiter>, Arc<UserLimiter>) {
+        use governor::{Quota, RateLimiter as GovLimiter};
+        use nonzero_ext::nonzero;
+
+        let ip = Arc::new(GovLimiter::keyed(
+            Quota::per_second(nonzero!(1000u32)).allow_burst(nonzero!(1000u32)),
+        ));
+
+        // 2 total tokens in any given second: rate 1/sec + burst 1
+        // => 1st OK, 2nd OK, 3rd within the same second -> 429
+        let user = Arc::new(GovLimiter::keyed(
+            Quota::per_second(nonzero!(1u32)).allow_burst(nonzero!(1u32)),
+        ));
+        (ip, user)
+    }
+
+    fn build_signer() -> Arc<RlidSigner> {
+        let cur: [u8; 32] = [1u8; 32];
+        let old: [u8; 32] = [2u8; 32];
+        Arc::new(RlidSigner::new(
+            "rlid",
+            std::time::Duration::from_secs(60),
+            (1, cur),
+            vec![(0, old)],
+        ))
+    }
+
+    fn verify_cookie_flow(client: &Client, url: &str, version: reqwest::Version) {
+        // 1) First request (no cookie): expect 200 and Set-Cookie: rlid=...
+        let (s1, h1, _b1) = do_req(client, url, None, version);
+        assert_eq!(s1, 200, "first request should be 200 OK, got: {s1}");
+        let set_cookie_line = h1
+            .get_all(SET_COOKIE)
+            .iter()
+            .find_map(|hv| hv.to_str().ok())
+            .expect("Set-Cookie header missing on first response");
+        assert!(
+            set_cookie_line.contains("rlid=v1."),
+            "rlid cookie not issued: {set_cookie_line}"
+        );
+
+        // Extract "rlid=..." pair and reuse it manually
+        let cookie_pair = set_cookie_line
+            .split(';')
+            .next()
+            .unwrap()
+            .trim()
+            .to_string();
+
+        // 2) Second request with same cookie => 200
+        let (s2, _h2, _b2) = do_req(client, url, Some(&cookie_pair), version);
+        assert_eq!(s2, 200, "second request should be 200 OK, got: {s2}");
+
+        // 3) Third request with same cookie within same second => 429
+        let (s3, _h3, _b3) = do_req(client, url, Some(&cookie_pair), version);
+        assert_eq!(s3, 429, "third request should be 429, got: {s3}");
+    }
+
     #[cfg(feature = "net-h1-server")]
     #[test]
     fn test_ratelimit_h1_server() {
@@ -380,42 +417,14 @@ mod tests {
         // reqwest client
         let client = Client::builder().build().expect("client");
 
-        // 1) First request (no cookie): expect 200 and Set-Cookie: rlid=...
-        let (s1, h1, _b1) = do_req(&client, &url, None);
-        assert_eq!(s1, 200, "first request should be 200 OK, got: {s1}");
-        let set_cookie_line = h1
-            .get_all(SET_COOKIE)
-            .iter()
-            .find_map(|hv| hv.to_str().ok())
-            .expect("Set-Cookie header missing on first response");
-        assert!(
-            set_cookie_line.contains("rlid=v1."),
-            "rlid cookie not issued: {set_cookie_line}"
-        );
-
-        // Extract "rlid=..." pair to echo back
-        let cookie_pair = {
-            let first_seg = set_cookie_line.split(';').next().unwrap().trim();
-            first_seg.to_string() // "rlid=...."
-        };
-
-        // 2) Second request with same cookie => still under per-user budget => 200
-        let (s2, _h2, _b2) = do_req(&client, &url, Some(&cookie_pair));
-        assert_eq!(s2, 200, "second request should be 200 OK, got: {s2}");
-
-        // 3) Third request with same cookie => exceed per-user budget => 429
-        let (s3, _h3, _b3) = do_req(&client, &url, Some(&cookie_pair));
-        assert_eq!(s3, 429, "third request should be 429, got: {s3}");
+        verify_cookie_flow(&client, &url, reqwest::Version::HTTP_11);
 
         // cleanup
         may::coroutine::sleep(Duration::from_millis(100));
         unsafe { server_handle.coroutine().cancel() };
     }
 
-    #[cfg(all(
-        feature = "net-h2-server",
-        any(feature = "rt-tokio", feature = "rt-glommio")
-    ))]
+    #[cfg(feature = "net-h2-server")]
     #[test]
     fn test_ratelimit_h2_tls_server() {
         use crate::network::http::server::{H2Config, HFactory};
@@ -455,32 +464,49 @@ mod tests {
             .build()
             .expect("client");
 
-        // 1) First request (no cookie): expect 200 + Set-Cookie: rlid=...
-        let (s1, h1, _b1) = do_req(&client, &url, None);
-        assert_eq!(s1, 200, "first request should be 200 OK, got: {s1}");
-        let set_cookie_line = h1
-            .get_all(SET_COOKIE)
-            .iter()
-            .find_map(|hv| hv.to_str().ok())
-            .expect("Set-Cookie header missing on first response");
-        assert!(
-            set_cookie_line.contains("rlid=v1."),
-            "rlid cookie not issued: {set_cookie_line}"
-        );
-        // Extract "rlid=..." pair
-        let cookie_pair = set_cookie_line
-            .split(';')
-            .next()
-            .unwrap()
-            .trim()
-            .to_string();
+        verify_cookie_flow(&client, &url, reqwest::Version::HTTP_2);
+    }
 
-        // 2) Second request with same cookie => 200
-        let (s2, _h2, _b2) = do_req(&client, &url, Some(&cookie_pair));
-        assert_eq!(s2, 200, "second request should be 200 OK, got: {s2}");
+    #[cfg(feature = "net-h3-server")]
+    #[test]
+    fn test_ratelimit_h3_tls_server() {
+        use crate::network::http::server::H3Config;
+        use reqwest::blocking::Client;
+        use std::time::Duration;
 
-        // 3) Third request with same cookie within same second => 429
-        let (s3, _h3, _b3) = do_req(&client, &url, Some(&cookie_pair));
-        assert_eq!(s3, 429, "third request should be 429, got: {s3}");
+        let addr = "127.0.0.1:8093";
+        let url = format!("https://{addr}/test");
+
+        let (ip_rl, user_rl) = build_test_limiters();
+        let signer = build_signer();
+        let factory = RlEchoFactory {
+            user_rl,
+            ip_rl,
+            signer,
+        };
+
+        let (cert_pem, key_pem) =
+            crate::network::http::server::tests::create_self_signed_tls_pems();
+
+        let _server_thread = std::thread::spawn(move || {
+            factory
+                .start_h3_tls(
+                    addr,
+                    (None, cert_pem.as_bytes(), key_pem.as_bytes()),
+                    H3Config::default(),
+                )
+                .expect("start_h3_tls rl server");
+        });
+
+        std::thread::sleep(Duration::from_millis(500));
+
+        // HTTP/3 client (reqwest)
+        let client = Client::builder()
+            .danger_accept_invalid_certs(true)
+            .http3_prior_knowledge()
+            .build()
+            .expect("client");
+
+        verify_cookie_flow(&client, &url, reqwest::Version::HTTP_3);
     }
 }

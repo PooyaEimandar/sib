@@ -54,8 +54,6 @@ where
                             }
                         })
                         .detach();
-
-                        println!("Received request");
                     }
                     Err(e) => {
                         eprintln!("resolve_request: {e:?}");
