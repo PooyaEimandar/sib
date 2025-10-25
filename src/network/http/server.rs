@@ -469,7 +469,6 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         addr: L,
         chain_cert_key: (Option<&[u8]>, &[u8], &[u8]),
         h2_cfg: H2Config,
-        rate_limiter: Option<super::ratelimit::RateLimiterKind>,
     ) -> std::io::Result<()> {
         // get socket address
         let socket_addr = resolve_addr!(addr)?;
@@ -478,7 +477,6 @@ pub trait HFactory: Send + Sync + Sized + 'static {
             make_rustls_config(&chain_cert_key, h2_cfg.alpn_protocols.clone())?,
         ));
         let factory = std::sync::Arc::new(self);
-        let rate_limiter_arc = std::sync::Arc::new(rate_limiter);
 
         glommio::LocalExecutorPoolBuilder::new(glommio::PoolPlacement::MaxSpread(
             h2_cfg.num_of_shards,
@@ -489,7 +487,6 @@ pub trait HFactory: Send + Sync + Sized + 'static {
             let tls_acceptor = tls_acceptor.clone();
             let factory = factory.clone();
             let h2_cfg = h2_cfg.clone();
-            let rate_limiter_arc = rate_limiter_arc.clone();
 
             async move {
                 let shard_id = glommio::executor().id();
@@ -544,16 +541,6 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                             )
                         })
                         .ip();
-                    if let Some(rl) = rate_limiter_arc.as_ref()
-                        && !peer_ip.is_unspecified()
-                    {
-                        use super::ratelimit::RateLimiter;
-                        let result = rl.check(peer_ip.to_string().into());
-                        if !result.allowed {
-                            let _ = stream.shutdown(std::net::Shutdown::Both).await;
-                            continue;
-                        }
-                    }
 
                     // TLS handshake
                     let tls_stream = match tls_acceptor.accept(stream).await {
@@ -758,12 +745,10 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         addr: L,
         chain_cert_key: (Option<&[u8]>, &[u8], &[u8]),
         h3_cfg: H3Config,
-        rate_limiter: Option<super::ratelimit::RateLimiterKind>,
     ) -> std::io::Result<()> {
         let server = make_quinn_server(&chain_cert_key, &h3_cfg)?;
         let socket_addr = resolve_addr!(addr)?;
         let factory = std::sync::Arc::new(self);
-        let rate_limiter_arc = std::sync::Arc::new(rate_limiter);
 
         glommio::LocalExecutorPoolBuilder::new(glommio::PoolPlacement::MaxSpread(
             h3_cfg.num_of_shards,
@@ -773,7 +758,6 @@ pub trait HFactory: Send + Sync + Sized + 'static {
             // Per-shard clones
             let factory = factory.clone();
             let h3_cfg = h3_cfg.clone();
-            let rate_limiter_arc = rate_limiter_arc.clone();
 
             async move {
                 let shard_id = glommio::executor().id();
@@ -807,16 +791,6 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                 while let Some(incoming) = endpoint.accept().await {
                     // Rate-limit check
                     let peer_ip = incoming.remote_address().ip();
-                    if let Some(rl) = rate_limiter_arc.as_ref()
-                        && !peer_ip.is_unspecified()
-                    {
-                        use super::ratelimit::RateLimiter;
-                        let result = rl.check(peer_ip.to_string().into());
-                        if !result.allowed {
-                            incoming.refuse();
-                            continue;
-                        }
-                    }
 
                     // Acquire a session slot (or skip if none available)
                     let permit = match std::rc::Rc::clone(&sem).try_acquire_static_permit(1) {
@@ -872,7 +846,6 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         addr: L,
         chain_cert_key: (Option<&[u8]>, &[u8], &[u8]),
         h3_cfg: H3Config,
-        rate_limiter: Option<super::ratelimit::RateLimiterKind>,
     ) -> std::io::Result<()> {
         use std::sync::Arc;
         use tokio::sync::Semaphore;
@@ -881,7 +854,6 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         let socket_addr = resolve_addr!(addr)?;
 
         let factory = Arc::new(self);
-        let rl = Arc::new(rate_limiter);
         let h3_cfg_arc = Arc::new(h3_cfg);
 
         // Bind one UDP socket per shard using your helper (SO_REUSEPORT when available)
@@ -910,7 +882,6 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         for (shard_id, std_sock) in udp_sockets.into_iter().enumerate() {
             let server = server.clone();
             let factory = factory.clone();
-            let rl = rl.clone();
             let h3_cfg = h3_cfg_arc.clone();
 
             handles.push(
@@ -950,19 +921,8 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                                             break;
                                         };
 
-                                        // Optional rate limit
+                                        // Get peer ip
                                         let peer_ip = incoming.remote_address().ip();
-                                        if let Some(rl) = rl.as_ref() {
-                                            if !peer_ip.is_unspecified() {
-                                                use super::ratelimit::RateLimiter;
-                                                let result = rl.check(peer_ip.to_string().into());
-                                                if !result.allowed {
-                                                    // If your quinn exposes `reject()`, prefer it here
-                                                    drop(incoming);
-                                                    continue;
-                                                }
-                                            }
-                                        }
 
                                         // Try-acquire a session slot (non-blocking)
                                         let permit = match sem.clone().try_acquire_owned() {
@@ -1029,7 +989,6 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         addr: L,
         chain_cert_key: (&[u8], &[u8]),
         wt_cfg: crate::network::http::wt::WTConfig,
-        rate_limiter: Option<super::ratelimit::RateLimiterKind>,
     ) -> std::io::Result<()> {
         use std::sync::Arc;
         use tokio::sync::Semaphore;
@@ -1113,13 +1072,11 @@ pub trait HFactory: Send + Sync + Sized + 'static {
 
         let num_shards = wt_cfg.num_of_shards.max(1);
         let factory = Arc::new(self);
-        let rl = Arc::new(rate_limiter);
         let wt_cfg_arc = Arc::new(wt_cfg);
 
         let mut handles = Vec::with_capacity(num_shards as usize);
         for shard_id in 0..num_shards {
             let factory = factory.clone();
-            let rl = rl.clone();
             let wt_cfg = wt_cfg_arc.clone();
             let chain = chain.clone();
             let key = key.clone_key();
@@ -1164,7 +1121,6 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                                         };
 
                                         let service = factory.wt_service(shard_id);
-                                        let rl = rl.clone();
                                         tokio::task::spawn_local(async move {
                                             let _permit = permit;
 
@@ -1175,19 +1131,6 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                                                     return;
                                                 }
                                             };
-
-                                            // Optional rate-limit by remote IP
-                                            if let Some(rl) = rl.as_ref() {
-                                                let ip = session_req.remote_address().ip();
-                                                if !ip.is_unspecified() {
-                                                    use super::ratelimit::RateLimiter;
-                                                    let res = rl.check(ip.to_string().into());
-                                                    if !res.allowed {
-                                                        // Refuse by not accepting
-                                                        return;
-                                                    }
-                                                }
-                                            }
 
                                             // Accept the WT session (Extended CONNECT)
                                             let conn = match session_req.accept().await {
@@ -1820,7 +1763,7 @@ pub mod tests {
             let h3_cfg = H3Config::default();
             // Pick a port and start the server
             EchoServer
-                .start_h3_tls(addr, (None, cert.as_bytes(), key.as_bytes()), h3_cfg, None)
+                .start_h3_tls(addr, (None, cert.as_bytes(), key.as_bytes()), h3_cfg)
                 .expect("start_h3_tls");
         });
 
@@ -1859,7 +1802,7 @@ pub mod tests {
             let h3_cfg = H3Config::default();
             // Pick a port and start the server
             EchoServer
-                .start_h3_tls(addr, (None, cert.as_bytes(), key.as_bytes()), h3_cfg, None)
+                .start_h3_tls(addr, (None, cert.as_bytes(), key.as_bytes()), h3_cfg)
                 .expect("start_h3_tls");
         });
 
