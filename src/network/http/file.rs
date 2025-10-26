@@ -1537,7 +1537,6 @@ mod tests {
                                 addr,
                                 (None, cert_pem.as_bytes(), key_pem.as_bytes()),
                                 H1Config::default(),
-                                None,
                             )
                             .unwrap_or_else(|_| panic!("H1 file server failed to start for thread {id:?}"))
                             .join()
@@ -1560,7 +1559,7 @@ mod tests {
                     let id = std::thread::current().id();
                     println!("Starting H2 server on {addr} with thread: {id:?}");
                     FileServer(FileService)
-                        .start_h2_tls(addr, (None, cert_pem, key_pem), H2Config::default(), None)
+                        .start_h2_tls(addr, (None, cert_pem, key_pem), H2Config::default())
                         .unwrap_or_else(|_| panic!("H2 file server failed to start for thread {id:?}"));
                 });
                 threads.push(h2_handle);
@@ -1579,7 +1578,7 @@ mod tests {
                     let id = std::thread::current().id();
                     println!("Starting H2 server on {addr} with thread: {id:?}");
                     FileServer(FileService)
-                        .start_h3_tls(addr, (None, cert_pem, key_pem), H3Config::default(), None)
+                        .start_h3_tls(addr, (None, cert_pem, key_pem), H3Config::default())
                         .unwrap_or_else(|_| panic!("H3 file server failed to start for thread {id:?}"));
                 });
                 threads.push(h3_handle);

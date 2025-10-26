@@ -8,6 +8,9 @@ use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 
+const HTTP11: &[u8] = b"HTTP/1.1 ";
+const CRLF: &[u8] = b"\r\n";
+
 pub(crate) const BUF_LEN: usize = 8 * 4096;
 pub(crate) const MAX_HEADERS: usize = 32;
 pub static CURRENT_DATE: once_cell::sync::Lazy<Arc<ArcSwap<Arc<str>>>> =
@@ -39,56 +42,16 @@ where
     req: httparse::Request<'header, 'buf>,
     // request buffer
     req_buf: &'buf mut BytesMut,
-    // length of response headers
+    // length of response headers (those you append with header/header_str)
     rsp_headers_len: usize,
-    // buffer for response
+    // buffer for response (your headers + blank line + body)
     rsp_buf: &'buf mut BytesMut,
-    // stream to read body from
+    // stream to write to
     stream: &'stream mut S,
-    // status
-    status_written: bool,
-    // headers flush state
-    headers_flushed: bool,
-    // number of pending headers
-    pending_headers_count: usize,
-    // pending headers
-    pending_headers: [MaybeUninit<(HeaderName, HeaderValue)>; MAX_HEADERS],
-}
-
-impl<'buf, 'header, 'stream, S> H1Session<'buf, 'header, 'stream, S>
-where
-    S: Read + Write,
-{
-    #[inline]
-    fn write_header_line(&mut self, name: &HeaderName, value: &HeaderValue) {
-        self.rsp_buf.extend_from_slice(name.as_str().as_bytes());
-        self.rsp_buf.extend_from_slice(b": ");
-        self.rsp_buf.extend_from_slice(value.as_bytes());
-        self.rsp_buf.extend_from_slice(b"\r\n");
-        self.rsp_headers_len += 1;
-    }
-
-    #[inline]
-    fn flush_pending_headers(&mut self) {
-        if self.headers_flushed {
-            return;
-        }
-        // SAFETY: we initialized exactly `pending_count` slots
-        for i in 0..self.pending_headers_count {
-            let (n_ref, v_ref) = unsafe { self.pending_headers.get_unchecked(i).assume_init_ref() };
-            self.write_header_line(&n_ref.clone(), &v_ref.clone());
-        }
-        self.headers_flushed = true;
-    }
-
-    #[inline]
-    fn ensure_header_section_closed(&mut self) {
-        self.flush_pending_headers();
-        // add CRLF once between headers and body
-        if !self.rsp_buf.ends_with(b"\r\n\r\n") {
-            self.rsp_buf.extend_from_slice(b"\r\n");
-        }
-    }
+    // whether a status was set explicitly
+    status_set: bool,
+    // status line + Server + Date + CRLF (tiny, on-stack)
+    status_buf: heapless::Vec<u8, 192>,
 }
 
 #[async_trait::async_trait(?Send)]
@@ -104,7 +67,6 @@ where
     #[inline]
     fn req_host(&self) -> Option<(String, Option<u16>)> {
         use super::server::parse_authority;
-        // Host header (HTTP/1.1)
         if let Some(host) = self
             .req
             .headers
@@ -115,16 +77,12 @@ where
         {
             return Some(a);
         }
-
-        // CONNECT authority-form: "CONNECT host:port HTTP/1.1"
         if matches!(self.req.method, Some("CONNECT"))
             && let Some(path) = self.req.path
             && let Some(a) = parse_authority(path.trim())
         {
             return Some(a);
         }
-
-        // Absolute-form: "GET http://example.com:8080/path HTTP/1.1"
         if let Some(path) = self.req.path
             && let Some((scheme, rest)) = path.split_once("://")
             && (scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
@@ -134,7 +92,6 @@ where
                 return Some(a);
             }
         }
-
         None
     }
 
@@ -204,7 +161,6 @@ where
         }
 
         if self.req_buf.len() >= content_length {
-            // already buffered enough
             return Ok(&self.req_buf[..content_length]);
         }
 
@@ -276,27 +232,30 @@ where
         Ok(())
     }
 
+    // build only the status + fixed headers into tiny status_buf
     #[inline]
     fn status_code(&mut self, status: http::StatusCode) -> &mut Self {
         const SERVER_NAME: &str =
             concat!("\r\nServer: Sib ", env!("SIB_BUILD_VERSION"), "\r\nDate: ");
 
-        // status line
-        self.rsp_buf.extend_from_slice(b"HTTP/1.1 ");
-        self.rsp_buf.extend_from_slice(status.as_str().as_bytes());
-        self.rsp_buf.extend_from_slice(b" ");
+        self.status_buf.clear();
+        self.status_buf.extend_from_slice(HTTP11).ok();
+        self.status_buf
+            .extend_from_slice(status.as_str().as_bytes())
+            .ok();
+        self.status_buf.extend_from_slice(b" ").ok();
         if let Some(reason) = status.canonical_reason() {
-            self.rsp_buf.extend_from_slice(reason.as_bytes());
+            self.status_buf.extend_from_slice(reason.as_bytes()).ok();
         }
-        self.rsp_buf.extend_from_slice(SERVER_NAME.as_bytes());
-        self.rsp_buf
-            .extend_from_slice(CURRENT_DATE.load().as_bytes());
-        self.rsp_buf.extend_from_slice(b"\r\n");
+        self.status_buf
+            .extend_from_slice(SERVER_NAME.as_bytes())
+            .ok();
+        self.status_buf
+            .extend_from_slice(CURRENT_DATE.load().as_bytes())
+            .ok();
+        self.status_buf.extend_from_slice(CRLF).ok();
 
-        self.status_written = true;
-
-        // Now that the status line exists, flush any headers that were added earlier.
-        self.flush_pending_headers();
+        self.status_set = true;
         self
     }
 
@@ -328,36 +287,37 @@ where
         ))
     }
 
+    // headers go straight into rsp_buf
     #[inline]
     fn header(&mut self, name: HeaderName, value: HeaderValue) -> std::io::Result<&mut Self> {
-        // enforce limit across both pending and written headers
-        if self.rsp_headers_len + self.pending_headers_count >= MAX_HEADERS {
+        if self.rsp_headers_len >= MAX_HEADERS {
             return Err(io::Error::new(
                 io::ErrorKind::ArgumentListTooLong,
                 "too many headers",
             ));
         }
-
-        if self.status_written {
-            // write directly
-            self.write_header_line(&name, &value);
-        } else {
-            // SAFETY: index is < MAX_HEADERS enforced above, so we can store pending with no heap growth
-            unsafe {
-                self.pending_headers
-                    .get_unchecked_mut(self.pending_headers_count)
-                    .write((name, value));
-            }
-            self.pending_headers_count += 1;
-        }
+        self.rsp_buf.extend_from_slice(format!("{name}").as_bytes());
+        self.rsp_buf.extend_from_slice(b": ");
+        self.rsp_buf.extend_from_slice(value.as_bytes());
+        self.rsp_buf.extend_from_slice(CRLF);
+        self.rsp_headers_len += 1;
         Ok(self)
     }
 
     #[inline]
     fn header_str(&mut self, name: &str, value: &str) -> std::io::Result<&mut Self> {
-        let hn = HeaderName::from_str(name).map_err(|e| io::Error::other(e.to_string()))?;
-        let hv = HeaderValue::from_str(value).map_err(|e| io::Error::other(e.to_string()))?;
-        self.header(hn, hv)
+        if self.rsp_headers_len >= MAX_HEADERS {
+            return Err(io::Error::new(
+                io::ErrorKind::ArgumentListTooLong,
+                "too many headers",
+            ));
+        }
+        self.rsp_buf.extend_from_slice(name.as_bytes());
+        self.rsp_buf.extend_from_slice(b": ");
+        self.rsp_buf.extend_from_slice(value.as_bytes());
+        self.rsp_buf.extend_from_slice(CRLF);
+        self.rsp_headers_len += 1;
+        Ok(self)
     }
 
     #[inline]
@@ -376,19 +336,70 @@ where
         Ok(self)
     }
 
+    // If body is called before status, synthesize 200 OK once.
     #[inline]
     fn body(&mut self, body: bytes::Bytes) -> &mut Self {
-        // make sure headers are flushed and CRLF is written before body
-        self.ensure_header_section_closed();
+        if !self.status_set {
+            self.status_code(http::StatusCode::OK);
+        }
+        self.rsp_buf.extend_from_slice(CRLF);
         self.rsp_buf.extend_from_slice(&body);
         self
     }
 
+    // eom performs a single vectored write: status_buf then rsp_buf
     #[inline]
     fn eom(&mut self) -> std::io::Result<()> {
-        // eom, end of message
-        #[cfg(debug_assertions)]
-        eprintln!("sent: {:?}", self.rsp_buf);
+        use std::io::{ErrorKind, IoSlice};
+
+        if !self.status_set {
+            // default 200 if nothing set yet
+            self.status_code(http::StatusCode::OK);
+        }
+
+        let mut off_status = 0usize;
+        let mut off_body = 0usize;
+
+        // Loop until both status_buf and rsp_buf are fully written
+        loop {
+            let s1 = &self.status_buf[off_status..];
+            let s2 = &self.rsp_buf[off_body..];
+
+            if s1.is_empty() && s2.is_empty() {
+                break;
+            }
+
+            let bufs = if !s1.is_empty() && !s2.is_empty() {
+                [IoSlice::new(s1), IoSlice::new(s2)]
+            } else if !s1.is_empty() {
+                [IoSlice::new(s1), IoSlice::new(&[])]
+            } else {
+                [IoSlice::new(s2), IoSlice::new(&[])]
+            };
+
+            match self.stream.write_vectored(&bufs) {
+                Ok(0) => return Err(io::Error::new(ErrorKind::WriteZero, "write zero")),
+                Ok(n) => {
+                    let s1_len = s1.len();
+                    if n < s1_len {
+                        off_status += n;
+                    } else {
+                        off_status = s1_len;
+                        off_body += n - s1_len;
+                    }
+                }
+                Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
+                    may::coroutine::yield_now();
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        // We fully sent the response; clear buffers for reuse if desired
+        self.rsp_buf.clear();
+        self.status_buf.clear();
+        self.status_set = false;
+
         Ok(())
     }
 
@@ -714,10 +725,8 @@ where
         rsp_headers_len: 0,
         rsp_buf,
         stream,
-        status_written: false,
-        headers_flushed: false,
-        pending_headers_count: 0,
-        pending_headers: unsafe { MaybeUninit::uninit().assume_init() },
+        status_set: false,
+        status_buf: heapless::Vec::new(),
     }))
 }
 

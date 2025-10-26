@@ -1,4 +1,5 @@
 // TechEmpower benchmark tests for Sib with the `net-h1-server` feature enabled
+
 use sib::network::http::{
     server::{H1Config, HFactory},
     session::{HService, Session},
@@ -26,9 +27,9 @@ impl HService for Server {
     fn call<S: Session>(&mut self, session: &mut S) -> std::io::Result<()> {
         use core::fmt::Write;
         use sib::network::http::h1_session;
+        let mut res: heapless::String<256> = heapless::String::new();
         if session.req_path() == "/json" {
             // Respond with JSON
-            let mut res: heapless::String<192> = heapless::String::new();
             let json = serde_json::to_vec(&JsonMessage::default())?;
             write!(
                 res,
@@ -46,7 +47,6 @@ impl HService for Server {
             .unwrap();
             session.write_all_eom(res.as_bytes())
         } else {
-            let mut res: heapless::String<160> = heapless::String::new();
             write!(
                 res,
                 "HTTP/1.1 200 OK\r\n\
@@ -73,7 +73,7 @@ impl HFactory for Server {
 }
 
 fn main() {
-    let stack_size = 4 * 1024; // 4 KB stack
+    let stack_size = 1024; // 1 KB stack
     let cpus = num_cpus::get();
 
     sib::init_global_poller(cpus, stack_size);
