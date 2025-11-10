@@ -28,7 +28,8 @@ SIB aims to become a next-generation, high-performance Rust-based networking run
 - [x] Auto benchmark mode (TechEmpower-compatible)
 - [x] ACID cache over FoundationDB
 - [x] Ratelimit per ip/session
-- [ ] Integration with ClickHouse
+- [ ] Integration with RAFT
+- [ ] Integration with WebRTC
 
 ## Milestone 2 : Observability & Security
 ✅ Target: CNCF Sandbox readiness
@@ -46,7 +47,6 @@ SIB aims to become a next-generation, high-performance Rust-based networking run
 ## Milestone 2 : Scalability & Federation
 ✅ Target: Production & multi-node clustering
 
-- [ ] RAFT for scaling
 - [ ] Plugin API via WASM
 - [ ] `/healthz`, `/readyz`, `/livez` endpoints
 - [ ] Distributed clustering using Redpanda or FoundationDB coordination

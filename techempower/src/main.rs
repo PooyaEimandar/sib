@@ -73,7 +73,7 @@ impl HFactory for Server {
 }
 
 fn main() {
-    let stack_size = 1024; // 1 KB stack
+    let stack_size = 2 * 1024; // 2 KB stack
     let cpus = num_cpus::get();
 
     sib::init_global_poller(cpus, stack_size);
