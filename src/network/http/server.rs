@@ -161,77 +161,69 @@ fn make_socket(
 
 #[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
 fn make_rustls_config(
-    domains: Option<std::collections::HashSet<String>>,
     chain_cert_key: &(Option<&[u8]>, &[u8], &[u8]),
     alpn_protocols: Vec<Vec<u8>>,
 ) -> std::io::Result<rustls::ServerConfig> {
     use rustls::pki_types::{CertificateDer, PrivateKeyDer};
     use rustls_pemfile::{certs, pkcs8_private_keys};
-    use std::sync::Arc;
 
-    // load chain (leaf first), append extra intermediates if provided
-    let mut chain: Vec<CertificateDer<'static>> = {
-        let mut r = std::io::Cursor::new(chain_cert_key.1);
-        certs(&mut r)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?
+    // Load certs & key
+    let certs: Vec<CertificateDer<'static>> = {
+        let mut reader = std::io::Cursor::new(chain_cert_key.1);
+        certs(&mut reader)
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .collect()
     };
-    if let Some(extra) = chain_cert_key.0 {
-        let mut r = std::io::Cursor::new(extra);
-        let mut extras = certs(&mut r)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-        chain.append(&mut extras);
-    }
-    if chain.is_empty() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "empty cert chain",
-        ));
-    }
 
-    // load key
     let key: PrivateKeyDer<'static> = {
-        let mut r = std::io::Cursor::new(chain_cert_key.2);
-        let keys = pkcs8_private_keys(&mut r)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{e}")))?;
-        PrivateKeyDer::from(keys.into_iter().next().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "no private key")
-        })?)
+        let mut reader = std::io::Cursor::new(chain_cert_key.2);
+        let keys: Result<Vec<_>, std::io::Error> = pkcs8_private_keys(&mut reader)
+            .map(|res| {
+                res.map_err(|e| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("Server got a bad private key: {e}"),
+                    )
+                })
+            })
+            .collect();
+        let keys = keys?;
+        if let Some(key) = keys.into_iter().next() {
+            PrivateKeyDer::from(key)
+        } else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Server could not find a private key",
+            ));
+        }
     };
 
-    // build signing key + CertifiedKey
-    let sk = rustls::crypto::ring::sign::any_supported_type(&key)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{e}")))?;
-    let ck = Arc::new(rustls::sign::CertifiedKey::new(chain, sk));
-
-    // normalize allow-list to lowercase (optional)
-    let allow = domains.map(|set| set.into_iter().map(|s| s.to_ascii_lowercase()).collect());
-
-    use crate::network::http::resolver::DefaultOrExactResolver;
-    let resolver = DefaultOrExactResolver {
-        exact: allow.unwrap_or_default(),
-        default_ck: ck,
-    };
-
+    // TLS config
     let mut cfg = rustls::ServerConfig::builder()
         .with_no_client_auth()
-        .with_cert_resolver(Arc::new(resolver));
+        .with_single_cert(certs, key)
+        .map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Server could not load cert/key: {e}"),
+            )
+        })?;
 
+    // set ALPN
     cfg.alpn_protocols = alpn_protocols;
+
     Ok(cfg)
 }
 
 #[cfg(feature = "net-h3-server")]
 fn make_quinn_server(
-    domains: Option<Vec<String>>,
     chain_cert_key: &(Option<&[u8]>, &[u8], &[u8]),
     h3_cfg: &H3Config,
 ) -> std::io::Result<quinn::ServerConfig> {
     // create server config
     let alpn_protocols = vec![b"h3".to_vec()];
-    let cfg = make_rustls_config(domains, chain_cert_key, alpn_protocols)?;
+    let cfg = make_rustls_config(chain_cert_key, alpn_protocols)?;
 
     // create transport config
     let mut transport = quinn::TransportConfig::default();
@@ -475,7 +467,6 @@ pub trait HFactory: Send + Sync + Sized + 'static {
     fn start_h2_tls<L: std::net::ToSocketAddrs>(
         self,
         addr: L,
-        domains: Option<Vec<String>>,
         chain_cert_key: (Option<&[u8]>, &[u8], &[u8]),
         h2_cfg: H2Config,
     ) -> std::io::Result<()> {
@@ -483,7 +474,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         let socket_addr = resolve_addr!(addr)?;
         // create tls acceptor
         let tls_acceptor = futures_rustls::TlsAcceptor::from(std::sync::Arc::new(
-            make_rustls_config(domains, &chain_cert_key, h2_cfg.alpn_protocols.clone())?,
+            make_rustls_config(&chain_cert_key, h2_cfg.alpn_protocols.clone())?,
         ));
         let factory = std::sync::Arc::new(self);
 
@@ -599,7 +590,6 @@ pub trait HFactory: Send + Sync + Sized + 'static {
     fn start_h2_tls<L: std::net::ToSocketAddrs>(
         self,
         addr: L,
-        domains: Option<std::collections::HashSet<String>>,
         chain_cert_key: (Option<&[u8]>, &[u8], &[u8]),
         h2_cfg: H2Config,
     ) -> std::io::Result<()> {
@@ -611,7 +601,6 @@ pub trait HFactory: Send + Sync + Sized + 'static {
 
         // Shared TLS acceptor
         let tls_acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(make_rustls_config(
-            domains,
             &chain_cert_key,
             h2_cfg.alpn_protocols.clone(),
         )?));
@@ -1691,7 +1680,6 @@ pub mod tests {
             EchoServer
                 .start_h2_tls(
                     addr,
-                    None,
                     (None, cert.as_bytes(), key.as_bytes()),
                     H2Config::default(),
                 )
@@ -1734,7 +1722,6 @@ pub mod tests {
             EchoServer
                 .start_h2_tls(
                     addr,
-                    None,
                     (None, cert.as_bytes(), key.as_bytes()),
                     H2Config::default(),
                 )
