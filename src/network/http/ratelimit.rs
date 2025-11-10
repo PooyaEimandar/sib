@@ -449,6 +449,7 @@ mod tests {
             factory
                 .start_h2_tls(
                     addr,
+                    None,
                     (None, cert_pem.as_bytes(), key_pem.as_bytes()),
                     H2Config::default(),
                 )

@@ -1559,7 +1559,7 @@ mod tests {
                     let id = std::thread::current().id();
                     println!("Starting H2 server on {addr} with thread: {id:?}");
                     FileServer(FileService)
-                        .start_h2_tls(addr, (None, cert_pem, key_pem), H2Config::default())
+                        .start_h2_tls(addr, None, (None, cert_pem, key_pem), H2Config::default())
                         .unwrap_or_else(|_| panic!("H2 file server failed to start for thread {id:?}"));
                 });
                 threads.push(h2_handle);
