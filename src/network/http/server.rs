@@ -169,96 +169,55 @@ fn make_rustls_config(
     use rustls_pemfile::{certs, pkcs8_private_keys};
     use std::sync::Arc;
 
-    // Load certificate chain (leaf first), and optionally append extra chain
-    fn load_pem_certs(mut bytes: &[u8]) -> std::io::Result<Vec<CertificateDer<'static>>> {
-        certs(&mut bytes)
+    // load chain (leaf first), append extra intermediates if provided
+    let mut chain: Vec<CertificateDer<'static>> = {
+        let mut r = std::io::Cursor::new(chain_cert_key.1);
+        certs(&mut r)
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?
+    };
+    if let Some(extra) = chain_cert_key.0 {
+        let mut r = std::io::Cursor::new(extra);
+        let mut extras = certs(&mut r)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+        chain.append(&mut extras);
     }
-
-    let mut cert_chain: Vec<CertificateDer<'static>> = load_pem_certs(chain_cert_key.1)?;
-    if let Some(extra_chain_pem) = chain_cert_key.0 {
-        // Append any extra intermediates (order after leaf)
-        let mut extra = load_pem_certs(extra_chain_pem)?;
-        cert_chain.append(&mut extra);
-    }
-    if cert_chain.is_empty() {
+    if chain.is_empty() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "No certificates found",
+            "empty cert chain",
         ));
     }
 
-    // Load private key (PKCS#8)
+    // load key
     let key: PrivateKeyDer<'static> = {
-        let mut reader = std::io::Cursor::new(chain_cert_key.2);
-        let keys_res: Result<Vec<_>, std::io::Error> = pkcs8_private_keys(&mut reader)
-            .map(|res| {
-                res.map_err(|e| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        format!("Bad private key: {e}"),
-                    )
-                })
-            })
-            .collect();
-        let keys = keys_res?;
-        if let Some(k) = keys.into_iter().next() {
-            PrivateKeyDer::from(k)
-        } else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "No private key found",
-            ));
-        }
+        let mut r = std::io::Cursor::new(chain_cert_key.2);
+        let keys = pkcs8_private_keys(&mut r)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{e}")))?;
+        PrivateKeyDer::from(keys.into_iter().next().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "no private key")
+        })?)
     };
 
-    // Build a signing key for SNI resolver path
-    let signing_key = Arc::new(
-        rustls::crypto::ring::sign::any_supported_type(&key).map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("Unsupported key type: {e}"),
-            )
-        })?,
-    );
+    // build signing key + CertifiedKey
+    let sk = rustls::crypto::ring::sign::any_supported_type(&key)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{e}")))?;
+    let ck = Arc::new(rustls::sign::CertifiedKey::new(chain, sk));
 
-    // If a non-empty domain list is provided, use an SNI resolver and attach the SAME cert to each.
-    if let Some(mut names) = domains {
-        names.retain(|s| !s.trim().is_empty());
-        if !names.is_empty() {
-            let mut resolver = rustls::server::ResolvesServerCertUsingSni::new();
+    // normalize allow-list to lowercase (optional)
+    let allow = domains.map(|set| set.into_iter().map(|s| s.to_ascii_lowercase()).collect());
 
-            // One CertifiedKey cloned for each name
-            let ck =
-                rustls::sign::CertifiedKey::new(cert_chain.clone(), signing_key.as_ref().clone());
-            for name in names {
-                // It’s okay if several SNI names map to the same cert
-                resolver
-                    .add(&name, ck.clone())
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-            }
+    use crate::network::http::resolver::DefaultOrExactResolver;
+    let resolver = DefaultOrExactResolver {
+        exact: allow.unwrap_or_default(),
+        default_ck: ck,
+    };
 
-            let mut cfg = rustls::ServerConfig::builder()
-                .with_no_client_auth()
-                .with_cert_resolver(Arc::new(resolver));
-
-            // Set ALPN (e.g., h2 + http/1.1)
-            cfg.alpn_protocols = alpn_protocols;
-            return Ok(cfg);
-        }
-    }
-
-    // Fallback: single-cert config (no SNI routing)
     let mut cfg = rustls::ServerConfig::builder()
         .with_no_client_auth()
-        .with_single_cert(cert_chain, key)
-        .map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("Could not load cert/key: {e}"),
-            )
-        })?;
+        .with_cert_resolver(Arc::new(resolver));
 
     cfg.alpn_protocols = alpn_protocols;
     Ok(cfg)
