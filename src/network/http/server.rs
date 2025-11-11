@@ -73,6 +73,7 @@ pub struct H2Config {
     pub max_header_list_size: u32,
     pub max_sessions: u64,
     pub num_of_shards: usize,
+    pub sni: bool,
     pub tls_impl: TlsImpl,
 }
 
@@ -92,6 +93,7 @@ impl Default for H2Config {
             max_sessions: 1024,
             num_of_shards: 2,
             tls_impl: TlsImpl::Rustls,
+            sni: false,
         }
     }
 }
@@ -639,6 +641,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         // Resolve bind address once
         let socket_addr = resolve_addr!(addr)?;
 
+        let sni = h2_cfg.sni;
         let factory = Arc::new(self);
         let h2_cfg_arc = Arc::new(h2_cfg);
 
@@ -652,7 +655,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
             TlsImpl::Boring => {
                 let alpn_refs: Vec<&[u8]> = h2_cfg_arc.alpn_protocols.iter().map(|v| v.as_slice()).collect();
                 let server_wire = alpn_wire_format(&alpn_refs);
-                let tls_builder = make_boringssl_config(&chain_cert_key, false, &server_wire)?;
+                let tls_builder = make_boringssl_config(&chain_cert_key, sni, &server_wire)?;
                 TlsAcceptorWrapper::Boring(Arc::new(tls_builder.build()))
             }
         };
