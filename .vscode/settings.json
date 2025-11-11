@@ -2,8 +2,8 @@
 {
   "rust-analyzer.cargo.allFeatures": false,
   "rust-analyzer.cargo.features": [
-    "rt-may",
-    "net-h1-server"
+    "net-h2-server",
+    "rt-tokio"
   ],
   "rust-analyzer.cargo.noDefaultFeatures": true
 }

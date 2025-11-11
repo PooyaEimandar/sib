@@ -44,7 +44,7 @@ it is designed for **real-time streaming**, **low-latency networking**, and **sc
 
 # ⚙️ Build note
 
-When building H1 with the `net-h1-server` feature enabled, you’ll need to set up the LLVM toolchain and related libraries first for boringSSL.
+You’ll need to set up the LLVM toolchain and related libraries first for using boringSSL.
 
 ## 📦 Prerequisites (Ubuntu/Debian)
 
