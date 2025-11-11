@@ -30,8 +30,8 @@ macro_rules! resolve_addr {
 #[derive(Debug, Clone)]
 pub struct H1Config {
     pub io_timeout: std::time::Duration,
-    pub stack_size: usize,
     pub sni: bool,
+    pub stack_size: usize,
 }
 
 #[cfg(feature = "net-h1-server")]
