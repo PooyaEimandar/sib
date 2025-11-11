@@ -1,6 +1,5 @@
 #[cfg(feature = "net-file-server")]
 pub mod file;
-pub mod resolver;
 pub mod server;
 
 #[cfg(any(
