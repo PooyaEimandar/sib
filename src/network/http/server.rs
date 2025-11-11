@@ -30,9 +30,8 @@ macro_rules! resolve_addr {
 #[derive(Debug, Clone)]
 pub struct H1Config {
     pub io_timeout: std::time::Duration,
-    pub sni: bool,
     pub stack_size: usize,
-    pub verify_client_cert: bool,
+    pub sni: bool,
 }
 
 #[cfg(feature = "net-h1-server")]
@@ -42,23 +41,8 @@ impl Default for H1Config {
             io_timeout: std::time::Duration::from_secs(60),
             sni: false,
             stack_size: 1024 * 1024,
-            verify_client_cert: false,
         }
     }
-}
-
-#[cfg(feature = "net-h2-server")]
-#[derive(Debug, Clone)]
-pub enum TlsImpl {
-    Boring,
-    Rustls,
-}
-
-#[cfg(feature = "net-h2-server")]
-#[derive(Clone)]
-enum TlsAcceptorWrapper {
-    Rustls(tokio_rustls::TlsAcceptor),
-    Boring(std::sync::Arc<boring::ssl::SslAcceptor>),
 }
 
 #[cfg(feature = "net-h2-server")]
@@ -75,9 +59,6 @@ pub struct H2Config {
     pub max_header_list_size: u32,
     pub max_sessions: u64,
     pub num_of_shards: usize,
-    pub sni: bool,
-    pub tls_impl: TlsImpl,
-    pub verify_client_cert: bool,
 }
 
 #[cfg(feature = "net-h2-server")]
@@ -95,9 +76,6 @@ impl Default for H2Config {
             max_header_list_size: 32 * 1024,
             max_sessions: 1024,
             num_of_shards: 2,
-            sni: false,
-            tls_impl: TlsImpl::Rustls,
-            verify_client_cert: false,
         }
     }
 }
@@ -182,76 +160,6 @@ fn make_socket(
 
     Ok(sock)
 }
-
-#[cfg(any(feature = "net-h1-server", feature = "net-h2-server"))]
-#[inline]
-fn alpn_wire_format(list: &[&[u8]]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(list.iter().map(|p| 1 + p.len()).sum());
-    for p in list {
-        out.push(p.len() as u8);
-        out.extend_from_slice(p);
-    }
-    out
-}
-
-
-#[cfg(any(feature = "net-h1-server", feature = "net-h2-server"))]
-fn make_boringssl_config(
-    chain_cert_key: &(Option<&[u8]>, &[u8], &[u8]),
-    sni: bool,
-    verify: bool,
-    server_alpn_wire: &[u8], 
-) -> std::io::Result<boring::ssl::SslAcceptorBuilder> {
-    use boring::ssl::{NameType, SniError, SslAcceptor, SslMethod, SslOptions, SslVersion};
-
-    let cert = boring::x509::X509::from_pem(chain_cert_key.1)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("Cert error: {e}")))?;
-    let pkey = boring::pkey::PKey::private_key_from_pem(chain_cert_key.2)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("Key error: {e}")))?;
-
-    let mut builder = SslAcceptor::mozilla_intermediate(SslMethod::tls())
-        .map_err(|e| std::io::Error::other(format!("Builder error: {e}")))?;
-    builder.set_private_key(&pkey)?;
-    builder.set_certificate(&cert)?;
-    if let Some(chain) = chain_cert_key.0 {
-        for extra in boring::x509::X509::stack_from_pem(chain)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("Chain error: {e}")))? {
-            builder.add_extra_chain_cert(extra)?;
-        }
-    }
-    builder.set_min_proto_version(Some(SslVersion::TLS1_2))?;
-    builder.set_max_proto_version(Some(SslVersion::TLS1_3))?;
-    builder.set_options(SslOptions::NO_TICKET);
-    builder.set_session_id_context(b"sib\0")?;
-
-    if verify {
-        builder.set_verify(boring::ssl::SslVerifyMode::PEER | boring::ssl::SslVerifyMode::FAIL_IF_NO_PEER_CERT);
-    } else {
-        builder.set_verify(boring::ssl::SslVerifyMode::NONE);
-    }
-
-    // Server-side ALPN selection
-    let server_list_static: &'static [u8] = Box::leak(server_alpn_wire.to_vec().into_boxed_slice());
-
-    builder.set_alpn_protos(server_list_static)?;
-    builder.set_alpn_select_callback(move |_ssl, client_offered| {
-        boring::ssl::select_next_proto(server_list_static, client_offered)
-            .ok_or(boring::ssl::AlpnError::NOACK)
-    });
-
-    if sni {
-        builder.set_servername_callback(|ssl, _| {
-            if ssl.servername(NameType::HOST_NAME).is_none() {
-                eprintln!("SNI not provided, rejecting connection");
-                return Err(SniError::ALERT_FATAL);
-            }
-            Ok(())
-        });
-    }
-
-    Ok(builder)
-}
-
 
 #[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
 fn make_rustls_config(
@@ -432,8 +340,48 @@ pub trait HFactory: Send + Sync + Sized + 'static {
     ) -> std::io::Result<may::coroutine::JoinHandle<()>> {
         use std::net::Shutdown;
 
-        let alpn = alpn_wire_format(&[b"http/1.1"]);
-        let tls_builder = make_boringssl_config(&chain_cert_key, cfg.sni, cfg.verify_client_cert, &alpn)?;
+        let cert = boring::x509::X509::from_pem(chain_cert_key.1).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("Cert error: {e}"))
+        })?;
+        let pkey = boring::pkey::PKey::private_key_from_pem(chain_cert_key.2).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("Key error: {e}"))
+        })?;
+
+        let mut tls_builder =
+            boring::ssl::SslAcceptor::mozilla_intermediate(boring::ssl::SslMethod::tls())
+                .map_err(|e| std::io::Error::other(format!("Builder error: {e}")))?;
+
+        tls_builder.set_private_key(&pkey)?;
+        tls_builder.set_certificate(&cert)?;
+        if let Some(chain) = chain_cert_key.0 {
+            // add chain
+            for extra in boring::x509::X509::stack_from_pem(chain).map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("Chain error: {e}"),
+                )
+            })? {
+                tls_builder.add_extra_chain_cert(extra)?;
+            }
+        }
+        tls_builder.set_min_proto_version(Some(boring::ssl::SslVersion::TLS1_2))?;
+        tls_builder.set_max_proto_version(Some(boring::ssl::SslVersion::TLS1_3))?;
+        tls_builder.set_options(boring::ssl::SslOptions::NO_TICKET);
+        tls_builder.set_session_id_context(b"sib\0")?;
+        tls_builder.set_alpn_protos(b"\x08http/1.1")?;
+
+        if cfg.sni {
+            tls_builder.set_servername_callback(|ssl_ref, _| {
+                if ssl_ref
+                    .servername(boring::ssl::NameType::HOST_NAME)
+                    .is_none()
+                {
+                    eprintln!("SNI not provided, rejecting connection");
+                    return Err(boring::ssl::SniError::ALERT_FATAL);
+                }
+                Ok(())
+            });
+        }
 
         let stacksize = if cfg.stack_size > 0 {
             cfg.stack_size
@@ -652,25 +600,14 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         // Resolve bind address once
         let socket_addr = resolve_addr!(addr)?;
 
-        let sni = h2_cfg.sni;
-        let verify_client_cert = h2_cfg.verify_client_cert;
+        // Shared TLS acceptor
+        let tls_acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(make_rustls_config(
+            &chain_cert_key,
+            h2_cfg.alpn_protocols.clone(),
+        )?));
+
         let factory = Arc::new(self);
         let h2_cfg_arc = Arc::new(h2_cfg);
-
-        // Shared TLS acceptor
-        let tls_acceptor = match h2_cfg_arc.tls_impl {
-            TlsImpl::Rustls => {
-                TlsAcceptorWrapper::Rustls(tokio_rustls::TlsAcceptor::from(Arc::new(
-                    make_rustls_config(&chain_cert_key, h2_cfg_arc.alpn_protocols.clone())?,
-                )))
-            }
-            TlsImpl::Boring => {
-                let alpn_refs: Vec<&[u8]> = h2_cfg_arc.alpn_protocols.iter().map(|v| v.as_slice()).collect();
-                let server_wire = alpn_wire_format(&alpn_refs);
-                let tls_builder = make_boringssl_config(&chain_cert_key, sni, verify_client_cert, &server_wire)?;
-                TlsAcceptorWrapper::Boring(Arc::new(tls_builder.build()))
-            }
-        };
 
         // Prepare listeners (use your make_socket for each shard)
         let requested_shards = h2_cfg_arc.num_of_shards.max(1);
@@ -747,62 +684,35 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                                     continue;
                                 }
                             };
-                            
+
                             let tls_acceptor = tls_acceptor.clone();
                             let factory = factory.clone();
-                            let h2_cfg = h2_cfg.clone();
-                            
+                            let h2_cfg2 = h2_cfg.clone();
+
                             tokio::task::spawn_local(async move {
                                 let _permit = permit;
 
-                                // TLS handshake based on the acceptor type
-                                match &tls_acceptor {
-                                    TlsAcceptorWrapper::Rustls(acceptor) => {
-                                        let tls_stream = match acceptor.accept(stream).await {
-                                            Ok(s) => s,
-                                            Err(e) => {
-                                                eprintln!(
-                                                    "TLS handshake error (shard {shard_id}) from {peer_addr}: {e}"
-                                                );
-                                                return;
-                                            }
-                                        };
-
-                                        // Serve H2 on this connection
-                                        use crate::network::http::h2_server::serve;
-                                        let service = factory.async_service(shard_id);
-
-                                        if let Err(e) =
-                                            serve(tls_stream, service, &h2_cfg, peer_ip).await
-                                        {
-                                            eprintln!(
-                                                "h2 serve error (shard {shard_id}) from {peer_addr}: {e}"
-                                            );
-                                        }
+                                // TLS handshake
+                                let tls_stream = match tls_acceptor.accept(stream).await {
+                                    Ok(s) => s,
+                                    Err(e) => {
+                                        eprintln!(
+                                            "TLS handshake error (shard {shard_id}) from {peer_addr}: {e}"
+                                        );
+                                        return;
                                     }
-                                    TlsAcceptorWrapper::Boring(acceptor) => {
-                                        let tls_stream = match tokio_boring::accept(acceptor, stream).await {
-                                            Ok(s) => s,
-                                            Err(e) => {
-                                                eprintln!(
-                                                    "TLS handshake error (shard {shard_id}) from {peer_addr}: {e}"
-                                                );
-                                                return;
-                                            }
-                                        };
+                                };
 
-                                        // Serve H2 on this connection
-                                        use crate::network::http::h2_server::serve;
-                                        let service = factory.async_service(shard_id);
+                                // Serve H2 on this connection
+                                use crate::network::http::h2_server::serve;
+                                let service = factory.async_service(shard_id);
 
-                                        if let Err(e) =
-                                            serve(tls_stream, service, &h2_cfg, peer_ip).await
-                                        {
-                                            eprintln!(
-                                                "h2 serve error (shard {shard_id}) from {peer_addr}: {e}"
-                                            );
-                                        }
-                                    }
+                                if let Err(e) =
+                                    serve(tls_stream, service, &h2_cfg2, peer_ip).await
+                                {
+                                    eprintln!(
+                                        "h2 serve error (shard {shard_id}) from {peer_addr}: {e}"
+                                    );
                                 }
                             });
                         }

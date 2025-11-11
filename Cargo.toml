@@ -59,7 +59,7 @@ httpdate = { version = "1.0.3", optional = true, default-features = false }
 may = { version = "0.3.51", optional = true }
 mime = { version = "0.3.17", optional = true }
 mime_guess = { version = "2.0.5", optional = true }
-memmap2 = { version = "0.9.8", optional = true, default-features = false }
+memmap2 = { version = "0.9.9", optional = true, default-features = false }
 once_cell = { version = "1.21.3", optional = true, default-features = false, features = [
     "std",
 ] }
@@ -89,7 +89,6 @@ tokio = { version = "1.48.0", optional = true, default-features = false, feature
     "rt-multi-thread",
     "time",
 ] }
-tokio-boring = { version = "4.19.0", optional = true }
 tokio-rustls = { version = "0.26.4", optional = true, default-features = false, features = [
     "aws-lc-rs",
     "tls12",
@@ -148,7 +147,6 @@ net-h1-server = [
 ]
 net-h2-server = [
     "async-trait",
-    "boring",
     "bytes",
     "dashmap",
     "futures-lite",
@@ -157,7 +155,6 @@ net-h2-server = [
     "rustls-pemfile",
     "rustls",
     "socket2",
-    "tokio-boring",
 ]
 net-h3-server = [
     "async-trait",
