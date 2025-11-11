@@ -32,6 +32,7 @@ pub struct H1Config {
     pub io_timeout: std::time::Duration,
     pub sni: bool,
     pub stack_size: usize,
+    pub verify_client_cert: bool,
 }
 
 #[cfg(feature = "net-h1-server")]
@@ -41,6 +42,7 @@ impl Default for H1Config {
             io_timeout: std::time::Duration::from_secs(60),
             sni: false,
             stack_size: 1024 * 1024,
+            verify_client_cert: false,
         }
     }
 }
@@ -75,6 +77,7 @@ pub struct H2Config {
     pub num_of_shards: usize,
     pub sni: bool,
     pub tls_impl: TlsImpl,
+    pub verify_client_cert: bool,
 }
 
 #[cfg(feature = "net-h2-server")]
@@ -92,8 +95,9 @@ impl Default for H2Config {
             max_header_list_size: 32 * 1024,
             max_sessions: 1024,
             num_of_shards: 2,
-            tls_impl: TlsImpl::Rustls,
             sni: false,
+            tls_impl: TlsImpl::Rustls,
+            verify_client_cert: false,
         }
     }
 }
@@ -195,7 +199,8 @@ fn alpn_wire_format(list: &[&[u8]]) -> Vec<u8> {
 fn make_boringssl_config(
     chain_cert_key: &(Option<&[u8]>, &[u8], &[u8]),
     sni: bool,
-    server_alpn_wire: &[u8], // e.g. h2, http/1.1 in wire format
+    verify: bool,
+    server_alpn_wire: &[u8], 
 ) -> std::io::Result<boring::ssl::SslAcceptorBuilder> {
     use boring::ssl::{NameType, SniError, SslAcceptor, SslMethod, SslOptions, SslVersion};
 
@@ -218,6 +223,12 @@ fn make_boringssl_config(
     builder.set_max_proto_version(Some(SslVersion::TLS1_3))?;
     builder.set_options(SslOptions::NO_TICKET);
     builder.set_session_id_context(b"sib\0")?;
+
+    if verify {
+        builder.set_verify(boring::ssl::SslVerifyMode::PEER | boring::ssl::SslVerifyMode::FAIL_IF_NO_PEER_CERT);
+    } else {
+        builder.set_verify(boring::ssl::SslVerifyMode::NONE);
+    }
 
     // Server-side ALPN selection
     let server_list_static: &'static [u8] = Box::leak(server_alpn_wire.to_vec().into_boxed_slice());
@@ -422,7 +433,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         use std::net::Shutdown;
 
         let alpn = alpn_wire_format(&[b"http/1.1"]);
-        let tls_builder = make_boringssl_config(&chain_cert_key, cfg.sni, &alpn)?;
+        let tls_builder = make_boringssl_config(&chain_cert_key, cfg.sni, cfg.verify_client_cert, &alpn)?;
 
         let stacksize = if cfg.stack_size > 0 {
             cfg.stack_size
@@ -642,6 +653,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         let socket_addr = resolve_addr!(addr)?;
 
         let sni = h2_cfg.sni;
+        let verify_client_cert = h2_cfg.verify_client_cert;
         let factory = Arc::new(self);
         let h2_cfg_arc = Arc::new(h2_cfg);
 
@@ -655,7 +667,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
             TlsImpl::Boring => {
                 let alpn_refs: Vec<&[u8]> = h2_cfg_arc.alpn_protocols.iter().map(|v| v.as_slice()).collect();
                 let server_wire = alpn_wire_format(&alpn_refs);
-                let tls_builder = make_boringssl_config(&chain_cert_key, sni, &server_wire)?;
+                let tls_builder = make_boringssl_config(&chain_cert_key, sni, verify_client_cert, &server_wire)?;
                 TlsAcceptorWrapper::Boring(Arc::new(tls_builder.build()))
             }
         };
