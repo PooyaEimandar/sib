@@ -31,6 +31,7 @@ macro_rules! resolve_addr {
 pub struct H1Config {
     pub io_timeout: std::time::Duration,
     pub stack_size: usize,
+    pub sni: bool,
 }
 
 #[cfg(feature = "net-h1-server")]
@@ -38,6 +39,7 @@ impl Default for H1Config {
     fn default() -> Self {
         Self {
             io_timeout: std::time::Duration::from_secs(60),
+            sni: false,
             stack_size: 1024 * 1024,
         }
     }
@@ -368,8 +370,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         tls_builder.set_session_id_context(b"sib\0")?;
         tls_builder.set_alpn_protos(b"\x08http/1.1")?;
 
-        #[cfg(not(debug_assertions))]
-        {
+        if cfg.sni {
             tls_builder.set_servername_callback(|ssl_ref, _| {
                 if ssl_ref
                     .servername(boring::ssl::NameType::HOST_NAME)
