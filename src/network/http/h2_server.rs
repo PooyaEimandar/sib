@@ -161,7 +161,7 @@ cfg_if::cfg_if! {
                                      .status(http::StatusCode::INTERNAL_SERVER_ERROR)
                                      .header("Content-Type", "text/plain")
                                      .body(http_body_util::Full::new(body).map_err(|never| match never {}).boxed())
-                                     .map_err(|e| std::io::Error::other(e))
+                                     .map_err(std::io::Error::other)
                              }
                          }
                     }
