@@ -230,10 +230,20 @@ impl Session for H2Session {
     }
 
     #[inline]
-    fn write_all_eom(&mut self, _status: &[u8]) -> std::io::Result<()> {
-        Err(std::io::Error::other(
-            "write_all_eom is not supported in H2Session",
-        ))
+    fn write_all_eom(&mut self, status: &[u8]) -> std::io::Result<()> {
+        self.status_code(
+            StatusCode::from_str(std::str::from_utf8(status).map_err(|e| {
+                std::io::Error::other(format!("invalid utf8 status code {}: {}", status.len(), e))
+            })?)
+            .map_err(|e| {
+                std::io::Error::other(format!(
+                    "invalid status code {}: {}",
+                    std::str::from_utf8(status).unwrap_or("<invalid utf8>"),
+                    e
+                ))
+            })?,
+        );
+        self.eom()
     }
 
     #[inline]

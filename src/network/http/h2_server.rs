@@ -54,7 +54,7 @@ cfg_if::cfg_if! {
             S: futures_lite::io::AsyncRead + futures_lite::io::AsyncWrite + Unpin + 'static,
             T: crate::network::http::session::HAsyncService + Send + 'static,
         {
-            let builder = make_server(config);
+            let builder = make_h2_server_builder(config);
             let mut conn: h2::server::Connection<IoStream<S>, bytes::Bytes> = builder
                 .handshake(IoStream(stream))
                 .await
@@ -110,6 +110,72 @@ cfg_if::cfg_if! {
         }
     }
     else if #[cfg(all(feature = "rt-tokio", not(feature = "rt-glommio")))] {
+
+        pub(crate) async fn serve_h1<S, T>(
+            stream: S,
+            service: T,
+            config: &H2Config,
+            peer_addr: std::net::IpAddr,
+        ) -> std::io::Result<()>
+        where
+            S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + 'static,
+            T: crate::network::http::session::HAsyncService + 'static,
+        {
+            use hyper::service::service_fn;
+            use hyper::{Request};
+            use hyper::body::Incoming;
+            use hyper_util::rt::TokioIo;
+            use http_body_util::BodyExt;
+
+            let io = TokioIo::new(stream);
+            let builder = make_h1_server_builder(config);
+
+            let peer_ip = peer_addr;
+            let svc_arc = std::sync::Arc::new(tokio::sync::Mutex::new(service));
+
+            let make_svc = {
+                let svc_arc = svc_arc.clone();
+                move |req: Request<Incoming>| {
+                    let svc_arc = svc_arc.clone();
+                    let peer_ip = peer_ip;
+
+                    async move {
+                        use crate::network::http::h1_session_over_h2::H1SessionOverH2;
+                        let mut sess = H1SessionOverH2::new(req, peer_ip);
+
+                        let mut svc = svc_arc.lock().await;
+                        let result = svc.call(&mut sess).await;
+
+                        let resp = match result {
+                            Ok(()) => {
+                                sess.into_hyper_response().map(|r| r.map(|body| {
+                                    http_body_util::Full::new(body).map_err(|never| match never {}).boxed()
+                                }))
+                            }
+                            Err(e) => {
+                                // fallback 500
+                                let body = bytes::Bytes::from(format!("service error: {e}"));
+
+                                // Create a simple error response directly
+                                Ok(hyper::Response::builder()
+                                    .status(http::StatusCode::INTERNAL_SERVER_ERROR)
+                                    .header("Content-Type", "text/plain")
+                                    .body(http_body_util::Full::new(body).map_err(|never| match never {}).boxed())
+                                    .unwrap())
+                            }
+                        };
+                        resp
+                    }
+                }
+            };
+
+            if let Err(e) = builder.serve_connection(io, service_fn(make_svc)).await {
+                eprintln!("hyper h1 error {peer_addr}: {e}");
+            }
+
+            Ok(())
+        }
+
         pub(crate) async fn serve_h2<S, T>(
             stream: S,
             service: T,
@@ -121,7 +187,7 @@ cfg_if::cfg_if! {
             T: crate::network::http::session::HAsyncService + 'static,
         {
             // make h2 server builder
-            let builder = make_server(config);
+            let builder = make_h2_server_builder(config);
 
             // Handshake H2 connection
             let mut conn = builder.handshake(stream).await.map_err(|e| {
@@ -174,28 +240,18 @@ cfg_if::cfg_if! {
             }
             Ok(())
         }
-
-        pub(crate) async fn serve_h1<S, T>(
-            stream: S,
-            _service: T,
-            _config: &H2Config,
-            peer_addr: std::net::IpAddr,
-        ) -> std::io::Result<()>
-        where
-            S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + 'static,
-            T: crate::network::http::session::HAsyncService + 'static,
-        {
-            let _io = hyper_util::rt::TokioIo::new(stream);
-            let mut builder = hyper::server::conn::http1::Builder::new();
-            builder.keep_alive(true);
-
-            eprintln!("Serving H1 over H2 server from {peer_addr}");
-            Ok(())
-        }
     }
 }
 
-fn make_server(config: &H2Config) -> h2::server::Builder {
+fn make_h1_server_builder(config: &H2Config) -> hyper::server::conn::http1::Builder {
+    let mut builder = hyper::server::conn::http1::Builder::new();
+    builder.keep_alive(config.keep_alive);
+    builder.max_buf_size(config.max_frame_size as usize);
+    builder.max_headers(config.max_header_list_size as usize);
+    builder
+}
+
+fn make_h2_server_builder(config: &H2Config) -> h2::server::Builder {
     let mut builder = h2::server::Builder::new();
     if config.enable_connect_protocol {
         builder.enable_connect_protocol();

@@ -74,8 +74,7 @@ jobs:
         run: cargo build --release --target=${{ matrix.target }} --no-default-features --features "rt-glommio net-h1-server net-h2-server net-h3-server"
 
       - name: Test
-        if: matrix.target == 'x86_64-unknown-linux-gnu'
-        run: cargo test --release --no-default-features --features "rt-glommio net-h1-server net-h2-server net-h3-server"
+        run: cargo test --release --no-default-features --features "rt-tokio net-h2-server"
 
   windows:
     name: Windows x86_64

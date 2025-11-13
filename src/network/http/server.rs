@@ -54,6 +54,7 @@ pub struct H2Config {
     pub initial_connection_window_size: u32,
     pub initial_window_size: u32,
     pub io_timeout: std::time::Duration,
+    pub keep_alive: bool, // for h1 over h2 compatibility
     pub max_concurrent_streams: u32,
     pub max_frame_size: u32,
     pub max_header_list_size: u32,
@@ -71,6 +72,7 @@ impl Default for H2Config {
             initial_connection_window_size: 64 * 1024,
             initial_window_size: 256 * 1024,
             io_timeout: std::time::Duration::from_secs(60),
+            keep_alive: true,
             max_concurrent_streams: 4096,
             max_frame_size: 32 * 1024,
             max_header_list_size: 32 * 1024,
@@ -710,11 +712,12 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                                     .alpn_protocol()
                                     .map(|v| String::from_utf8_lossy(v).to_string());
 
+                                let service = factory.async_service(shard_id);
+
                                  match negotiated.as_deref() {
                                       Some("h2") => {
-                                        // Serve H2 on this connection
+                                        // HTTP/2
                                         use crate::network::http::h2_server::serve_h2;
-                                        let service = factory.async_service(shard_id);
                                         if let Err(e) =
                                             serve_h2(tls_stream, service, &h2_cfg2, peer_ip).await
                                         {
@@ -726,12 +729,11 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                                       _ => {
                                         // HTTP/1.1
                                         use crate::network::http::h2_server::serve_h1;
-                                        let service = factory.async_service(shard_id);
                                         if let Err(e) =
                                             serve_h1(tls_stream, service, &h2_cfg2, peer_ip).await
                                         {
                                             eprintln!(
-                                                "h1 serve error (shard {shard_id}) from {peer_addr}: {e}"
+                                                "h1 over h2 serve error (shard {shard_id}) from {peer_addr}: {e}"
                                             );
                                         }
                                       }
@@ -1711,26 +1713,53 @@ pub mod tests {
 
         std::thread::sleep(std::time::Duration::from_secs(1));
 
-        let client = reqwest::blocking::Client::builder()
-            .danger_accept_invalid_certs(true)
-            .http2_adaptive_window(true)
-            .build()
-            .expect("reqwest client");
+        // test http1 get
+        {
+            let client = reqwest::blocking::Client::builder()
+                .danger_accept_invalid_certs(true)
+                .http1_only()
+                .build()
+                .expect("reqwest client");
 
-        let resp = client
-            .get(format!("https://{}", addr))
-            .version(reqwest::Version::HTTP_2)
-            .body("Hello, World!")
-            .timeout(std::time::Duration::from_millis(300))
-            .send()
-            .expect("reqwest send");
-        eprintln!("Response: {resp:?}");
-        assert!(resp.status().is_success());
+            let resp = client
+                .get(format!("https://{}", addr))
+                .version(reqwest::Version::HTTP_11)
+                .body("Hello, World!")
+                .timeout(std::time::Duration::from_millis(300))
+                .send()
+                .expect("reqwest send");
+            eprintln!("H1 Response: {resp:?}");
+            assert!(resp.status().is_success());
 
-        let body = resp.text().expect("resp text");
-        eprintln!("Response: {body:?}");
-        assert!(body.contains("Echo:"));
-        assert!(body.contains("Hello, World!"));
+            let body = resp.text().expect("resp text");
+            eprintln!("H1 Response: {body:?}");
+            assert!(body.contains("Echo:"));
+            assert!(body.contains("Hello, World!"));
+        }
+
+        // test http2 get
+        {
+            let client = reqwest::blocking::Client::builder()
+                .danger_accept_invalid_certs(true)
+                .http2_adaptive_window(true)
+                .build()
+                .expect("reqwest client");
+
+            let resp = client
+                .get(format!("https://{}", addr))
+                .version(reqwest::Version::HTTP_2)
+                .body("Hello, World!")
+                .timeout(std::time::Duration::from_millis(300))
+                .send()
+                .expect("reqwest send");
+            eprintln!("H2 Response: {resp:?}");
+            assert!(resp.status().is_success());
+
+            let body = resp.text().expect("resp text");
+            eprintln!("H2 Response: {body:?}");
+            assert!(body.contains("Echo:"));
+            assert!(body.contains("Hello, World!"));
+        }
     }
 
     #[cfg(feature = "net-h2-server")]
@@ -1753,26 +1782,52 @@ pub mod tests {
 
         std::thread::sleep(std::time::Duration::from_secs(1));
 
-        let client = reqwest::blocking::Client::builder()
-            .danger_accept_invalid_certs(true)
-            .http2_adaptive_window(true)
-            .build()
-            .expect("reqwest client");
+        // test http1 post
+        {
+            let client = reqwest::blocking::Client::builder()
+                .danger_accept_invalid_certs(true)
+                .http1_only()
+                .build()
+                .expect("reqwest client");
 
-        let resp = client
-            .post(format!("https://{}", addr))
-            .version(reqwest::Version::HTTP_2)
-            .body("Hello, World!")
-            .timeout(std::time::Duration::from_millis(300))
-            .send()
-            .expect("reqwest send");
-        eprintln!("Response: {resp:?}");
-        assert!(resp.status().is_success());
+            let resp = client
+                .post(format!("https://{}", addr))
+                .version(reqwest::Version::HTTP_11)
+                .body("Hello, World!")
+                .timeout(std::time::Duration::from_millis(300))
+                .send()
+                .expect("reqwest send");
+            eprintln!("H1 Response: {resp:?}");
+            assert!(resp.status().is_success());
 
-        let body = resp.text().expect("resp text");
-        eprintln!("Response: {body:?}");
-        assert!(body.contains("Echo:"));
-        assert!(body.contains("Hello, World!"));
+            let body = resp.text().expect("resp text");
+            eprintln!("H1 Response: {body:?}");
+            assert!(body.contains("Echo:"));
+            assert!(body.contains("Hello, World!"));
+        }
+        // test http2 post
+        {
+            let client = reqwest::blocking::Client::builder()
+                .danger_accept_invalid_certs(true)
+                .http2_adaptive_window(true)
+                .build()
+                .expect("reqwest client");
+
+            let resp = client
+                .post(format!("https://{}", addr))
+                .version(reqwest::Version::HTTP_2)
+                .body("Hello, World!")
+                .timeout(std::time::Duration::from_millis(300))
+                .send()
+                .expect("reqwest send");
+            eprintln!("H2 Response: {resp:?}");
+            assert!(resp.status().is_success());
+
+            let body = resp.text().expect("resp text");
+            eprintln!("H2 Response: {body:?}");
+            assert!(body.contains("Echo:"));
+            assert!(body.contains("Hello, World!"));
+        }
     }
 
     #[cfg(feature = "net-h3-server")]
