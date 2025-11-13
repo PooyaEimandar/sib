@@ -243,6 +243,7 @@ cfg_if::cfg_if! {
     }
 }
 
+#[allow(dead_code)]
 fn make_h1_server_builder(config: &H2Config) -> hyper::server::conn::http1::Builder {
     let mut builder = hyper::server::conn::http1::Builder::new();
     builder.keep_alive(config.keep_alive);

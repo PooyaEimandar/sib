@@ -31,7 +31,7 @@ impl H1SessionOverH2 {
 
         {
             let headers = builder.headers_mut().unwrap();
-            headers.extend(self.resp_headers.into_iter());
+            headers.extend(self.resp_headers);
 
             if !headers.contains_key(http::header::CONTENT_LENGTH) {
                 use http::HeaderValue;
@@ -108,7 +108,7 @@ impl Session for H1SessionOverH2 {
 
     #[cfg(feature = "net-h1-server")]
     #[inline]
-    fn req_body(&mut self, timeout: Duration) -> std::io::Result<&[u8]> {
+    fn req_body(&mut self, _timeout: Duration) -> std::io::Result<&[u8]> {
         Err(std::io::Error::other(
             "req_body is not implemented for H1SessionOverH2",
         ))
@@ -122,13 +122,9 @@ impl Session for H1SessionOverH2 {
 
         let data_fut = async {
             match self.req.body_mut().frame().await {
-                Some(Ok(frame)) => {
-                    if let Some(bytes) = frame.data_ref() {
-                        Some(Ok(Bytes::copy_from_slice(bytes)))
-                    } else {
-                        None
-                    }
-                }
+                Some(Ok(frame)) => frame
+                    .data_ref()
+                    .map(|bytes| Ok(Bytes::copy_from_slice(bytes))),
                 Some(Err(e)) => Some(Err(std::io::Error::other(e.to_string()))),
                 None => None,
             }
@@ -189,7 +185,11 @@ impl Session for H1SessionOverH2 {
 
     #[cfg(feature = "net-h3-server")]
     #[inline]
-    async fn send_h3_data(&mut self, chunk: bytes::Bytes, end_stream: bool) -> std::io::Result<()> {
+    async fn send_h3_data(
+        &mut self,
+        _chunk: bytes::Bytes,
+        _end_stream: bool,
+    ) -> std::io::Result<()> {
         Err(std::io::Error::other(
             "send_h3_data is not avaiable for H1SessionOverH2",
         ))

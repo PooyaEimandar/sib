@@ -129,7 +129,7 @@ quinn = { version = "0.11.9", optional = true, default-features = false, feature
 ] }
 
 [features]
-default = ["net-h1-server", "rt-tokio"]
+default = []
 db-fdb = ["foundationdb-sys", "crossbeam"]
 net-file-server = [
     "brotli",
