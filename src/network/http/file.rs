@@ -683,7 +683,9 @@ pub async fn serve_h2<S: Session>(
     if let Some((status, file_path, start, end)) = file_tuple {
         let bytes_to_send = end - start;
 
-        if bytes_to_send >= stream_threshold_and_chunk_size.0 {
+        if bytes_to_send >= stream_threshold_and_chunk_size.0
+            && session.req_http_version() == http::Version::HTTP_2
+        {
             // HTTP/2 streaming
             return serve_h2_streaming(
                 session,
