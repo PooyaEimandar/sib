@@ -146,25 +146,24 @@ cfg_if::cfg_if! {
                         let mut svc = svc_arc.lock().await;
                         let result = svc.call(&mut sess).await;
 
-                        let resp = match result {
-                            Ok(()) => {
-                                sess.into_hyper_response().map(|r| r.map(|body| {
-                                    http_body_util::Full::new(body).map_err(|never| match never {}).boxed()
-                                }))
-                            }
-                            Err(e) => {
-                                // fallback 500
-                                let body = bytes::Bytes::from(format!("service error: {e}"));
+                        match result {
+                             Ok(()) => {
+                                 sess.into_hyper_response().map(|r| r.map(|body| {
+                                     http_body_util::Full::new(body).map_err(|never| match never {}).boxed()
+                                 }))
+                             }
+                             Err(e) => {
+                                 // fallback 500
+                                 let body = bytes::Bytes::from(format!("service error: {e}"));
 
-                                // Create a simple error response directly
-                                Ok(hyper::Response::builder()
-                                    .status(http::StatusCode::INTERNAL_SERVER_ERROR)
-                                    .header("Content-Type", "text/plain")
-                                    .body(http_body_util::Full::new(body).map_err(|never| match never {}).boxed())
-                                    .unwrap())
-                            }
-                        };
-                        resp
+                                 // Create a simple error response directly
+                                 hyper::Response::builder()
+                                     .status(http::StatusCode::INTERNAL_SERVER_ERROR)
+                                     .header("Content-Type", "text/plain")
+                                     .body(http_body_util::Full::new(body).map_err(|never| match never {}).boxed())
+                                     .map_err(|e| std::io::Error::other(e))
+                             }
+                         }
                     }
                 }
             };
