@@ -560,11 +560,11 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                             // Hold for the lifetime of the session
                             let _permit = sess_token;
 
-                            use crate::network::http::h2_server::serve;
+                            use crate::network::http::h2_server::serve_h2;
                             let service = factory_cloned.async_service(shard_id);
 
                             if let Err(e) =
-                                serve(tls_stream, service, &h2_cfg_cloned, peer_ip).await
+                                serve_h2(tls_stream, service, &h2_cfg_cloned, peer_ip).await
                             {
                                 eprintln!("h2 serve error (shard {shard_id}): {e}");
                             }
@@ -703,17 +703,39 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                                     }
                                 };
 
-                                // Serve H2 on this connection
-                                use crate::network::http::h2_server::serve;
-                                let service = factory.async_service(shard_id);
+                                // check negotiated ALPN
+                                let negotiated = tls_stream
+                                    .get_ref()
+                                    .1
+                                    .alpn_protocol()
+                                    .map(|v| String::from_utf8_lossy(v).to_string());
 
-                                if let Err(e) =
-                                    serve(tls_stream, service, &h2_cfg2, peer_ip).await
-                                {
-                                    eprintln!(
-                                        "h2 serve error (shard {shard_id}) from {peer_addr}: {e}"
-                                    );
-                                }
+                                 match negotiated.as_deref() {
+                                      Some("h2") => {
+                                        // Serve H2 on this connection
+                                        use crate::network::http::h2_server::serve_h2;
+                                        let service = factory.async_service(shard_id);
+                                        if let Err(e) =
+                                            serve_h2(tls_stream, service, &h2_cfg2, peer_ip).await
+                                        {
+                                            eprintln!(
+                                                "h2 serve error (shard {shard_id}) from {peer_addr}: {e}"
+                                            );
+                                        }
+                                      },
+                                      _ => {
+                                        // HTTP/1.1
+                                        use crate::network::http::h2_server::serve_h1;
+                                        let service = factory.async_service(shard_id);
+                                        if let Err(e) =
+                                            serve_h1(tls_stream, service, &h2_cfg2, peer_ip).await
+                                        {
+                                            eprintln!(
+                                                "h1 serve error (shard {shard_id}) from {peer_addr}: {e}"
+                                            );
+                                        }
+                                      }
+                                };
                             });
                         }
                         #[allow(unreachable_code)]

@@ -44,7 +44,7 @@ cfg_if::cfg_if! {
             }
         }
 
-        pub(crate) async fn serve<S, T>(
+        pub(crate) async fn serve_h2<S, T>(
             stream: S,
             service: T,
             config: &H2Config,
@@ -110,7 +110,7 @@ cfg_if::cfg_if! {
         }
     }
     else if #[cfg(all(feature = "rt-tokio", not(feature = "rt-glommio")))] {
-        pub(crate) async fn serve<S, T>(
+        pub(crate) async fn serve_h2<S, T>(
             stream: S,
             service: T,
             config: &H2Config,
@@ -172,6 +172,24 @@ cfg_if::cfg_if! {
                     None => break, // connection closed
                 }
             }
+            Ok(())
+        }
+
+        pub(crate) async fn serve_h1<S, T>(
+            stream: S,
+            _service: T,
+            _config: &H2Config,
+            peer_addr: std::net::IpAddr,
+        ) -> std::io::Result<()>
+        where
+            S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + 'static,
+            T: crate::network::http::session::HAsyncService + 'static,
+        {
+            let _io = hyper_util::rt::TokioIo::new(stream);
+            let mut builder = hyper::server::conn::http1::Builder::new();
+            builder.keep_alive(true);
+
+            eprintln!("Serving H1 over H2 server from {peer_addr}");
             Ok(())
         }
     }

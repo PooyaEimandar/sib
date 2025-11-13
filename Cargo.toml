@@ -48,7 +48,7 @@ gstreamer = { version = "0.24.3", optional = true }
 gstreamer-app = { version = "0.24.2", optional = true }
 gstreamer-video = { version = "0.24.3", optional = true }
 h2 = { version = "0.4.12", optional = true, default-features = false }
-heapless = { version = "0.9.1", optional = true, default-features = false }
+heapless = { version = "0.9.2", optional = true, default-features = false }
 hex = { version = "0.4.3", optional = true }
 http = { version = "1.3.1", optional = true, default-features = false, features = [
     "std",
@@ -56,6 +56,15 @@ http = { version = "1.3.1", optional = true, default-features = false, features 
 hmac = { version = "0.12.1", optional = true, default-features = false }
 httparse = { version = "1.10.1", optional = true, default-features = false }
 httpdate = { version = "1.0.3", optional = true, default-features = false }
+hyper = { version = "1.8.0", optional = true, default-features = false, features = [
+    "http1",
+    "server",
+] }
+hyper-util = { version = "0.1.17", optional = true, default-features = false, features = [
+    "tokio",
+    "http1",
+    "server",
+] }
 may = { version = "0.3.51", optional = true }
 mime = { version = "0.3.17", optional = true }
 mime_guess = { version = "2.0.5", optional = true }
@@ -119,7 +128,7 @@ quinn = { version = "0.11.9", optional = true, default-features = false, feature
 ] }
 
 [features]
-default = []
+default = ["net-h1-server", "rt-tokio"]
 db-fdb = ["foundationdb-sys", "crossbeam"]
 net-file-server = [
     "brotli",
@@ -152,6 +161,8 @@ net-h2-server = [
     "futures-lite",
     "h2",
     "http",
+    "hyper",
+    "hyper-util",
     "rustls-pemfile",
     "rustls",
     "socket2",
