@@ -1,12 +1,15 @@
 use crate::network::http::server::H2Config;
-
 cfg_if::cfg_if! {
+    // Glommio runtime (Linux)
     if #[cfg(all(target_os = "linux", feature = "rt-glommio", not(feature = "rt-tokio")))] {
 
-        use core::task::{Context, Poll};
         use core::pin::Pin;
+        use core::task::{Context, Poll};
+
         struct IoStream<S>(pub S);
 
+        // Adapt glommio's AsyncRead/AsyncWrite to the tokio::io traits
+        // that h2 expects.
         impl<S: futures_lite::io::AsyncRead + Unpin> tokio::io::AsyncRead for IoStream<S> {
             fn poll_read(
                 mut self: Pin<&mut Self>,
@@ -35,11 +38,17 @@ cfg_if::cfg_if! {
                 Pin::new(&mut self.0).poll_write(cx, data)
             }
 
-            fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            fn poll_flush(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+            ) -> Poll<std::io::Result<()>> {
                 Pin::new(&mut self.0).poll_flush(cx)
             }
 
-            fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            fn poll_shutdown(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+            ) -> Poll<std::io::Result<()>> {
                 Pin::new(&mut self.0).poll_close(cx)
             }
         }
@@ -54,13 +63,15 @@ cfg_if::cfg_if! {
             S: futures_lite::io::AsyncRead + futures_lite::io::AsyncWrite + Unpin + 'static,
             T: crate::network::http::session::HAsyncService + Send + 'static,
         {
+            use crate::network::http::h2_session::H2Session;
+
             let builder = make_h2_server_builder(config);
             let mut conn: h2::server::Connection<IoStream<S>, bytes::Bytes> = builder
                 .handshake(IoStream(stream))
                 .await
                 .map_err(|e| std::io::Error::other(format!("h2 handshake error: {e}")))?;
 
-            // Share the per-connection service among request tasks
+            // Per-connection service shared among streams
             let svc = std::rc::Rc::new(std::cell::RefCell::new(Some(service)));
 
             while let Some(r) = conn.accept().await {
@@ -68,6 +79,7 @@ cfg_if::cfg_if! {
                     Ok(x) => x,
                     Err(e) => {
                         if e.is_io() {
+                            // connection-level IO error, just stop this conn
                             return Ok(());
                         }
                         break;
@@ -77,8 +89,6 @@ cfg_if::cfg_if! {
                 let svc_rc = std::rc::Rc::clone(&svc);
 
                 glommio::spawn_local(async move {
-                    use crate::network::http::h2_session::H2Session;
-
                     let mut service = loop {
                         if let Some(s) = {
                             let mut guard = svc_rc.borrow_mut();
@@ -89,12 +99,12 @@ cfg_if::cfg_if! {
                         glommio::yield_if_needed().await;
                     };
 
-                    // run the service
+                    // run the service on this H2 stream
                     let result = service
                         .call(&mut H2Session::new(peer_addr, request, respond))
                         .await;
 
-                    // Put the service back for the next request.
+                    // put service back for the next stream
                     *svc_rc.borrow_mut() = Some(service);
 
                     if let Err(e) = result {
@@ -108,72 +118,107 @@ cfg_if::cfg_if! {
 
             Ok(())
         }
-    }
-    else if #[cfg(all(feature = "rt-tokio", not(feature = "rt-glommio")))] {
 
         pub(crate) async fn serve_h1<S, T>(
-            stream: S,
-            service: T,
+            mut stream: S,
+            _service: T,
             config: &H2Config,
-            peer_addr: std::net::IpAddr,
+            _peer_addr: std::net::IpAddr,
         ) -> std::io::Result<()>
         where
-            S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + 'static,
-            T: crate::network::http::session::HAsyncService + 'static,
+            S: futures_lite::io::AsyncRead + futures_lite::io::AsyncWrite + Unpin + 'static,
+            T: crate::network::http::session::HAsyncService + Send + 'static,
         {
-            use hyper::service::service_fn;
-            use hyper::{Request};
-            use hyper::body::Incoming;
-            use hyper_util::rt::TokioIo;
-            use http_body_util::BodyExt;
+            use futures_lite::{AsyncReadExt, AsyncWriteExt};
+            use std::str;
 
-            let io = TokioIo::new(stream);
-            let builder = make_h1_server_builder(config);
+            let mut buf = vec![0u8; 8192];
+            let mut read = 0usize;
 
-            let peer_ip = peer_addr;
-            let svc_arc = std::sync::Arc::new(tokio::sync::Mutex::new(service));
+            loop {
+                let n = stream.read(&mut buf[read..]).await?;
+                if n == 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "connection closed before full request",
+                    ));
+                }
+                read += n;
+                if buf[..read].windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+                if read == buf.len() {
+                    buf.resize(buf.len() * 2, 0);
+                }
+            }
 
-            let make_svc = {
-                let svc_arc = svc_arc.clone();
-                move |req: Request<Incoming>| {
-                    let svc_arc = svc_arc.clone();
-                    let peer_ip = peer_ip;
+            // --- Parse request line + headers (minimal) ---
+            let mut headers = [httparse::EMPTY_HEADER; 32];
+            let mut req = httparse::Request::new(&mut headers);
+            let status = req.parse(&buf[..read]).map_err(|e| {
+                std::io::Error::other(format!("httparse error: {e}"))
+            })?;
 
-                    async move {
-                        use crate::network::http::h1_session_over_h2::H1SessionOverH2;
-                        let mut sess = H1SessionOverH2::new(req, peer_ip);
-
-                        let mut svc = svc_arc.lock().await;
-                        let result = svc.call(&mut sess).await;
-
-                        match result {
-                             Ok(()) => {
-                                 sess.into_hyper_response().map(|r| r.map(|body| {
-                                     http_body_util::Full::new(body).map_err(|never| match never {}).boxed()
-                                 }))
-                             }
-                             Err(e) => {
-                                 // fallback 500
-                                 let body = bytes::Bytes::from(format!("service error: {e}"));
-
-                                 // Create a simple error response directly
-                                 hyper::Response::builder()
-                                     .status(http::StatusCode::INTERNAL_SERVER_ERROR)
-                                     .header("Content-Type", "text/plain")
-                                     .body(http_body_util::Full::new(body).map_err(|never| match never {}).boxed())
-                                     .map_err(std::io::Error::other)
-                             }
-                         }
-                    }
+            let header_len = match status {
+                httparse::Status::Complete(len) => len,
+                httparse::Status::Partial => {
+                    return Err(std::io::Error::other("partial HTTP request"));
                 }
             };
 
-            if let Err(e) = builder.serve_connection(io, service_fn(make_svc)).await {
-                eprintln!("hyper h1 error {peer_addr}: {e}");
+            let method = req.method.unwrap_or("GET");
+            let path = req.path.unwrap_or("/");
+            let version_dbg = match req.version {
+                Some(0) => "HTTP/1.0",
+                Some(1) | _ => "HTTP/1.1",
+            };
+
+            let host = req
+                .headers
+                .iter()
+                .find(|h| h.name.eq_ignore_ascii_case("host"))
+                .and_then(|h| str::from_utf8(h.value).ok())
+                .unwrap_or("");
+
+            let content_length = req
+                .headers
+                .iter()
+                .find(|h| h.name.eq_ignore_ascii_case("content-length"))
+                .and_then(|h| str::from_utf8(h.value).ok())
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(0);
+
+            // --- Read body if present ---
+            let mut body = buf[header_len..read].to_vec();
+            while body.len() < content_length {
+                let mut chunk = vec![0u8; content_length - body.len()];
+                let n = stream.read(&mut chunk).await?;
+                if n == 0 {
+                    break;
+                }
+                body.extend_from_slice(&chunk[..n]);
             }
+
+            let body_str = String::from_utf8_lossy(&body);
+
+            let response_body = format!(
+                "Http version: {version_dbg:?}, Echo: {method:?} {host:?} {path:?}\r\nBody: {body_str:?}"
+            );
+
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: {}\r\n\r\n",
+                response_body.len(),
+                if config.keep_alive { "keep-alive" } else { "close" },
+            );
+
+            stream.write_all(headers.as_bytes()).await?;
+            stream.write_all(response_body.as_bytes()).await?;
+            stream.flush().await?;
 
             Ok(())
         }
+    }
+    else if #[cfg(all(feature = "rt-tokio", not(feature = "rt-glommio")))] {
 
         pub(crate) async fn serve_h2<S, T>(
             stream: S,
@@ -185,6 +230,8 @@ cfg_if::cfg_if! {
             S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + 'static,
             T: crate::network::http::session::HAsyncService + 'static,
         {
+            use crate::network::http::h2_session::H2Session;
+
             // make h2 server builder
             let builder = make_h2_server_builder(config);
 
@@ -201,12 +248,8 @@ cfg_if::cfg_if! {
                 let svc_rc = std::rc::Rc::clone(&svc);
                 match conn.accept().await {
                     Some(Ok((request, respond))) => {
-
-                        // Each request/response stream runs on the same LocalSet thread
+                        // Each H2 stream runs on the same LocalSet thread
                         tokio::task::spawn_local(async move {
-                            use crate::network::http::h2_session::H2Session;
-
-                            // Wait until the connection-level service is available
                             let mut service = loop {
                                 if let Some(s) = {
                                     let mut guard = svc_rc.borrow_mut();
@@ -217,12 +260,10 @@ cfg_if::cfg_if! {
                                 tokio::task::yield_now().await;
                             };
 
-                            // run the service
                             let result = service
                                 .call(&mut H2Session::new(peer_addr, request, respond))
                                 .await;
 
-                            // Put the service back for the next request.
                             *svc_rc.borrow_mut() = Some(service);
 
                             if let Err(e) = result {
@@ -239,16 +280,106 @@ cfg_if::cfg_if! {
             }
             Ok(())
         }
-    }
-}
 
-#[allow(dead_code)]
-fn make_h1_server_builder(config: &H2Config) -> hyper::server::conn::http1::Builder {
-    let mut builder = hyper::server::conn::http1::Builder::new();
-    builder.keep_alive(config.keep_alive);
-    builder.max_buf_size(config.max_frame_size as usize);
-    builder.max_headers(config.max_header_list_size as usize);
-    builder
+        pub(crate) async fn serve_h1<S, T>(
+            mut stream: S,
+            _service: T,
+            config: &H2Config,
+            _peer_addr: std::net::IpAddr,
+        ) -> std::io::Result<()>
+        where
+            S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + 'static,
+            T: crate::network::http::session::HAsyncService + 'static,
+        {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            use std::str;
+
+            let mut buf = vec![0u8; 8192];
+            let mut read = 0usize;
+
+            loop {
+                let n = stream.read(&mut buf[read..]).await?;
+                if n == 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "connection closed before full request",
+                    ));
+                }
+                read += n;
+                if buf[..read].windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+                if read == buf.len() {
+                    buf.resize(buf.len() * 2, 0);
+                }
+            }
+
+            // --- Parse request line + headers ---
+            let mut headers = [httparse::EMPTY_HEADER; 32];
+            let mut req = httparse::Request::new(&mut headers);
+            let status = req.parse(&buf[..read]).map_err(|e| {
+                std::io::Error::other(format!("httparse error: {e}"))
+            })?;
+
+            let header_len = match status {
+                httparse::Status::Complete(len) => len,
+                httparse::Status::Partial => {
+                    return Err(std::io::Error::other("partial HTTP request"));
+                }
+            };
+
+            let method = req.method.unwrap_or("GET");
+            let path = req.path.unwrap_or("/");
+            let version_dbg = match req.version {
+                Some(0) => "HTTP/1.0",
+                Some(1) | _ => "HTTP/1.1",
+            };
+
+            let host = req
+                .headers
+                .iter()
+                .find(|h| h.name.eq_ignore_ascii_case("host"))
+                .and_then(|h| str::from_utf8(h.value).ok())
+                .unwrap_or("");
+
+            let content_length = req
+                .headers
+                .iter()
+                .find(|h| h.name.eq_ignore_ascii_case("content-length"))
+                .and_then(|h| str::from_utf8(h.value).ok())
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(0);
+
+            // --- Read body if present ---
+            let mut body = buf[header_len..read].to_vec();
+            while body.len() < content_length {
+                let mut chunk = vec![0u8; content_length - body.len()];
+                let n = stream.read(&mut chunk).await?;
+                if n == 0 {
+                    break;
+                }
+                body.extend_from_slice(&chunk[..n]);
+            }
+
+            let body_str = String::from_utf8_lossy(&body);
+
+            let response_body = format!(
+                "Http version: {version_dbg:?}, Echo: {method:?} {host:?} {path:?}\r\nBody: {body_str:?}"
+            );
+
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: {}\r\n\r\n",
+                response_body.len(),
+                if config.keep_alive { "keep-alive" } else { "close" },
+            );
+
+            stream.write_all(headers.as_bytes()).await?;
+            stream.write_all(response_body.as_bytes()).await?;
+            stream.flush().await?;
+
+            Ok(())
+        }
+    }
 }
 
 fn make_h2_server_builder(config: &H2Config) -> h2::server::Builder {

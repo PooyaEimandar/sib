@@ -52,6 +52,8 @@ where
     status_set: bool,
     // status line + Server + Date + CRLF (tiny, on-stack)
     status_buf: heapless::Vec<u8, 192>,
+    // whether in streaming mode
+    streaming: bool,
 }
 
 #[async_trait::async_trait(?Send)]
@@ -111,6 +113,16 @@ where
     #[inline]
     fn req_path(&self) -> String {
         self.req.path.unwrap_or_default().into()
+    }
+
+    #[inline]
+    fn req_query(&self) -> String {
+        if let Some(path) = self.req.path {
+            if let Some((_, query)) = path.split_once('?') {
+                return query.to_string();
+            }
+        }
+        String::new()
     }
 
     #[inline]
@@ -259,6 +271,75 @@ where
         self
     }
 
+    #[cfg(feature = "net-h1-server")]
+    fn start_h1_streaming(&mut self) -> std::io::Result<()> {
+        use std::io::{ErrorKind, IoSlice};
+
+        if self.streaming {
+            // This usually means a logic bug (trying to start twice)
+            return Err(std::io::Error::other(
+                "start_h1_streaming called while already streaming",
+            ));
+        }
+
+        if !self.status_set {
+            // If caller forgot, keep your safety net:
+            self.status_code(http::StatusCode::OK);
+        }
+
+        // End of headers
+        self.rsp_buf.extend_from_slice(CRLF);
+
+        let mut off_status = 0usize;
+        let mut off_body = 0usize;
+
+        loop {
+            let status = &self.status_buf[off_status..];
+            let body = &self.rsp_buf[off_body..];
+
+            if status.is_empty() && body.is_empty() {
+                break;
+            }
+
+            let bufs = if !status.is_empty() && !body.is_empty() {
+                [IoSlice::new(status), IoSlice::new(body)]
+            } else if !status.is_empty() {
+                [IoSlice::new(status), IoSlice::new(&[])]
+            } else {
+                [IoSlice::new(body), IoSlice::new(&[])]
+            };
+
+            match self.stream.write_vectored(&bufs) {
+                Ok(0) => {
+                    return Err(std::io::Error::other(
+                        "write_vectored got zero in start_h1_streaming",
+                    ));
+                }
+                Ok(n) => {
+                    let status_len = status.len();
+                    if n < status_len {
+                        off_status += n;
+                    } else {
+                        off_status = status_len;
+                        off_body += n - status_len;
+                    }
+                }
+                Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
+                    may::coroutine::yield_now();
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        // headers sent; clear, mark streaming
+        self.status_buf.clear();
+        self.rsp_buf.clear();
+        self.rsp_headers_len = 0;
+        self.streaming = true;
+
+        Ok(())
+    }
+
     #[cfg(feature = "net-h2-server")]
     #[inline]
     fn start_h2_streaming(&mut self) -> std::io::Result<super::h2_session::H2Stream> {
@@ -273,6 +354,41 @@ where
         Err(std::io::Error::other(
             "start_h3_streaming is not supported in H1Session",
         ))
+    }
+
+    #[cfg(feature = "net-h1-server")]
+    fn send_h1_data(&mut self, chunk: &[u8], end_stream: bool) -> std::io::Result<()> {
+        if !self.streaming {
+            // Safer to fail fast instead of implicitly starting:
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "send_h1_data called before start_h1_streaming",
+            ));
+        }
+
+        let mut data = chunk;
+        while !data.is_empty() {
+            match self.stream.write(data) {
+                Ok(0) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WriteZero,
+                        "send_h1_data got write zero",
+                    ));
+                }
+                Ok(n) => data = &data[n..],
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    may::coroutine::yield_now();
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        if end_stream {
+            // end of response; ready for next request on keep-alive
+            self.streaming = false;
+        }
+
+        Ok(())
     }
 
     #[cfg(feature = "net-h3-server")]
@@ -352,6 +468,16 @@ where
     fn eom(&mut self) -> std::io::Result<()> {
         use std::io::{ErrorKind, IoSlice};
 
+        if self.streaming {
+            // In streaming mode, headers+body were already flushed.
+            // Nothing to do; ensure clean state for next response.
+            self.rsp_buf.clear();
+            self.status_buf.clear();
+            self.status_set = false;
+            self.streaming = false;
+            return Ok(());
+        }
+
         if !self.status_set {
             // default 200 if nothing set yet
             self.status_code(http::StatusCode::OK);
@@ -378,7 +504,7 @@ where
             };
 
             match self.stream.write_vectored(&bufs) {
-                Ok(0) => return Err(io::Error::new(ErrorKind::WriteZero, "write zero")),
+                Ok(0) => return Err(io::Error::new(ErrorKind::WriteZero, "h1 eom write zero")),
                 Ok(n) => {
                     let s1_len = s1.len();
                     if n < s1_len {
@@ -727,6 +853,7 @@ where
         stream,
         status_set: false,
         status_buf: heapless::Vec::new(),
+        streaming: false,
     }))
 }
 

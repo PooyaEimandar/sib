@@ -507,7 +507,6 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                         }
                     };
 
-                // Per-shard concurrency budget
                 println!("Shard {shard_id} listening for H2/TLS on {socket_addr}");
 
                 let sem = std::rc::Rc::new(glommio::sync::Semaphore::new(h2_cfg.max_sessions));
@@ -534,7 +533,6 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                     // Set no delay
                     let _ = stream.set_nodelay(true);
 
-                    // Rate-limit check
                     let peer_ip = stream
                         .peer_addr()
                         .unwrap_or_else(|_| {
@@ -645,108 +643,119 @@ pub trait HFactory: Send + Sync + Sized + 'static {
             let factory = factory.clone();
             let h2_cfg = h2_cfg_arc.clone();
 
-            handles.push(std::thread::Builder::new()
-            .name(format!("h2-shard-{shard_id}"))
-            .spawn(move || -> std::io::Result<()> {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()?;
+            handles.push(
+            std::thread::Builder::new()
+                .name(format!("h2-shard-{shard_id}"))
+                .spawn(move || -> std::io::Result<()> {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()?;
 
-                rt.block_on(async move {
-                    let listener = TcpListener::from_std(std_listener)
-                        .map_err(|e| std::io::Error::other(format!("tokio from_std: {e}")))?;
+                    rt.block_on(async move {
+                        let listener = TcpListener::from_std(std_listener)
+                            .map_err(|e| std::io::Error::other(format!("tokio from_std: {e}")))?;
 
-                    eprintln!(
-                        "Tokio H2/TLS shard {shard_id} listening on {}",
-                        listener.local_addr().map_err(|e| std::io::Error::other(format!("local_addr: {e}")))?,
-                    );
+                        eprintln!(
+                            "Tokio H2/TLS shard {shard_id} listening on {}",
+                            listener
+                                .local_addr()
+                                .map_err(|e| {
+                                    std::io::Error::other(format!("local_addr: {e}"))
+                                })?,
+                        );
 
-                    // Per-shard concurrency guard
-                    let sem = Arc::new(Semaphore::new(h2_cfg.max_sessions as usize));
-                    let local = tokio::task::LocalSet::new();
+                        // Per-shard concurrency guard
+                        let sem = Arc::new(Semaphore::new(h2_cfg.max_sessions as usize));
+                        let local = tokio::task::LocalSet::new();
 
-                    local.run_until(async move {
-                        loop {
-                            let (mut stream, peer_addr) = match listener.accept().await {
-                                Ok(x) => x,
-                                Err(e) => {
-                                    eprintln!("accept error (shard {shard_id}): {e}");
-                                    continue;
-                                }
-                            };
-
-                            let _ = stream.set_nodelay(true);
-                            let peer_ip = peer_addr.ip();
-
-                            // Try-acquire a session slot
-                            let permit = match sem.clone().try_acquire_owned() {
-                                Ok(p) => p,
-                                Err(_) => {
-                                    let _ = stream.shutdown().await;
-                                    continue;
-                                }
-                            };
-
-                            let tls_acceptor = tls_acceptor.clone();
-                            let factory = factory.clone();
-                            let h2_cfg2 = h2_cfg.clone();
-
-                            tokio::task::spawn_local(async move {
-                                let _permit = permit;
-
-                                // TLS handshake
-                                let tls_stream = match tls_acceptor.accept(stream).await {
-                                    Ok(s) => s,
-                                    Err(e) => {
-                                        eprintln!(
-                                            "TLS handshake error (shard {shard_id}) from {peer_addr}: {e}"
-                                        );
-                                        return;
-                                    }
-                                };
-
-                                // check negotiated ALPN
-                                let negotiated = tls_stream
-                                    .get_ref()
-                                    .1
-                                    .alpn_protocol()
-                                    .map(|v| String::from_utf8_lossy(v).to_string());
-
-                                let service = factory.async_service(shard_id);
-
-                                 match negotiated.as_deref() {
-                                      Some("h2") => {
-                                        // HTTP/2
-                                        use crate::network::http::h2_server::serve_h2;
-                                        if let Err(e) =
-                                            serve_h2(tls_stream, service, &h2_cfg2, peer_ip).await
-                                        {
-                                            eprintln!(
-                                                "h2 serve error (shard {shard_id}) from {peer_addr}: {e}"
-                                            );
+                        local
+                            .run_until(async move {
+                                loop {
+                                    let (mut stream, peer_addr) = match listener.accept().await {
+                                        Ok(x) => x,
+                                        Err(e) => {
+                                            eprintln!("accept error (shard {shard_id}): {e}");
+                                            continue;
                                         }
-                                      },
-                                      _ => {
-                                        // HTTP/1.1
-                                        use crate::network::http::h2_server::serve_h1;
-                                        if let Err(e) =
-                                            serve_h1(tls_stream, service, &h2_cfg2, peer_ip).await
-                                        {
-                                            eprintln!(
-                                                "h1 over h2 serve error (shard {shard_id}) from {peer_addr}: {e}"
-                                            );
+                                    };
+
+                                    let _ = stream.set_nodelay(true);
+                                    let peer_ip = peer_addr.ip();
+
+                                    // Try-acquire a session slot
+                                    let permit = match sem.clone().try_acquire_owned() {
+                                        Ok(p) => p,
+                                        Err(_) => {
+                                            let _ = stream.shutdown().await;
+                                            continue;
                                         }
-                                      }
-                                };
-                            });
-                        }
-                        #[allow(unreachable_code)]
-                        Ok::<(), std::io::Error>(())
-                    }).await
-                })?;
+                                    };
+
+                                    let tls_acceptor = tls_acceptor.clone();
+                                    let factory = factory.clone();
+                                    let h2_cfg2 = h2_cfg.clone();
+
+                                    tokio::task::spawn_local(async move {
+                                        let _permit = permit;
+
+                                        // TLS handshake
+                                        let tls_stream = match tls_acceptor.accept(stream).await {
+                                            Ok(s) => s,
+                                            Err(e) => {
+                                                eprintln!(
+                                                    "TLS handshake error (shard {shard_id}) from {peer_addr}: {e}"
+                                                );
+                                                return;
+                                            }
+                                        };
+
+                                        // check negotiated ALPN
+                                        let negotiated = tls_stream
+                                            .get_ref()
+                                            .1
+                                            .alpn_protocol()
+                                            .map(|v| String::from_utf8_lossy(v).to_string());
+
+                                        match negotiated.as_deref() {
+                                            Some("h2") => {
+                                                use crate::network::http::h2_server::serve_h2;
+
+                                                let service = factory.async_service(shard_id);
+
+                                                if let Err(e) = serve_h2(
+                                                    tls_stream,
+                                                    service,
+                                                    &h2_cfg2,
+                                                    peer_ip,
+                                                )
+                                                .await
+                                                {
+                                                    eprintln!(
+                                                        "h2 serve error (shard {shard_id}) from {peer_addr}: {e}"
+                                                    );
+                                                }
+                                            }
+                                            _ => {
+                                                use crate::network::http::h2_server::serve_h1;
+                                                let service = factory.async_service(shard_id);
+                                                if let Err(e) = serve_h1(tls_stream, service, &h2_cfg2, peer_ip).await {
+                                                    eprintln!(
+                                                        "h1 fallback serve error (shard {shard_id}) from {peer_addr}: {e}"
+                                                    );
+                                                }
+                                            }
+                                        };
+                                    });
+                                }
+                                #[allow(unreachable_code)]
+                                Ok::<(), std::io::Error>(())
+                            })
+                            .await
+                    })?;
 
                 Ok(())
-            })?);
+            })?,
+        );
         }
 
         // Typical server behavior: block by joining the shard threads

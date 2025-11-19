@@ -11,6 +11,8 @@ pub struct H2Session {
     res_status: StatusCode,
     resp_headers: HeaderMap,
     resp_body: Bytes,
+    // H1-over-H2 streaming mode
+    h1_stream: Option<H2Stream>,
 }
 
 pub struct H2Stream {
@@ -18,27 +20,23 @@ pub struct H2Stream {
 }
 
 impl H2Stream {
-    /// Get the HTTP/2 stream ID
     pub fn stream_id(&self) -> u32 {
         self.stream.stream_id().as_u32()
     }
 
-    /// get capacity
     pub fn capacity(&self) -> usize {
         self.stream.capacity()
     }
 
-    /// Request to reserve capacity to send data
     pub fn reserve_capacity(&mut self, size: usize) {
         self.stream.reserve_capacity(size);
     }
 
-    /// Async: wait until the peer grants more capacity
     pub async fn next_capacity(&mut self) -> std::io::Result<usize> {
         use futures_lite::future::poll_fn;
         match poll_fn(|cx| self.stream.poll_capacity(cx)).await {
             Some(res) => {
-                res.map_err(|e| std::io::Error::other(format!("failed to poll capacity: {}", e)))
+                res.map_err(|e| std::io::Error::other(format!("failed to poll capacity: {e}")))
             }
             None => Err(std::io::Error::other(
                 "h2 stream capacity == None (reset/closed)",
@@ -46,14 +44,12 @@ impl H2Stream {
         }
     }
 
-    /// Send a chunk of data. If `end_stream` is true, this also ends the stream.
     pub fn send_data(&mut self, data: Bytes, end_stream: bool) -> std::io::Result<()> {
         self.stream
             .send_data(data, end_stream)
             .map_err(|e| std::io::Error::other(format!("failed to send data frame: {e}")))
     }
 
-    /// Send a RST_STREAM with the given reason code.
     pub fn send_reset(&mut self, reason: u32) {
         self.stream.send_reset(reason.into());
     }
@@ -72,6 +68,7 @@ impl H2Session {
             res_status: StatusCode::OK,
             resp_headers: HeaderMap::new(),
             resp_body: Bytes::new(),
+            h1_stream: None,
         }
     }
 }
@@ -85,13 +82,11 @@ impl Session for H2Session {
 
     #[inline]
     fn req_host(&self) -> Option<(String, Option<u16>)> {
-        // Prefer :authority (exposed as URI authority)
         if let Some(a) = self.req.uri().authority()
             && let Some(x) = super::server::parse_authority(a.as_str())
         {
             return Some(x);
         }
-        // Fallback to Host header if a client sent one
         if let Some(hv) = self.req.headers().get(http::header::HOST)
             && let Ok(s) = hv.to_str()
             && let Some(x) = super::server::parse_authority(s.trim())
@@ -113,7 +108,12 @@ impl Session for H2Session {
 
     #[inline]
     fn req_path(&self) -> String {
-        self.req.uri().path().into()
+        self.req.uri().path().to_string()
+    }
+
+    #[inline]
+    fn req_query(&self) -> String {
+        self.req.uri().query().unwrap_or("").to_string()
     }
 
     #[inline]
@@ -127,13 +127,13 @@ impl Session for H2Session {
     }
 
     #[inline]
-    fn req_header(&self, header: &HeaderName) -> Option<http::HeaderValue> {
+    fn req_header(&self, header: &HeaderName) -> Option<HeaderValue> {
         self.req.headers().get(header).cloned()
     }
 
     #[cfg(feature = "net-h1-server")]
     #[inline]
-    fn req_body(&mut self, _timeout: std::time::Duration) -> std::io::Result<&[u8]> {
+    fn req_body(&mut self, _timeout: Duration) -> std::io::Result<&[u8]> {
         Err(std::io::Error::other(
             "req_body_h1 is not supported in H2Session",
         ))
@@ -146,7 +146,7 @@ impl Session for H2Session {
             match self.req.body_mut().data().await {
                 Some(Ok(bytes)) => Some(Ok(bytes)),
                 Some(Err(e)) => Some(Err(std::io::Error::other(e.to_string()))),
-                None => None, // peer ended stream, no more data
+                None => None,
             }
         };
 
@@ -160,8 +160,7 @@ impl Session for H2Session {
                     )))
                 };
                 race(data_fut, timeout_fut).await
-            }
-            else if #[cfg(feature = "rt-tokio")] {
+            } else if #[cfg(feature = "rt-tokio")] {
                 let timeout_fut = async {
                     tokio::time::sleep(timeout).await;
                     Some(Err(std::io::Error::new(
@@ -170,22 +169,48 @@ impl Session for H2Session {
                     )))
                 };
                 race(data_fut, timeout_fut).await
-            }
-            else {
+            } else {
                 compile_error!("Either feature `rt-glommio` or `rt-tokio` must be enabled to use h2 server.");
             }
         }
     }
 
-    /// Start an HTTP/2 streaming response: send headers now, return a `H2Stream`
-    /// so the caller later can push data frames and decide when to end the stream.
+    #[inline]
+    fn start_h1_streaming(&mut self) -> std::io::Result<()> {
+        use std::io;
+
+        // HEADERS without Content-Length (H2 DATA frames will follow)
+        let mut builder = http::Response::builder().status(self.res_status);
+        {
+            let h = builder.headers_mut().ok_or_else(|| {
+                io::Error::other("failed to get mutable headers from response builder")
+            })?;
+            h.extend(self.resp_headers.drain());
+        }
+
+        let resp = builder
+            .body(())
+            .map_err(|e| io::Error::other(format!("failed to build H1-over-H2 response: {e}")))?;
+
+        // send HEADERS; keep stream open
+        let send = self
+            .res
+            .send_response(resp, false)
+            .map_err(|e| io::Error::other(format!("failed to send H1-over-H2 headers: {e}")))?;
+
+        self.h1_stream = Some(H2Stream { stream: send });
+
+        // reset for reuse
+        self.res_status = StatusCode::OK;
+        self.resp_body = Bytes::new();
+
+        Ok(())
+    }
+
     #[inline]
     fn start_h2_streaming(&mut self) -> std::io::Result<H2Stream> {
         let mut builder = http::Response::builder().status(self.res_status);
-
         {
-            // Move headers in (no clones)
-            // no Content-Length or Transfer-Encoding for streaming
             let h = builder.headers_mut().ok_or_else(|| {
                 std::io::Error::other("failed to get mutable headers from response builder")
             })?;
@@ -196,13 +221,11 @@ impl Session for H2Session {
             .body(())
             .map_err(|e| std::io::Error::other(format!("failed to build body response: {e}")))?;
 
-        // more frames will be sent later
         let send = self
             .res
             .send_response(resp, false)
             .map_err(|e| std::io::Error::other(format!("failed to send frame headers: {e}")))?;
 
-        // reset for reuse
         self.res_status = StatusCode::OK;
         self.resp_body = Bytes::new();
 
@@ -215,6 +238,27 @@ impl Session for H2Session {
         Err(std::io::Error::other(
             "start_h3_streaming is not supported in H2Session",
         ))
+    }
+
+    #[inline]
+    fn send_h1_data(&mut self, chunk: &[u8], end_stream: bool) -> std::io::Result<()> {
+        use std::io;
+
+        let stream = self
+            .h1_stream
+            .as_mut()
+            .ok_or_else(|| io::Error::other("send_h1_data called before start_h1_streaming"))?;
+
+        stream.reserve_capacity(chunk.len());
+
+        let data = Bytes::copy_from_slice(chunk);
+        stream.send_data(data, end_stream)?;
+
+        if end_stream {
+            self.h1_stream = None;
+        }
+
+        Ok(())
     }
 
     #[cfg(feature = "net-h3-server")]
@@ -260,7 +304,6 @@ impl Session for H2Session {
 
     #[inline]
     fn header_str(&mut self, name: &str, value: &str) -> std::io::Result<&mut Self> {
-        use http::HeaderValue;
         let header_name = HeaderName::from_str(name).map_err(|e| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -299,10 +342,8 @@ impl Session for H2Session {
         self
     }
 
-    // end of message: send the response all at once (headers + body)
     #[inline]
     fn eom(&mut self) -> std::io::Result<()> {
-        // Build HEADERS
         let mut builder = http::Response::builder().status(self.res_status);
         {
             let header_map = builder.headers_mut().ok_or_else(|| {
@@ -310,9 +351,7 @@ impl Session for H2Session {
             })?;
             header_map.extend(self.resp_headers.drain());
 
-            // Add Content-Length when sending a single buffered body
             if !header_map.contains_key(http::header::CONTENT_LENGTH) {
-                use http::HeaderValue;
                 let len = self.resp_body.len();
                 header_map.insert(
                     http::header::CONTENT_LENGTH,
@@ -323,35 +362,29 @@ impl Session for H2Session {
             }
         }
 
-        // Body is sent as DATA frames by h2 from this Bytes
         let resp = builder
             .body(())
             .map_err(|e| std::io::Error::other(format!("build resp: {e}")))?;
 
-        // Send headers
         let mut send = self
             .res
             .send_response(resp, false)
             .map_err(|e| std::io::Error::other(format!("send headers: {e}")))?;
 
-        // Send body and END_STREAM
         send.send_data(std::mem::take(&mut self.resp_body), true)
             .map_err(|e| std::io::Error::other(format!("send body: {e}")))?;
 
-        // reset for reuse
         self.res_status = StatusCode::OK;
         self.resp_body = Bytes::new();
 
         Ok(())
     }
 
-    // end of message: send the response (headers + body) asyncronously
     #[inline]
     async fn eom_async(&mut self) -> std::io::Result<()> {
         use futures_lite::future::poll_fn;
         use std::io;
 
-        // Build HEADERS
         let mut builder = http::Response::builder().status(self.res_status);
         {
             let h = builder
@@ -363,27 +396,22 @@ impl Session for H2Session {
             .body(())
             .map_err(|e| io::Error::other(format!("build resp: {e}")))?;
 
-        // Decide end_stream on HEADERS if body is empty
         let mut body = std::mem::take(&mut self.resp_body);
         let end_on_headers = body.is_empty();
 
-        // Send HEADERS (end_stream=true if no body)
         let mut send = self
             .res
             .send_response(resp, end_on_headers)
             .map_err(|e| io::Error::other(format!("send headers: {e}")))?;
 
         if end_on_headers {
-            // No DATA frames; stream already closed cleanly.
-            self.res_status = http::StatusCode::OK;
+            self.res_status = StatusCode::OK;
             return Ok(());
         }
 
-        // Stream BODY with flow control
         send.reserve_capacity(body.len());
 
         while !body.is_empty() {
-            // Wait for capacity when needed
             let cap = if send.capacity() == 0 {
                 match poll_fn(|cx| send.poll_capacity(cx)).await {
                     Some(Ok(n)) => n,
@@ -408,8 +436,7 @@ impl Session for H2Session {
             tokio::task::yield_now().await;
         }
 
-        // Reset for potential reuse
-        self.res_status = http::StatusCode::OK;
+        self.res_status = StatusCode::OK;
         Ok(())
     }
 
@@ -429,28 +456,36 @@ impl Session for H2Session {
     #[cfg(all(feature = "net-ws-server", feature = "net-h1-server"))]
     #[inline]
     fn ws_accept(&mut self) -> std::io::Result<()> {
-        Err(io::Error::other("ws_accept is not supported in H2Session"))
+        Err(std::io::Error::other(
+            "ws_accept is not supported in H2Session",
+        ))
     }
 
     #[cfg(all(feature = "net-ws-server", feature = "net-h1-server"))]
     #[inline]
     fn ws_read(&mut self) -> std::io::Result<(crate::network::http::ws::OpCode, &[u8], bool)> {
-        Err(io::Error::other("ws_read is not supported in H2Session"))
+        Err(std::io::Error::other(
+            "ws_read is not supported in H2Session",
+        ))
     }
 
     #[cfg(all(feature = "net-ws-server", feature = "net-h1-server"))]
     #[inline]
     fn ws_write(
         &mut self,
-        op: crate::network::http::ws::OpCode,
-        payload: &[u8],
-        fin: bool,
+        _op: crate::network::http::ws::OpCode,
+        _payload: &[u8],
+        _fin: bool,
     ) -> std::io::Result<()> {
-        Err(io::Error::other("ws_write is not supported in H2Session"))
+        Err(std::io::Error::other(
+            "ws_write is not supported in H2Session",
+        ))
     }
 
     #[cfg(all(feature = "net-ws-server", feature = "net-h1-server"))]
-    fn ws_close(&mut self, reason: Option<&[u8]>) -> std::io::Result<()> {
-        Err(io::Error::other("ws_close is not supported in H2Session"))
+    fn ws_close(&mut self, _reason: Option<&[u8]>) -> std::io::Result<()> {
+        Err(std::io::Error::other(
+            "ws_close is not supported in H2Session",
+        ))
     }
 }

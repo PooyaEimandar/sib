@@ -7,6 +7,7 @@ pub trait Session {
     fn req_method(&self) -> http::Method;
     fn req_method_str(&self) -> Option<&str>;
     fn req_path(&self) -> String;
+    fn req_query(&self) -> String;
     fn req_http_version(&self) -> http::Version;
     fn req_headers(&self) -> http::HeaderMap;
     fn req_header(&self, header: &http::HeaderName) -> Option<http::HeaderValue>;
@@ -24,11 +25,17 @@ pub trait Session {
 
     fn status_code(&mut self, status: http::StatusCode) -> &mut Self;
 
+    #[cfg(any(feature = "net-h1-server", feature = "net-h2-server"))]
+    fn start_h1_streaming(&mut self) -> std::io::Result<()>;
+
     #[cfg(feature = "net-h2-server")]
     fn start_h2_streaming(&mut self) -> std::io::Result<super::h2_session::H2Stream>;
 
     #[cfg(feature = "net-h3-server")]
     async fn start_h3_streaming(&mut self) -> std::io::Result<()>;
+
+    #[cfg(any(feature = "net-h1-server", feature = "net-h2-server"))]
+    fn send_h1_data(&mut self, chunk: &[u8], end_stream: bool) -> std::io::Result<()>;
 
     #[cfg(feature = "net-h3-server")]
     async fn send_h3_data(&mut self, chunk: bytes::Bytes, end_stream: bool) -> std::io::Result<()>;
