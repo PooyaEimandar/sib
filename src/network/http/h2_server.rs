@@ -170,7 +170,7 @@ cfg_if::cfg_if! {
             let path = req.path.unwrap_or("/");
             let version_dbg = match req.version {
                 Some(0) => "HTTP/1.0",
-                Some(1) | _ => "HTTP/1.1",
+                _ => "HTTP/1.1",
             };
 
             let host = req
@@ -332,7 +332,7 @@ cfg_if::cfg_if! {
             let path = req.path.unwrap_or("/");
             let version_dbg = match req.version {
                 Some(0) => "HTTP/1.0",
-                Some(1) | _ => "HTTP/1.1",
+                _ => "HTTP/1.1",
             };
 
             let host = req
