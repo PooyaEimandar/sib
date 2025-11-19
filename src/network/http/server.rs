@@ -475,10 +475,12 @@ pub trait HFactory: Send + Sync + Sized + 'static {
     ) -> std::io::Result<()> {
         // get socket address
         let socket_addr = resolve_addr!(addr)?;
+
         // create tls acceptor
         let tls_acceptor = futures_rustls::TlsAcceptor::from(std::sync::Arc::new(
             make_rustls_config(&chain_cert_key, h2_cfg.alpn_protocols.clone())?,
         ));
+
         let factory = std::sync::Arc::new(self);
 
         glommio::LocalExecutorPoolBuilder::new(glommio::PoolPlacement::MaxSpread(
@@ -509,6 +511,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
 
                 println!("Shard {shard_id} listening for H2/TLS on {socket_addr}");
 
+                // Per-shard session limiter
                 let sem = std::rc::Rc::new(glommio::sync::Semaphore::new(h2_cfg.max_sessions));
 
                 loop {
@@ -548,6 +551,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                         Ok(s) => s,
                         Err(e) => {
                             eprintln!("H2 TLS handshake error (shard {shard_id}): {e}");
+                            // sess_token is dropped here, freeing the slot
                             continue;
                         }
                     };
@@ -579,9 +583,9 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                                 }
                                 _ => {
                                     use crate::network::http::h2_server::serve_h1;
-                                    let service = factory.async_service(shard_id);
+                                    let service = factory_cloned.async_service(shard_id);
                                     if let Err(e) =
-                                        serve_h1(tls_stream, service, &h2_cfg, peer_ip).await
+                                        serve_h1(tls_stream, service, &h2_cfg_cloned, peer_ip).await
                                     {
                                         eprintln!(
                                             "h1 fallback serve error (shard {shard_id}): {e}"
