@@ -117,10 +117,10 @@ where
 
     #[inline]
     fn req_query(&self) -> String {
-        if let Some(path) = self.req.path {
-            if let Some((_, query)) = path.split_once('?') {
-                return query.to_string();
-            }
+        if let Some(path) = self.req.path
+            && let Some((_, query)) = path.split_once('?')
+        {
+            return query.to_string();
         }
         String::new()
     }
@@ -360,8 +360,7 @@ where
     fn send_h1_data(&mut self, chunk: &[u8], end_stream: bool) -> std::io::Result<()> {
         if !self.streaming {
             // Safer to fail fast instead of implicitly starting:
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            return Err(std::io::Error::other(
                 "send_h1_data called before start_h1_streaming",
             ));
         }
