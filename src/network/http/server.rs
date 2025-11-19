@@ -580,7 +580,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                                 _ => {
                                     use crate::network::http::h2_server::serve_h1;
                                     let service = factory.async_service(shard_id);
-                                    if let Err(e) = serve_h1(tls_stream, service, &h2_cfg2, peer_ip).await {
+                                    if let Err(e) = serve_h1(tls_stream, service, &h2_cfg, peer_ip).await {
                                         eprintln!(
                                             "h1 fallback serve error (shard {shard_id}) from {peer_addr}: {e}"
                                         );
@@ -712,7 +712,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
 
                                     let tls_acceptor = tls_acceptor.clone();
                                     let factory = factory.clone();
-                                    let h2_cfg2 = h2_cfg.clone();
+                                    let h2_cfg_cloned = h2_cfg.clone();
 
                                     tokio::task::spawn_local(async move {
                                         let _permit = permit;
@@ -744,7 +744,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                                                 if let Err(e) = serve_h2(
                                                     tls_stream,
                                                     service,
-                                                    &h2_cfg2,
+                                                    &h2_cfg_cloned,
                                                     peer_ip,
                                                 )
                                                 .await
@@ -757,7 +757,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                                             _ => {
                                                 use crate::network::http::h2_server::serve_h1;
                                                 let service = factory.async_service(shard_id);
-                                                if let Err(e) = serve_h1(tls_stream, service, &h2_cfg2, peer_ip).await {
+                                                if let Err(e) = serve_h1(tls_stream, service, &h2_cfg_cloned, peer_ip).await {
                                                     eprintln!(
                                                         "h1 fallback serve error (shard {shard_id}) from {peer_addr}: {e}"
                                                     );
