@@ -74,6 +74,11 @@ impl Session for H3Session {
     }
 
     #[inline]
+    fn req_query(&self) -> String {
+        self.req.uri().query().unwrap_or("").into()
+    }
+
+    #[inline]
     fn req_http_version(&self) -> Version {
         self.req.version()
     }
@@ -217,7 +222,7 @@ impl Session for H3Session {
     }
 
     #[cfg(any(feature = "net-h1-server", feature = "net-h2-server"))]
-    fn send_h1_data(&mut self, chunk: &[u8], end_stream: bool) -> std::io::Result<()> {
+    fn send_h1_data(&mut self, _chunk: &[u8], _end_stream: bool) -> std::io::Result<()> {
         Err(std::io::Error::other(
             "send_h1_data is not supported in H3Session",
         ))
