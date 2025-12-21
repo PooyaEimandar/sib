@@ -9,7 +9,7 @@ it is designed for **real-time streaming**, **low-latency networking**, and **sc
 
 | Feature          | Description                        
 | ---------------- | ---------------------------------
-| `net-h1-server`  | Enable HTTP/1.1 server            
+| `net-h1-server`  | Enable HTTP/1 server            
 | `net-h2-server`  | Enable HTTP/2 server
 | `net-h3-server`  | Enable HTTP/3 server
 | `net-ratelimiter`| Enable Ratelimiter service wrapper  
@@ -18,7 +18,7 @@ it is designed for **real-time streaming**, **low-latency networking**, and **sc
 | `db-fdb`         | FoundationDB client database + cache      
 | `rt-glommio`     | Enable glommio runtime for HTTP/2/3      
 | `rt-tokio`       | Enable tokio runtime for HTTP/2/3 and/or db-fdb
-| `rt-may`         | Enable may runtime for db-fdb
+| `rt-may`         | Enable may runtime for  HTTP/1 and/or db-fdb
 | `stm-sender`     | Real-time video/audio streamer    
 | `stm-receiver`   | Real-time video/audio receiver    
 
