@@ -152,7 +152,7 @@ cfg_if::cfg_if! {
                 }
             }
 
-            // --- Parse request line + headers (minimal) ---
+            // Parse request line + headers (minimal)
             let mut headers = [httparse::EMPTY_HEADER; 32];
             let mut req = httparse::Request::new(&mut headers);
             let status = req.parse(&buf[..read]).map_err(|e| {
@@ -188,7 +188,7 @@ cfg_if::cfg_if! {
                 .and_then(|s| s.parse::<usize>().ok())
                 .unwrap_or(0);
 
-            // --- Read body if present ---
+            // Read body if present
             let mut body = buf[header_len..read].to_vec();
             while body.len() < content_length {
                 let mut chunk = vec![0u8; content_length - body.len()];
@@ -220,11 +220,12 @@ cfg_if::cfg_if! {
     }
     else if #[cfg(all(feature = "rt-tokio", not(feature = "rt-glommio")))] {
 
-        pub(crate) async fn serve_h2<S, T>(
+        pub(crate) async fn serve<S, T>(
             stream: S,
             service: T,
             config: &H2Config,
             peer_addr: std::net::IpAddr,
+            is_h1_tunnel: bool
         ) -> std::io::Result<()>
         where
             S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + 'static,
@@ -243,33 +244,55 @@ cfg_if::cfg_if! {
             // One service instance per connection, shared across streams on this conn
             let svc = std::rc::Rc::new(std::cell::RefCell::new(Some(service)));
 
+            // Clone config values needed in the spawned tasks
+            let io_timeout = config.io_timeout;
+            let max_header_bytes = config.max_header_bytes;
+            let max_body_bytes = config.max_body_bytes;
+
             // Serve multiplexed requests
             loop {
                 let svc_rc = std::rc::Rc::clone(&svc);
                 match conn.accept().await {
                     Some(Ok((request, respond))) => {
-                        // Each H2 stream runs on the same LocalSet thread
                         tokio::task::spawn_local(async move {
                             let mut service = loop {
-                                if let Some(s) = {
-                                    let mut guard = svc_rc.borrow_mut();
-                                    guard.take()
-                                } {
+                                if let Some(s) = svc_rc.borrow_mut().take() {
                                     break s;
                                 }
                                 tokio::task::yield_now().await;
                             };
 
-                            let result = service
-                                .call(&mut H2Session::new(peer_addr, request, respond))
-                                .await;
+                            use crate::network::http::session::Session;
+                            let mut sess = H2Session::new(peer_addr, request, respond);
 
-                            *svc_rc.borrow_mut() = Some(service);
+                            // Run handler
+                            let result: std::io::Result<()> = async {
+                                if is_h1_tunnel {
+                                    sess.enable_h1_over_h2(
+                                        io_timeout,
+                                        max_header_bytes,
+                                        max_body_bytes,
+                                    )
+                                    .await?;
+                                }
+
+                                // call service
+                                service
+                                    .call(&mut sess)
+                                    .await
+                                    .map_err(|e| std::io::Error::other(format!("{e}")))?;
+
+                                Ok(())
+                            }
+                            .await;
+
+                            *svc_rc.borrow_mut() = Some(service); // restore back
 
                             if let Err(e) = result {
                                 eprintln!("h2 service error: {e}");
                             }
                         });
+
                     }
                     Some(Err(e)) => {
                         eprintln!("accept stream error from {peer_addr}: {e}");
@@ -278,105 +301,6 @@ cfg_if::cfg_if! {
                     None => break, // connection closed
                 }
             }
-            Ok(())
-        }
-
-        pub(crate) async fn serve_h1<S, T>(
-            mut stream: S,
-            _service: T,
-            config: &H2Config,
-            _peer_addr: std::net::IpAddr,
-        ) -> std::io::Result<()>
-        where
-            S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + 'static,
-            T: crate::network::http::session::HAsyncService + 'static,
-        {
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
-            use std::str;
-
-            let mut buf = vec![0u8; 8192];
-            let mut read = 0usize;
-
-            loop {
-                let n = stream.read(&mut buf[read..]).await?;
-                if n == 0 {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::UnexpectedEof,
-                        "connection closed before full request",
-                    ));
-                }
-                read += n;
-                if buf[..read].windows(4).any(|w| w == b"\r\n\r\n") {
-                    break;
-                }
-                if read == buf.len() {
-                    buf.resize(buf.len() * 2, 0);
-                }
-            }
-
-            // --- Parse request line + headers ---
-            let mut headers = [httparse::EMPTY_HEADER; 32];
-            let mut req = httparse::Request::new(&mut headers);
-            let status = req.parse(&buf[..read]).map_err(|e| {
-                std::io::Error::other(format!("httparse error: {e}"))
-            })?;
-
-            let header_len = match status {
-                httparse::Status::Complete(len) => len,
-                httparse::Status::Partial => {
-                    return Err(std::io::Error::other("partial HTTP request"));
-                }
-            };
-
-            let method = req.method.unwrap_or("GET");
-            let path = req.path.unwrap_or("/");
-            let version_dbg = match req.version {
-                Some(0) => "HTTP/1.0",
-                _ => "HTTP/1.1",
-            };
-
-            let host = req
-                .headers
-                .iter()
-                .find(|h| h.name.eq_ignore_ascii_case("host"))
-                .and_then(|h| str::from_utf8(h.value).ok())
-                .unwrap_or("");
-
-            let content_length = req
-                .headers
-                .iter()
-                .find(|h| h.name.eq_ignore_ascii_case("content-length"))
-                .and_then(|h| str::from_utf8(h.value).ok())
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(0);
-
-            // --- Read body if present ---
-            let mut body = buf[header_len..read].to_vec();
-            while body.len() < content_length {
-                let mut chunk = vec![0u8; content_length - body.len()];
-                let n = stream.read(&mut chunk).await?;
-                if n == 0 {
-                    break;
-                }
-                body.extend_from_slice(&chunk[..n]);
-            }
-
-            let body_str = String::from_utf8_lossy(&body);
-
-            let response_body = format!(
-                "Http version: {version_dbg:?}, Echo: {method:?} {host:?} {path:?}\r\nBody: {body_str:?}"
-            );
-
-            let headers = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: {}\r\n\r\n",
-                response_body.len(),
-                if config.keep_alive { "keep-alive" } else { "close" },
-            );
-
-            stream.write_all(headers.as_bytes()).await?;
-            stream.write_all(response_body.as_bytes()).await?;
-            stream.flush().await?;
-
             Ok(())
         }
     }

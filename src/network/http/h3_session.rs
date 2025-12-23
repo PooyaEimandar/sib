@@ -183,6 +183,18 @@ impl Session for H3Session {
         Some(Ok(out.freeze()))
     }
 
+    #[cfg(feature = "net-h2-server")]
+    async fn enable_h1_over_h2(
+        &mut self,
+        timeout: std::time::Duration,
+        max_header_bytes: usize,
+        max_body_bytes: usize,
+    ) -> std::io::Result<()> {
+        Err(io::Error::other(
+            "enable_h1_over_h2 is not supported in H3Session",
+        ))
+    }
+
     #[cfg(any(feature = "net-h1-server", feature = "net-h2-server"))]
     fn start_h1_streaming(&mut self) -> std::io::Result<()> {
         Err(std::io::Error::other(
@@ -191,10 +203,10 @@ impl Session for H3Session {
     }
 
     #[cfg(feature = "net-h2-server")]
-    /// Start an HTTP/2 streaming response: send headers now, return a `H2Stream`
+    /// Start an HTTP/2 streaming response: send headers now, return a `HStream`
     /// so the caller later can push data frames and decide when to end the stream.
     #[inline]
-    fn start_h2_streaming(&mut self) -> std::io::Result<super::h2_session::H2Stream> {
+    fn start_h2_streaming(&mut self) -> std::io::Result<super::h2_session::HStream> {
         Err(std::io::Error::other(
             "start_h2_streaming is not supported in H3Session",
         ))

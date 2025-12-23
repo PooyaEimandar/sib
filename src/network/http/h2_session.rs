@@ -4,6 +4,17 @@ use h2::{RecvStream, SendStream, server::SendResponse};
 use http::{HeaderMap, HeaderName, HeaderValue, StatusCode, Version};
 use std::{net::IpAddr, str::FromStr, time::Duration};
 
+struct H1Parsed {
+    method: http::Method,
+    path: String,
+    query: String,
+    version: http::Version,
+    headers: http::HeaderMap,
+    host: Option<(String, Option<u16>)>,
+    body: bytes::Bytes,
+    body_taken: bool,
+}
+
 pub struct H2Session {
     peer_addr: IpAddr,
     req: http::Request<RecvStream>,
@@ -11,15 +22,16 @@ pub struct H2Session {
     res_status: StatusCode,
     resp_headers: HeaderMap,
     resp_body: Bytes,
-    // H1-over-H2 streaming mode
-    h1_stream: Option<H2Stream>,
+    // H1-over-H2
+    h1_stream: Option<HStream>,
+    h1_req: Option<H1Parsed>,
 }
 
-pub struct H2Stream {
+pub struct HStream {
     stream: SendStream<Bytes>,
 }
 
-impl H2Stream {
+impl HStream {
     pub fn stream_id(&self) -> u32 {
         self.stream.stream_id().as_u32()
     }
@@ -69,6 +81,7 @@ impl H2Session {
             resp_headers: HeaderMap::new(),
             resp_body: Bytes::new(),
             h1_stream: None,
+            h1_req: None,
         }
     }
 }
@@ -82,6 +95,9 @@ impl Session for H2Session {
 
     #[inline]
     fn req_host(&self) -> Option<(String, Option<u16>)> {
+        if let Some(h1) = &self.h1_req {
+            return h1.host.clone();
+        }
         if let Some(a) = self.req.uri().authority()
             && let Some(x) = super::server::parse_authority(a.as_str())
         {
@@ -98,42 +114,66 @@ impl Session for H2Session {
 
     #[inline]
     fn req_method(&self) -> http::Method {
+        if let Some(h1) = &self.h1_req {
+            return h1.method.clone();
+        }
         self.req.method().clone()
     }
 
     #[inline]
     fn req_method_str(&self) -> Option<&str> {
+        if let Some(h1) = &self.h1_req {
+            return Some(h1.method.as_str());
+        }
         Some(self.req.method().as_str())
     }
 
     #[inline]
     fn req_path(&self) -> String {
+        if let Some(h1) = &self.h1_req {
+            return h1.path.clone();
+        }
         self.req.uri().path().to_string()
     }
 
     #[inline]
     fn req_query(&self) -> String {
+        if let Some(h1) = &self.h1_req {
+            return h1.query.clone();
+        }
         self.req.uri().query().unwrap_or("").to_string()
     }
 
     #[inline]
     fn req_http_version(&self) -> Version {
+        if let Some(h1) = &self.h1_req {
+            return h1.version;
+        }
         self.req.version()
     }
 
     #[inline]
     fn req_headers(&self) -> http::HeaderMap {
+        if let Some(h1) = &self.h1_req {
+            return h1.headers.clone();
+        }
         self.req.headers().clone()
     }
 
     #[inline]
     fn req_header(&self, header: &HeaderName) -> Option<HeaderValue> {
+        if let Some(h1) = &self.h1_req {
+            return h1.headers.get(header).cloned();
+        }
         self.req.headers().get(header).cloned()
     }
 
     #[cfg(feature = "net-h1-server")]
     #[inline]
     fn req_body(&mut self, _timeout: Duration) -> std::io::Result<&[u8]> {
+        if let Some(h1) = &self.h1_req {
+            return Ok(h1.body.as_ref());
+        }
         Err(std::io::Error::other(
             "req_body_h1 is not supported in H2Session",
         ))
@@ -141,6 +181,15 @@ impl Session for H2Session {
 
     #[inline]
     async fn req_body_async(&mut self, timeout: Duration) -> Option<std::io::Result<Bytes>> {
+        if let Some(h1) = &mut self.h1_req {
+            if h1.body_taken || h1.body.is_empty() {
+                return None;
+            }
+            h1.body_taken = true;
+            return Some(Ok(h1.body.clone()));
+        }
+
+        // existing H2 streaming logic
         use futures_lite::future::race;
         let data_fut = async {
             match self.req.body_mut().data().await {
@@ -198,7 +247,7 @@ impl Session for H2Session {
             .send_response(resp, false)
             .map_err(|e| io::Error::other(format!("failed to send H1-over-H2 headers: {e}")))?;
 
-        self.h1_stream = Some(H2Stream { stream: send });
+        self.h1_stream = Some(HStream { stream: send });
 
         // reset for reuse
         self.res_status = StatusCode::OK;
@@ -208,7 +257,7 @@ impl Session for H2Session {
     }
 
     #[inline]
-    fn start_h2_streaming(&mut self) -> std::io::Result<H2Stream> {
+    fn start_h2_streaming(&mut self) -> std::io::Result<HStream> {
         let mut builder = http::Response::builder().status(self.res_status);
         {
             let h = builder.headers_mut().ok_or_else(|| {
@@ -229,7 +278,7 @@ impl Session for H2Session {
         self.res_status = StatusCode::OK;
         self.resp_body = Bytes::new();
 
-        Ok(H2Stream { stream: send })
+        Ok(HStream { stream: send })
     }
 
     #[cfg(feature = "net-h3-server")]
@@ -440,6 +489,130 @@ impl Session for H2Session {
         Ok(())
     }
 
+    async fn enable_h1_over_h2(
+        &mut self,
+        timeout: Duration,
+        max_header_bytes: usize,
+        max_body_bytes: usize,
+    ) -> std::io::Result<()> {
+        let mut buf: Vec<u8> = Vec::with_capacity(8192);
+
+        // read until \r\n\r\n
+        let header_len = loop {
+            if buf.len() > max_header_bytes {
+                return Err(std::io::Error::other("H1-over-H2 header too large"));
+            }
+
+            if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                break pos + 4;
+            }
+
+            let next = recv_h2_data_with_timeout(self, timeout).await?;
+            match next {
+                Some(chunk) => buf.extend_from_slice(&chunk),
+                None => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "closed before H1 headers complete",
+                    ));
+                }
+            }
+        };
+
+        // httparse headers
+        let mut headers_arr = [httparse::EMPTY_HEADER; 64];
+        let mut reqp = httparse::Request::new(&mut headers_arr);
+
+        let st = reqp
+            .parse(&buf[..header_len])
+            .map_err(|e| std::io::Error::other(format!("httparse error: {e}")))?;
+
+        let _parsed = match st {
+            httparse::Status::Complete(n) => n,
+            httparse::Status::Partial => return Err(std::io::Error::other("partial H1 request")),
+        };
+
+        let method_str = reqp.method.unwrap_or("GET");
+        let path_with_query = reqp.path.unwrap_or("/");
+
+        let (path, query) = if let Some(i) = path_with_query.find('?') {
+            (
+                path_with_query[..i].to_string(),
+                path_with_query[i + 1..].to_string(),
+            )
+        } else {
+            (path_with_query.to_string(), String::new())
+        };
+
+        let version = match reqp.version {
+            Some(0) => http::Version::HTTP_10,
+            _ => http::Version::HTTP_11,
+        };
+
+        let method = http::Method::from_bytes(method_str.as_bytes()).unwrap_or(http::Method::GET);
+
+        let mut headers = http::HeaderMap::new();
+        for h in reqp.headers.iter() {
+            if h.name.is_empty() {
+                continue;
+            }
+            let name = http::HeaderName::from_bytes(h.name.as_bytes())
+                .map_err(|e| std::io::Error::other(format!("bad header name: {e}")))?;
+            let value = http::HeaderValue::from_bytes(h.value)
+                .map_err(|e| std::io::Error::other(format!("bad header value: {e}")))?;
+            headers.append(name, value);
+        }
+
+        let host = headers
+            .get(http::header::HOST)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| super::server::parse_authority(s.trim()));
+
+        let content_length = headers
+            .get(http::header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(0);
+
+        if content_length > max_body_bytes {
+            return Err(std::io::Error::other("H1-over-H2 body too large"));
+        }
+
+        // bytes after headers already in buf
+        let mut body: Vec<u8> = Vec::with_capacity(content_length);
+        if buf.len() > header_len {
+            body.extend_from_slice(&buf[header_len..]);
+        }
+
+        while body.len() < content_length {
+            let next = recv_h2_data_with_timeout(self, timeout).await?;
+            match next {
+                Some(chunk) => {
+                    let need = content_length - body.len();
+                    if chunk.len() <= need {
+                        body.extend_from_slice(&chunk);
+                    } else {
+                        body.extend_from_slice(&chunk[..need]);
+                    }
+                }
+                None => break,
+            }
+        }
+
+        self.h1_req = Some(H1Parsed {
+            method,
+            path,
+            query,
+            version,
+            headers,
+            host,
+            body: bytes::Bytes::from(body),
+            body_taken: false,
+        });
+
+        Ok(())
+    }
+
     #[cfg(feature = "net-ws-server")]
     #[inline]
     fn is_ws(&self) -> bool {
@@ -487,5 +660,39 @@ impl Session for H2Session {
         Err(std::io::Error::other(
             "ws_close is not supported in H2Session",
         ))
+    }
+}
+
+async fn recv_h2_data_with_timeout(
+    session: &mut H2Session,
+    timeout: Duration,
+) -> std::io::Result<Option<bytes::Bytes>> {
+    use futures_lite::future::race;
+    use std::io;
+
+    let data_fut = async {
+        match session.req.body_mut().data().await {
+            Some(Ok(b)) => Ok(Some(b)),
+            Some(Err(e)) => Err(io::Error::other(e.to_string())),
+            None => Ok(None),
+        }
+    };
+
+    cfg_if::cfg_if! {
+        if #[cfg(all(target_os = "linux", feature = "rt-glommio"))] {
+            let timeout_fut = async {
+                glommio::timer::Timer::new(timeout).await;
+                Err(io::Error::new(io::ErrorKind::TimedOut, "h1-over-h2 read timed out"))
+            };
+            race(data_fut, timeout_fut).await
+        } else if #[cfg(feature = "rt-tokio")] {
+            let timeout_fut = async {
+                tokio::time::sleep(timeout).await;
+                Err(io::Error::new(io::ErrorKind::TimedOut, "h1-over-h2 read timed out"))
+            };
+            race(data_fut, timeout_fut).await
+        } else {
+            compile_error!("Either feature `rt-glommio` or `rt-tokio` must be enabled.");
+        }
     }
 }

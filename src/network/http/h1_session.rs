@@ -271,6 +271,18 @@ where
         self
     }
 
+    #[cfg(feature = "net-h2-server")]
+    async fn enable_h1_over_h2(
+        &mut self,
+        timeout: std::time::Duration,
+        max_header_bytes: usize,
+        max_body_bytes: usize,
+    ) -> std::io::Result<()> {
+        Err(io::Error::other(
+            "enable_h1_over_h2 is not supported in H1Session",
+        ))
+    }
+
     #[cfg(feature = "net-h1-server")]
     fn start_h1_streaming(&mut self) -> std::io::Result<()> {
         use std::io::{ErrorKind, IoSlice};
@@ -342,7 +354,7 @@ where
 
     #[cfg(feature = "net-h2-server")]
     #[inline]
-    fn start_h2_streaming(&mut self) -> std::io::Result<super::h2_session::H2Stream> {
+    fn start_h2_streaming(&mut self) -> std::io::Result<super::h2_session::HStream> {
         Err(io::Error::other(
             "start_h2_streaming is not supported in H1Session",
         ))

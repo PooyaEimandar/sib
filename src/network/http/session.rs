@@ -25,11 +25,19 @@ pub trait Session {
 
     fn status_code(&mut self, status: http::StatusCode) -> &mut Self;
 
+    #[cfg(feature = "net-h2-server")]
+    async fn enable_h1_over_h2(
+        &mut self,
+        timeout: std::time::Duration,
+        max_header_bytes: usize,
+        max_body_bytes: usize,
+    ) -> std::io::Result<()>;
+
     #[cfg(any(feature = "net-h1-server", feature = "net-h2-server"))]
     fn start_h1_streaming(&mut self) -> std::io::Result<()>;
 
     #[cfg(feature = "net-h2-server")]
-    fn start_h2_streaming(&mut self) -> std::io::Result<super::h2_session::H2Stream>;
+    fn start_h2_streaming(&mut self) -> std::io::Result<super::h2_session::HStream>;
 
     #[cfg(feature = "net-h3-server")]
     async fn start_h3_streaming(&mut self) -> std::io::Result<()>;
