@@ -55,10 +55,8 @@ pub struct H2Config {
     pub initial_window_size: u32,
     pub io_timeout: std::time::Duration,
     pub keep_alive: bool, // for h1 over h2 compatibility
-    pub max_body_bytes: usize,
     pub max_concurrent_streams: u32,
     pub max_frame_size: u32,
-    pub max_header_bytes: usize,
     pub max_header_list_size: u32,
     pub max_sessions: u64,
     pub num_of_shards: usize,
@@ -75,10 +73,8 @@ impl Default for H2Config {
             initial_window_size: 256 * 1024,
             io_timeout: std::time::Duration::from_secs(60),
             keep_alive: true,
-            max_body_bytes: 8 * 1024 * 1024,
             max_concurrent_streams: 4096,
             max_frame_size: 32 * 1024,
-            max_header_bytes: 256 * 1024,
             max_header_list_size: 32 * 1024,
             max_sessions: 1024,
             num_of_shards: 2,
@@ -745,29 +741,27 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                                             .alpn_protocol()
                                             .map(|v| String::from_utf8_lossy(v).to_string());
 
-                                        use crate::network::http::h2_server::serve;
-                                        let service = factory.async_service(shard_id);
                                         match negotiated.as_deref() {
                                             Some("h2") => {
-                                                if let Err(e) = serve(
-                                                    tls_stream,
-                                                    service,
-                                                    &h2_cfg_cloned,
-                                                    peer_ip,
-                                                    false
-                                                )
-                                                .await
-                                                {
-                                                    eprintln!(
-                                                        "h2 serve error (shard {shard_id}) from {peer_addr}: {e}"
-                                                    );
+                                                use crate::network::http::h2_server::serve_h2;
+
+                                                let service = factory.async_service(shard_id);
+
+                                                if let Err(e) = serve_h2(tls_stream, service, &h2_cfg_cloned, peer_ip).await {
+                                                    if !is_tls_eof_no_close_notify(&e) {
+                                                        eprintln!("h2 serve error (shard {shard_id}) from {peer_addr}: {e}");
+                                                    }
                                                 }
                                             }
                                             _ => {
-                                                if let Err(e) = serve(tls_stream, service, &h2_cfg_cloned, peer_ip, true).await {
-                                                    eprintln!(
-                                                        "h1 fallback serve error (shard {shard_id}) from {peer_addr}: {e}"
-                                                    );
+                                                use crate::network::http::h2_server::serve_h1;
+                                                let service = factory.async_service(shard_id);
+                                                if let Err(e) = serve_h1(tls_stream, service, &h2_cfg_cloned, peer_ip).await {
+                                                    if !is_tls_eof_no_close_notify(&e) {
+                                                        eprintln!(
+                                                            "h1 fallback serve error (shard {shard_id}) from {peer_addr}: {e}"
+                                                        );
+                                                    }
                                                 }
                                             }
                                         };
@@ -1273,6 +1267,14 @@ pub(crate) fn parse_authority(s: &str) -> Option<(String, Option<u16>)> {
         }
     }
     Some((trim.to_string(), None))
+}
+
+fn is_tls_eof_no_close_notify(e: &std::io::Error) -> bool {
+    // rustls commonly wraps this exact string in std::io::Error
+    let msg = e.to_string();
+    msg.contains("peer closed connection without sending TLS close_notify")
+        || msg.contains("unexpected eof")
+        || msg.contains("UnexpectedEof")
 }
 
 #[cfg(test)]

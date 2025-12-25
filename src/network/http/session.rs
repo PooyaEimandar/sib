@@ -11,11 +11,7 @@ pub trait Session {
     fn req_http_version(&self) -> http::Version;
     fn req_headers(&self) -> http::HeaderMap;
     fn req_header(&self, header: &http::HeaderName) -> Option<http::HeaderValue>;
-
-    #[cfg(feature = "net-h1-server")]
     fn req_body(&mut self, timeout: std::time::Duration) -> std::io::Result<&[u8]>;
-
-    #[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
     async fn req_body_async(
         &mut self,
         timeout: std::time::Duration,
@@ -25,27 +21,13 @@ pub trait Session {
 
     fn status_code(&mut self, status: http::StatusCode) -> &mut Self;
 
-    #[cfg(feature = "net-h2-server")]
-    async fn enable_h1_over_h2(
-        &mut self,
-        timeout: std::time::Duration,
-        max_header_bytes: usize,
-        max_body_bytes: usize,
-    ) -> std::io::Result<()>;
-
-    #[cfg(any(feature = "net-h1-server", feature = "net-h2-server"))]
     fn start_h1_streaming(&mut self) -> std::io::Result<()>;
-
-    #[cfg(feature = "net-h2-server")]
-    fn start_h2_streaming(&mut self) -> std::io::Result<super::h2_session::HStream>;
-
-    #[cfg(feature = "net-h3-server")]
+    async fn start_h1_streaming_async(&mut self) -> std::io::Result<()>;
+    fn start_h2_streaming(&mut self) -> std::io::Result<super::h2_session::H2Stream>;
     async fn start_h3_streaming(&mut self) -> std::io::Result<()>;
 
-    #[cfg(any(feature = "net-h1-server", feature = "net-h2-server"))]
     fn send_h1_data(&mut self, chunk: &[u8], end_stream: bool) -> std::io::Result<()>;
-
-    #[cfg(feature = "net-h3-server")]
+    async fn send_h1_data_async(&mut self, data: &[u8], last: bool) -> std::io::Result<()>;
     async fn send_h3_data(&mut self, chunk: bytes::Bytes, end_stream: bool) -> std::io::Result<()>;
 
     fn header(&mut self, name: HeaderName, value: HeaderValue) -> std::io::Result<&mut Self>;
@@ -54,8 +36,6 @@ pub trait Session {
     fn headers_str(&mut self, header_val: &[(&str, &str)]) -> std::io::Result<&mut Self>;
     fn body(&mut self, body: bytes::Bytes) -> &mut Self;
     fn eom(&mut self) -> std::io::Result<()>;
-
-    #[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
     async fn eom_async(&mut self) -> std::io::Result<()>;
 
     #[cfg(feature = "net-ws-server")]

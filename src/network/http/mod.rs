@@ -29,6 +29,7 @@ cfg_if::cfg_if! {
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "net-h2-server")] {
+        pub mod h1_session_async;
         pub mod h2_session;
         pub mod h2_server;
     }

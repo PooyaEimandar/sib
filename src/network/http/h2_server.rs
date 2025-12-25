@@ -1,4 +1,4 @@
-use crate::network::http::server::H2Config;
+use crate::network::http::{server::H2Config, session::Session};
 cfg_if::cfg_if! {
     // Glommio runtime (Linux)
     if #[cfg(all(target_os = "linux", feature = "rt-glommio", not(feature = "rt-tokio")))] {
@@ -152,7 +152,7 @@ cfg_if::cfg_if! {
                 }
             }
 
-            // Parse request line + headers (minimal)
+            // --- Parse request line + headers (minimal) ---
             let mut headers = [httparse::EMPTY_HEADER; 32];
             let mut req = httparse::Request::new(&mut headers);
             let status = req.parse(&buf[..read]).map_err(|e| {
@@ -188,7 +188,7 @@ cfg_if::cfg_if! {
                 .and_then(|s| s.parse::<usize>().ok())
                 .unwrap_or(0);
 
-            // Read body if present
+            // --- Read body if present ---
             let mut body = buf[header_len..read].to_vec();
             while body.len() < content_length {
                 let mut chunk = vec![0u8; content_length - body.len()];
@@ -220,12 +220,159 @@ cfg_if::cfg_if! {
     }
     else if #[cfg(all(feature = "rt-tokio", not(feature = "rt-glommio")))] {
 
-        pub(crate) async fn serve<S, T>(
+        pub(crate) async fn serve_h1<S, T>(
+            mut stream: S,
+            mut service: T,
+            config: &H2Config,
+            peer_addr: std::net::IpAddr,
+        ) -> std::io::Result<()>
+        where
+            S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + 'static,
+            T: crate::network::http::session::HAsyncService + 'static,
+        {
+            use crate::network::http::h1_session_async::H1SessionAsync;
+            use bytes::Bytes;
+            use http::{header, HeaderMap, HeaderName, HeaderValue, Method, Uri, Version};
+            use tokio::io::AsyncReadExt;
+
+            // Minimal keep-alive loop (no chunked request bodies yet)
+            let mut buf: Vec<u8> = vec![0u8; 8192];
+
+            loop {
+                // read headers into buf
+                let mut read: usize = 0;
+                loop {
+                    let n = stream.read(&mut buf[read..]).await?;
+                    if n == 0 {
+                        return Ok(());
+                    }
+                    read += n;
+
+                    if buf[..read].windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                    if read == buf.len() {
+                        buf.resize(buf.len() * 2, 0);
+                    }
+                }
+
+                // parse request line + headers
+                let mut headers = [httparse::EMPTY_HEADER; 64];
+                let mut req = httparse::Request::new(&mut headers);
+                let status = req
+                    .parse(&buf[..read])
+                    .map_err(|e| std::io::Error::other(format!("httparse error: {e}")))?;
+
+                let header_len = match status {
+                    httparse::Status::Complete(len) => len,
+                    httparse::Status::Partial => {
+                        return Err(std::io::Error::other("partial HTTP request"));
+                    }
+                };
+
+                let method = req
+                    .method
+                    .map(|m| Method::from_bytes(m.as_bytes()).unwrap_or(Method::GET))
+                    .unwrap_or(Method::GET);
+
+                let uri = req
+                    .path
+                    .and_then(|p| p.parse::<Uri>().ok())
+                    .unwrap_or_else(|| Uri::from_static("/"));
+
+                let version = match req.version {
+                    Some(0) => Version::HTTP_10,
+                    _ => Version::HTTP_11,
+                };
+
+                let mut req_headers = HeaderMap::new();
+                for h in req.headers.iter() {
+                    let name =
+                        HeaderName::from_bytes(h.name.as_bytes()).map_err(std::io::Error::other)?;
+                    let value = HeaderValue::from_bytes(h.value).map_err(std::io::Error::other)?;
+                    req_headers.append(name, value);
+                }
+
+                // read body if Content-Length is present
+                let content_length = req_headers
+                    .get(header::CONTENT_LENGTH)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(0);
+
+                if content_length > config.max_frame_size as usize {
+                    return Err(std::io::Error::other(
+                        "content-length exceeds max frame size or is zero",
+                    ));
+                }
+
+                let mut body: Vec<u8> = Vec::with_capacity(content_length);
+                body.extend_from_slice(&buf[header_len..read]);
+
+                while body.len() < content_length {
+                    let need = content_length - body.len();
+                    let mut tmp = vec![0u8; need.min(64 * 1024)];
+                    let n = stream.read(&mut tmp).await?;
+                    if n == 0 {
+                        break;
+                    }
+                    body.extend_from_slice(&tmp[..n]);
+                }
+
+                // keep-alive decision
+                let conn_hdr = req_headers
+                    .get(header::CONNECTION)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+
+                let keep_alive = if version == Version::HTTP_11 {
+                    conn_hdr != "close"
+                } else {
+                    conn_hdr == "keep-alive"
+                };
+
+                // Run your unified async service on this HTTP/1.x request
+                let mut session = H1SessionAsync::new(
+                    peer_addr,
+                    &mut stream,
+                    method,
+                    uri,
+                    version,
+                    (req_headers, Bytes::from(body)),
+                    keep_alive,
+                );
+
+                if let Err(e) = service.call(&mut session).await {
+                    eprintln!("h1 service error: {e}");
+                    if !session.response_sent() {
+                        let _ = session
+                            .status_code(http::StatusCode::INTERNAL_SERVER_ERROR)
+                            .body(Bytes::new())
+                            .eom_async()
+                            .await;
+                    }
+                } else if !session.response_sent() {
+                    // Safety: if handler forgot eom_async
+                    let _ = session
+                        .status_code(http::StatusCode::OK)
+                        .body(Bytes::new())
+                        .eom_async()
+                        .await;
+                }
+
+                if !session.keep_alive() {
+                    return Ok(());
+                }
+            }
+        }
+
+
+        pub(crate) async fn serve_h2<S, T>(
             stream: S,
             service: T,
             config: &H2Config,
             peer_addr: std::net::IpAddr,
-            is_h1_tunnel: bool
         ) -> std::io::Result<()>
         where
             S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + 'static,
@@ -244,55 +391,33 @@ cfg_if::cfg_if! {
             // One service instance per connection, shared across streams on this conn
             let svc = std::rc::Rc::new(std::cell::RefCell::new(Some(service)));
 
-            // Clone config values needed in the spawned tasks
-            let io_timeout = config.io_timeout;
-            let max_header_bytes = config.max_header_bytes;
-            let max_body_bytes = config.max_body_bytes;
-
             // Serve multiplexed requests
             loop {
                 let svc_rc = std::rc::Rc::clone(&svc);
                 match conn.accept().await {
                     Some(Ok((request, respond))) => {
+                        // Each H2 stream runs on the same LocalSet thread
                         tokio::task::spawn_local(async move {
                             let mut service = loop {
-                                if let Some(s) = svc_rc.borrow_mut().take() {
+                                if let Some(s) = {
+                                    let mut guard = svc_rc.borrow_mut();
+                                    guard.take()
+                                } {
                                     break s;
                                 }
                                 tokio::task::yield_now().await;
                             };
 
-                            use crate::network::http::session::Session;
-                            let mut sess = H2Session::new(peer_addr, request, respond);
+                            let result = service
+                                .call(&mut H2Session::new(peer_addr, request, respond))
+                                .await;
 
-                            // Run handler
-                            let result: std::io::Result<()> = async {
-                                if is_h1_tunnel {
-                                    sess.enable_h1_over_h2(
-                                        io_timeout,
-                                        max_header_bytes,
-                                        max_body_bytes,
-                                    )
-                                    .await?;
-                                }
-
-                                // call service
-                                service
-                                    .call(&mut sess)
-                                    .await
-                                    .map_err(|e| std::io::Error::other(format!("{e}")))?;
-
-                                Ok(())
-                            }
-                            .await;
-
-                            *svc_rc.borrow_mut() = Some(service); // restore back
+                            *svc_rc.borrow_mut() = Some(service);
 
                             if let Err(e) = result {
                                 eprintln!("h2 service error: {e}");
                             }
                         });
-
                     }
                     Some(Err(e)) => {
                         eprintln!("accept stream error from {peer_addr}: {e}");

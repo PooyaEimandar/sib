@@ -1,9 +1,6 @@
 // settings.json
 {
   "rust-analyzer.cargo.allFeatures": false,
-  "rust-analyzer.cargo.features": [
-    "net-h2-server",
-    "rt-tokio"
-  ],
+  "rust-analyzer.cargo.features": [],
   "rust-analyzer.cargo.noDefaultFeatures": true
 }

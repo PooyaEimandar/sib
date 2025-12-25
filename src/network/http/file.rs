@@ -100,13 +100,15 @@ fn serve_fn<S: Session>(
     file_info: FileInfo,
     encoding_order: &[EncodingType],
     min_max_compress_thresholds: (u64, u64),
-    content_disposition: &str,
-    allow_ranges: bool,
+    content_disposition_allow_ranges: (&str, bool),
     file_tuple: &mut Option<(StatusCode, PathBuf, u64, u64)>,
     close_connection_on_failed: bool,
 ) -> std::io::Result<()> {
     let min_bytes_on_the_fly_size = min_max_compress_thresholds.0;
     let max_bytes_on_the_fly_size = min_max_compress_thresholds.1;
+
+    let content_disposition = content_disposition_allow_ranges.0;
+    let allow_ranges = content_disposition_allow_ranges.1;
 
     let range_header = if allow_ranges {
         session.req_header(&header::RANGE)
@@ -721,6 +723,150 @@ pub fn serve_h1<S: Session>(
 }
 
 #[cfg(feature = "net-h2-server")]
+pub async fn serve_h1_async<S: Session>(
+    session: &mut S,
+    path: &PathBuf,
+    file_cache: &FileCache,
+    encoding_order: &[EncodingType],
+    min_max_compress_thresholds: (u64, u64),
+    stream_threshold_and_chunk_size: (u64, usize),
+    content_disposition_allow_ranges: (&str, bool),
+) -> std::io::Result<()> {
+    use bytes::Bytes;
+    use http::StatusCode;
+    use std::io::SeekFrom;
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+    let mut file_tuple: Option<(StatusCode, PathBuf, u64, u64)> = None;
+
+    // meta (async)
+    let meta = match tokio::fs::metadata(path).await {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!(
+                "File server failed to get metadata for path: {}: {}",
+                path.display(),
+                e
+            );
+
+            // In async servers you usually do NOT want to force close; but keep your behavior if you want.
+            // We'll keep it consistent with your sync serve_h1: close on failure.
+            let headers = get_error_headers!(true);
+            return session
+                .status_code(StatusCode::NOT_FOUND)
+                .headers(&headers)?
+                .body(Bytes::new())
+                .eom_async()
+                .await;
+        }
+    };
+
+    // file cache lookup (same macro; tokio metadata supports modified()/len())
+    const CLOSE_CONNECTION_ON_FAILED: bool = true;
+    let file_info = get_file_info!(session, path, meta, file_cache, CLOSE_CONNECTION_ON_FAILED);
+
+    // Build headers / decide file tuple via your existing sync helper
+    serve_fn(
+        session,
+        file_info,
+        encoding_order,
+        min_max_compress_thresholds,
+        content_disposition_allow_ranges,
+        &mut file_tuple,
+        CLOSE_CONNECTION_ON_FAILED,
+    )?;
+
+    // If serve_fn already responded (HEAD / 304 / 406 etc.), it wouldn't set file_tuple.
+    let Some((status, file_path, start, end)) = file_tuple else {
+        return Ok(());
+    };
+
+    let bytes_to_send = end - start;
+
+    // 0 bytes
+    if bytes_to_send == 0 {
+        return session
+            .status_code(status)
+            .body(Bytes::new())
+            .eom_async()
+            .await;
+    }
+
+    // Range responses: ALWAYS non-streaming (same as your serve_h1)
+    let is_range_response = status == StatusCode::PARTIAL_CONTENT;
+    if is_range_response {
+        let (status2, body) =
+            tokio::task::spawn_blocking(move || -> std::io::Result<(StatusCode, Bytes)> {
+                let file = std::fs::File::open(&file_path)?;
+                let mmap = unsafe { memmap2::Mmap::map(&file) }.map_err(std::io::Error::other)?;
+                let slice = &mmap[start as usize..end as usize];
+                Ok((status, Bytes::copy_from_slice(slice)))
+            })
+            .await
+            .map_err(|e| std::io::Error::other(format!("spawn_blocking join error: {e}")))??;
+
+        return session.status_code(status2).body(body).eom_async().await;
+    }
+
+    // Non-range: decide streaming threshold
+    let stream_threshold = if stream_threshold_and_chunk_size.0 == 0 {
+        256 * 1024
+    } else {
+        stream_threshold_and_chunk_size.0
+    };
+
+    // Small body: send all at once (mmap in spawn_blocking)
+    if bytes_to_send < stream_threshold {
+        let (status2, body) =
+            tokio::task::spawn_blocking(move || -> std::io::Result<(StatusCode, Bytes)> {
+                let file = std::fs::File::open(&file_path)?;
+                let mmap = unsafe { memmap2::Mmap::map(&file) }.map_err(std::io::Error::other)?;
+                let slice = &mmap[start as usize..end as usize];
+                Ok((status, Bytes::copy_from_slice(slice)))
+            })
+            .await
+            .map_err(|e| std::io::Error::other(format!("spawn_blocking join error: {e}")))??;
+
+        return session.status_code(status2).body(body).eom_async().await;
+    }
+
+    // Large body: H1 chunked streaming
+    let chunk_size = if stream_threshold_and_chunk_size.1 == 0 {
+        64 * 1024
+    } else {
+        stream_threshold_and_chunk_size.1
+    };
+
+    // Start streaming response (your start_h1_streaming should set Transfer-Encoding: chunked)
+    session.status_code(status);
+    session.start_h1_streaming_async().await?;
+
+    let mut f = tokio::fs::File::open(&file_path).await.map_err(|e| {
+        std::io::Error::other(format!("Failed to open file {}: {e}", file_path.display()))
+    })?;
+    f.seek(SeekFrom::Start(start)).await?;
+
+    let mut remaining = bytes_to_send;
+    let mut buf = vec![0u8; chunk_size];
+
+    while remaining > 0 {
+        let to_read = (remaining as usize).min(buf.len());
+        let n = f.read(&mut buf[..to_read]).await?;
+        if n == 0 {
+            break;
+        }
+        remaining -= n as u64;
+
+        // send_h1_data is sync; your H1AsyncSession should block_in_place internally.
+        session
+            .send_h1_data_async(&buf[..n], remaining == 0)
+            .await?;
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "net-h2-server")]
 pub async fn serve_h2<S: Session>(
     session: &mut S,
     path: &PathBuf,
@@ -728,14 +874,9 @@ pub async fn serve_h2<S: Session>(
     encoding_order: &[EncodingType],
     min_max_compress_thresholds: (u64, u64),
     stream_threshold_and_chunk_size: (u64, usize),
-    content_disposition: &str,
-    allow_ranges: bool,
+    content_disposition_allow_ranges: (&str, bool),
 ) -> std::io::Result<()> {
-    use http::Version;
-
     let mut file_tuple: Option<(StatusCode, PathBuf, u64, u64)> = None;
-
-    let is_real_h2 = session.req_http_version() == Version::HTTP_2;
 
     // meta
     let meta = match tokio::fs::metadata(&path).await {
@@ -762,8 +903,7 @@ pub async fn serve_h2<S: Session>(
         file_info,
         encoding_order,
         min_max_compress_thresholds,
-        content_disposition,
-        allow_ranges,
+        content_disposition_allow_ranges,
         &mut file_tuple,
         CLOSE_CONNECTION_ON_FAILED,
     );
@@ -792,95 +932,12 @@ pub async fn serve_h2<S: Session>(
             stream_threshold_and_chunk_size.1
         };
 
-        // Case 1: Real HTTP/2 + large body ⇒ H2 streaming
-        if is_real_h2 && bytes_to_send >= stream_threshold {
+        // Case 1: large body ⇒ H2 streaming
+        if bytes_to_send >= stream_threshold {
             return serve_h2_streaming(session, status, &file_path, start, end, chunk_size).await;
         }
 
-        // Case 2: H1-over-H2 + large body ⇒ H1 streaming (chunked)
-        if !is_real_h2 && bytes_to_send >= stream_threshold {
-            // Tokio: H1-over-H2 async streaming
-            #[cfg(all(feature = "rt-tokio", not(feature = "rt-glommio")))]
-            {
-                use std::io;
-                use std::io::SeekFrom;
-                use tokio::fs::File;
-                use tokio::io::{AsyncReadExt, AsyncSeekExt};
-
-                // Open file async
-                let mut f = File::open(&file_path)
-                    .await
-                    .map_err(|e| io::Error::other(format!("open file for h1-over-h2: {e}")))?;
-
-                // Seek to start
-                f.seek(SeekFrom::Start(start))
-                    .await
-                    .map_err(|e| io::Error::other(format!("seek file for h1-over-h2: {e}")))?;
-
-                // Start H1 streaming (chunked)
-                session.status_code(status);
-                session.start_h1_streaming()?;
-
-                let mut remaining = bytes_to_send as usize;
-                let mut buf = vec![0u8; chunk_size];
-
-                while remaining > 0 {
-                    let to_read = remaining.min(buf.len());
-                    let n = f
-                        .read(&mut buf[..to_read])
-                        .await
-                        .map_err(|e| io::Error::other(format!("read file for h1-over-h2: {e}")))?;
-                    if n == 0 {
-                        break;
-                    }
-
-                    remaining -= n;
-                    let last = remaining == 0;
-
-                    session
-                        .send_h1_data(&buf[..n], last)
-                        .map_err(|e| io::Error::other(format!("send_h1_data: {e}")))?;
-                }
-
-                return Ok(());
-            }
-
-            // Glommio: H1-over-H2 streaming (sync file IO)
-            #[cfg(all(target_os = "linux", feature = "rt-glommio", not(feature = "rt-tokio")))]
-            {
-                use std::io::{Read, Seek, SeekFrom};
-
-                let mut f = std::fs::File::open(&file_path)?;
-                f.seek(SeekFrom::Start(start))?;
-
-                // Start H1 streaming (chunked)
-                session.status_code(status);
-                session.start_h1_streaming()?;
-
-                let mut remaining = bytes_to_send as usize;
-                let mut buf = vec![0u8; chunk_size];
-
-                while remaining > 0 {
-                    let to_read = remaining.min(buf.len());
-                    let n = f.read(&mut buf[..to_read])?;
-                    if n == 0 {
-                        break;
-                    }
-
-                    remaining -= n;
-                    let last = remaining == 0;
-
-                    session.send_h1_data(&buf[..n], last)?;
-
-                    // be polite to the scheduler
-                    glommio::yield_if_needed().await;
-                }
-
-                return Ok(());
-            }
-        }
-
-        // Case 3: small body OR (non-Tokio fallback for H1-over-H2) send all at once (mmap + eom)
+        // Case 2: small body, send all at once (mmap + eom)
         let mmap = match std::fs::File::open(&file_path) {
             Ok(std_file) => match unsafe { memmap2::Mmap::map(&std_file) } {
                 Ok(mmap) => mmap,
@@ -1398,8 +1455,8 @@ pub async fn serve_h2_streaming<S: Session>(
                         std::io::ErrorKind::TimedOut,
                         format!("H2 next_capacity timed out after {:?}", TIMEOUT),
                     )),
-                }?
-            };
+                }?;
+            }
 
             if cap == 0 {
                 // try again
@@ -1575,41 +1632,7 @@ mod tests {
             const H2_STREAM_THRESHOLD: u64 = 128 * 1024; // 128 KB
             const H2_STREAM_CHUNK_SIZE: usize = 64 * 1024; // 64 KB
 
-            if session.req_http_version() == http::Version::HTTP_2 {
-                let _ = session.header(
-                    http::header::ALT_SVC,
-                    http::HeaderValue::from_static("h3=\":8081\"; ma=86400"),
-                );
-
-                #[cfg(feature = "net-h2-server")]
-                if let Err(e) = crate::network::http::file::serve_h2(
-                    session,
-                    &std::path::PathBuf::from(file!()),
-                    get_cache(),
-                    &[
-                        EncodingType::Zstd { level: 3 },
-                        EncodingType::Br {
-                            buffer_size: 4096,
-                            quality: 4,
-                            lgwindow: 19,
-                        },
-                        EncodingType::Gzip { level: 4 },
-                        EncodingType::None,
-                    ],
-                    (MIN_BYTES_ON_THE_FLY_SIZE, MAX_BYTES_ON_THE_FLY_SIZE),
-                    (H2_STREAM_THRESHOLD, H2_STREAM_CHUNK_SIZE),
-                    "inline",
-                    true,
-                )
-                .await
-                {
-                    eprintln!("H2 FileService failed: {e}");
-                    return session
-                        .status_code(http::StatusCode::INTERNAL_SERVER_ERROR)
-                        .body(bytes::Bytes::new())
-                        .eom();
-                };
-            } else {
+            if session.req_http_version() == http::Version::HTTP_3 {
                 #[cfg(all(
                     feature = "net-h3-server",
                     feature = "rt-glommio",
@@ -1641,6 +1664,72 @@ mod tests {
                         .body(bytes::Bytes::new())
                         .eom_async()
                         .await;
+                };
+            } else if session.req_http_version() == http::Version::HTTP_2 {
+                let _ = session.header(
+                    http::header::ALT_SVC,
+                    http::HeaderValue::from_static("h3=\":8082\"; ma=86400"),
+                );
+
+                #[cfg(feature = "net-h2-server")]
+                if let Err(e) = crate::network::http::file::serve_h2(
+                    session,
+                    &std::path::PathBuf::from(file!()),
+                    get_cache(),
+                    &[
+                        EncodingType::Zstd { level: 3 },
+                        EncodingType::Br {
+                            buffer_size: 4096,
+                            quality: 4,
+                            lgwindow: 19,
+                        },
+                        EncodingType::Gzip { level: 4 },
+                        EncodingType::None,
+                    ],
+                    (MIN_BYTES_ON_THE_FLY_SIZE, MAX_BYTES_ON_THE_FLY_SIZE),
+                    (H2_STREAM_THRESHOLD, H2_STREAM_CHUNK_SIZE),
+                    ("inline", true),
+                )
+                .await
+                {
+                    eprintln!("H2 FileService failed: {e}");
+                    return session
+                        .status_code(http::StatusCode::INTERNAL_SERVER_ERROR)
+                        .body(bytes::Bytes::new())
+                        .eom();
+                };
+            } else {
+                let _ = session.header(
+                    http::header::ALT_SVC,
+                    http::HeaderValue::from_static("h3=\":8082\"; ma=86400"),
+                );
+
+                #[cfg(feature = "net-h2-server")]
+                if let Err(e) = crate::network::http::file::serve_h1_async(
+                    session,
+                    &std::path::PathBuf::from(file!()),
+                    get_cache(),
+                    &[
+                        EncodingType::Zstd { level: 3 },
+                        EncodingType::Br {
+                            buffer_size: 4096,
+                            quality: 4,
+                            lgwindow: 19,
+                        },
+                        EncodingType::Gzip { level: 4 },
+                        EncodingType::None,
+                    ],
+                    (MIN_BYTES_ON_THE_FLY_SIZE, MAX_BYTES_ON_THE_FLY_SIZE),
+                    (H2_STREAM_THRESHOLD, H2_STREAM_CHUNK_SIZE),
+                    ("inline", true),
+                )
+                .await
+                {
+                    eprintln!("H2 FileService failed: {e}");
+                    return session
+                        .status_code(http::StatusCode::INTERNAL_SERVER_ERROR)
+                        .body(bytes::Bytes::new())
+                        .eom();
                 };
             }
             Ok(())
@@ -1773,7 +1862,7 @@ mod tests {
                 let key_h3_pem = certs.1.clone();
                 let h3_handle = std::thread::spawn(move || {
                     use crate::network::http::server::H3Config;
-                    let addr = "0.0.0.0:8081";
+                    let addr = "0.0.0.0:8082";
                     let cert_pem = cert_h3_pem.as_bytes();
                     let key_pem = key_h3_pem.as_bytes();
                     let id = std::thread::current().id();
