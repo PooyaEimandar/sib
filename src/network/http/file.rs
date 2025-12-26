@@ -749,8 +749,6 @@ pub async fn serve_h1_async<S: Session>(
                 e
             );
 
-            // In async servers you usually do NOT want to force close; but keep your behavior if you want.
-            // We'll keep it consistent with your sync serve_h1: close on failure.
             let headers = get_error_headers!(true);
             return session
                 .status_code(StatusCode::NOT_FOUND)
@@ -761,11 +759,10 @@ pub async fn serve_h1_async<S: Session>(
         }
     };
 
-    // file cache lookup (same macro; tokio metadata supports modified()/len())
+    // file cache lookup
     const CLOSE_CONNECTION_ON_FAILED: bool = true;
     let file_info = get_file_info!(session, path, meta, file_cache, CLOSE_CONNECTION_ON_FAILED);
 
-    // Build headers / decide file tuple via your existing sync helper
     serve_fn(
         session,
         file_info,
@@ -792,7 +789,7 @@ pub async fn serve_h1_async<S: Session>(
             .await;
     }
 
-    // Range responses: ALWAYS non-streaming (same as your serve_h1)
+    // Range response
     let is_range_response = status == StatusCode::PARTIAL_CONTENT;
     if is_range_response {
         let (status2, body) =
@@ -808,14 +805,14 @@ pub async fn serve_h1_async<S: Session>(
         return session.status_code(status2).body(body).eom_async().await;
     }
 
-    // Non-range: decide streaming threshold
+    // Non-range responses, decide streaming threshold
     let stream_threshold = if stream_threshold_and_chunk_size.0 == 0 {
         256 * 1024
     } else {
         stream_threshold_and_chunk_size.0
     };
 
-    // Small body: send all at once (mmap in spawn_blocking)
+    // Small body: send all at once
     if bytes_to_send < stream_threshold {
         let (status2, body) =
             tokio::task::spawn_blocking(move || -> std::io::Result<(StatusCode, Bytes)> {
@@ -837,7 +834,7 @@ pub async fn serve_h1_async<S: Session>(
         stream_threshold_and_chunk_size.1
     };
 
-    // Start streaming response (your start_h1_streaming should set Transfer-Encoding: chunked)
+    // Start streaming response
     session.status_code(status);
     session.start_h1_streaming_async().await?;
 
@@ -857,7 +854,7 @@ pub async fn serve_h1_async<S: Session>(
         }
         remaining -= n as u64;
 
-        // send_h1_data is sync; your H1AsyncSession should block_in_place internally.
+        // send_h1_data is sync
         session
             .send_h1_data_async(&buf[..n], remaining == 0)
             .await?;
@@ -913,7 +910,7 @@ pub async fn serve_h2<S: Session>(
         let bytes_to_send = end - start;
 
         // HEAD was already handled inside serve_fn and returned early (no tuple),
-        // so if we are here we have a non-HEAD request and some body to send.
+        // so if we are here, we have a non-HEAD request and some body to send.
 
         if bytes_to_send == 0 {
             // Just finish with empty body and headers already set by serve_fn.
@@ -1205,7 +1202,7 @@ fn parse_byte_range(header: &HeaderValue, total_size: u64) -> Option<Range<u64>>
     let ranges_part = header_str["bytes=".len()..].trim();
 
     // If multiple ranges are requested (comma present), we don't support
-    // multipart/byteranges yet – treat as "no range" so caller sends 200 OK.
+    // multipart/byteranges yet, treat as "no range" so caller sends 200 OK.
     if ranges_part.contains(',') {
         return None;
     }

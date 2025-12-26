@@ -3,7 +3,7 @@ use bytes::Bytes;
 use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri, Version, header};
 use std::{io, net::IpAddr};
 
-/// Async HTTP/1.x session (Tokio transport)
+/// Async HTTP/1.x session
 pub struct H1SessionAsync<'a, S> {
     peer: IpAddr,
 
@@ -72,9 +72,6 @@ impl<'a, S> H1SessionAsync<'a, S> {
         self.sent
     }
 
-    /// Safe sync-ish write:
-    /// - Works only under Tokio multi-thread runtime (uses block_in_place)
-    /// - On current-thread runtime, returns an error (no panic)
     fn write_blocking(&mut self, data: &[u8]) -> io::Result<()>
     where
         S: tokio::io::AsyncWrite + Unpin,
@@ -84,7 +81,7 @@ impl<'a, S> H1SessionAsync<'a, S> {
         let handle = tokio::runtime::Handle::try_current()
             .map_err(|_| io::Error::other("H1SessionAsync requires a Tokio runtime"))?;
 
-        // IMPORTANT: block_in_place is only valid on multi-thread runtime.
+        // block_in_place is only valid on multi-thread runtime.
         if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread {
             return Err(io::Error::other(
                 "H1SessionAsync blocking writes are not supported on Tokio current-thread runtime. \
@@ -186,9 +183,9 @@ where
 
     #[inline]
     fn start_h1_streaming(&mut self) -> io::Result<()> {
-        // If you’re on a current-thread runtime, this returns an error instead of panicking.
-        // Prefer calling your handler using async + send_h1_data_async_impl() via the service layer
-        // (or switch your server runtime to multi-thread).
+        // If we’re on a current-thread runtime, this returns an error instead of panicking.
+        // Prefer calling the handler using async + send_h1_data_async() via the service layer
+        // or switch the server runtime to multi-thread
         if self.sent {
             return Err(io::Error::other("response already sent"));
         }
@@ -473,7 +470,7 @@ where
             self.rsp_headers
                 .insert(header::CONTENT_LENGTH, HeaderValue::from_static("0"));
         } else {
-            // Ensure Content-Length (we’re not doing chunked responses here)
+            // Ensure Content-Length cause we’re not doing chunked responses here
             if !self.rsp_headers.contains_key(header::CONTENT_LENGTH) {
                 let len = self.rsp_body.len().to_string();
                 self.rsp_headers.insert(
@@ -523,7 +520,6 @@ where
         Ok(())
     }
 
-    // --- WebSocket hooks (HTTP/1.1 detection only). If you don't support WS here, keep these false/Err. ---
     #[cfg(feature = "net-ws-server")]
     #[inline]
     fn is_ws(&self) -> bool {

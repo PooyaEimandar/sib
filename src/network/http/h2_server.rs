@@ -152,7 +152,7 @@ cfg_if::cfg_if! {
                 }
             }
 
-            // --- Parse request line + headers (minimal) ---
+            // Parse request line + headers (minimal)
             let mut headers = [httparse::EMPTY_HEADER; 32];
             let mut req = httparse::Request::new(&mut headers);
             let status = req.parse(&buf[..read]).map_err(|e| {
@@ -188,7 +188,7 @@ cfg_if::cfg_if! {
                 .and_then(|s| s.parse::<usize>().ok())
                 .unwrap_or(0);
 
-            // --- Read body if present ---
+            // Read body if present
             let mut body = buf[header_len..read].to_vec();
             while body.len() < content_length {
                 let mut chunk = vec![0u8; content_length - body.len()];
