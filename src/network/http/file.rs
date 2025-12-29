@@ -102,13 +102,15 @@ fn serve_fn<S: Session>(
     min_max_compress_thresholds: (u64, u64),
     content_disposition_allow_ranges: (&str, bool),
     file_tuple: &mut Option<(StatusCode, PathBuf, u64, u64)>,
-    close_connection_on_failed: bool,
+    close_connection_on_failed_and_disable_content_length: (bool, bool),
 ) -> std::io::Result<()> {
     let min_bytes_on_the_fly_size = min_max_compress_thresholds.0;
     let max_bytes_on_the_fly_size = min_max_compress_thresholds.1;
 
     let content_disposition = content_disposition_allow_ranges.0;
     let allow_ranges = content_disposition_allow_ranges.1;
+    let close_connection_on_failed = close_connection_on_failed_and_disable_content_length.0;
+    let disable_content_length = close_connection_on_failed_and_disable_content_length.1;
 
     let range_header = if allow_ranges {
         session.req_header(&header::RANGE)
@@ -158,10 +160,13 @@ fn serve_fn<S: Session>(
                     && file_info.size <= max_bytes_on_the_fly_size
                     && !range_requested
                 {
-                    let (status, body) =
-                        compress_then_respond(&mut rsp_headers, &file_info, "br", |b| {
-                            encode_brotli(b, buffer_size, quality, lgwindow)
-                        })?;
+                    let (status, body) = compress_then_respond(
+                        &mut rsp_headers,
+                        &file_info,
+                        "br",
+                        disable_content_length,
+                        |b| encode_brotli(b, buffer_size, quality, lgwindow),
+                    )?;
 
                     return session
                         .status_code(status)
@@ -186,10 +191,13 @@ fn serve_fn<S: Session>(
                     && file_info.size <= max_bytes_on_the_fly_size
                     && !range_requested
                 {
-                    let (status, body) =
-                        compress_then_respond(&mut rsp_headers, &file_info, "gzip", |b| {
-                            encode_gzip(b, level)
-                        })?;
+                    let (status, body) = compress_then_respond(
+                        &mut rsp_headers,
+                        &file_info,
+                        "gzip",
+                        disable_content_length,
+                        |b| encode_gzip(b, level),
+                    )?;
 
                     return session
                         .status_code(status)
@@ -214,10 +222,13 @@ fn serve_fn<S: Session>(
                     && file_info.size <= max_bytes_on_the_fly_size
                     && !range_requested
                 {
-                    let (status, body) =
-                        compress_then_respond(&mut rsp_headers, &file_info, "zstd", |b| {
-                            encode_zstd(b, level)
-                        })?;
+                    let (status, body) = compress_then_respond(
+                        &mut rsp_headers,
+                        &file_info,
+                        "zstd",
+                        disable_content_length,
+                        |b| encode_zstd(b, level),
+                    )?;
 
                     return session
                         .status_code(status)
@@ -244,8 +255,10 @@ fn serve_fn<S: Session>(
                 HeaderValue::from_str(enc).map_err(std::io::Error::other)?,
             );
         }
+        if !disable_content_length {
+            rsp_headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("0"));
+        }
         rsp_headers.extend([
-            (header::CONTENT_LENGTH, HeaderValue::from_static("0")),
             (
                 header::ETAG,
                 HeaderValue::from_str(&etag_to_send).map_err(std::io::Error::other)?,
@@ -284,26 +297,27 @@ fn serve_fn<S: Session>(
     ]);
 
     let (status, start, end) = if let Some(r) = range {
-        let content_length = r.end - r.start;
-        rsp_headers.extend([
-            (
-                header::CONTENT_RANGE,
-                HeaderValue::from_str(&format!("bytes {}-{}/{}", r.start, r.end - 1, total_size))
-                    .map_err(std::io::Error::other)?,
-            ),
-            (
+        rsp_headers.insert(
+            header::CONTENT_RANGE,
+            HeaderValue::from_str(&format!("bytes {}-{}/{}", r.start, r.end - 1, total_size))
+                .map_err(std::io::Error::other)?,
+        );
+        if !disable_content_length {
+            let content_length = r.end - r.start;
+            rsp_headers.insert(
                 header::CONTENT_LENGTH,
                 HeaderValue::from_str(&content_length.to_string())
                     .map_err(std::io::Error::other)?,
-            ),
-        ]);
-
+            );
+        }
         (StatusCode::PARTIAL_CONTENT, r.start, r.end)
     } else {
-        rsp_headers.insert(
-            header::CONTENT_LENGTH,
-            HeaderValue::from_str(&total_size.to_string()).map_err(std::io::Error::other)?,
-        );
+        if !disable_content_length {
+            rsp_headers.insert(
+                header::CONTENT_LENGTH,
+                HeaderValue::from_str(&total_size.to_string()).map_err(std::io::Error::other)?,
+            );
+        }
         (StatusCode::OK, 0, total_size)
     };
 
@@ -338,6 +352,7 @@ async fn serve_async_fn<S: Session>(
 
     let min_bytes_on_the_fly_size = min_max_compress_thresholds.0;
     let max_bytes_on_the_fly_size = min_max_compress_thresholds.1;
+    const DISABLE_CONTENT_LENGTH: bool = true;
 
     // meta
     let meta = match tokio::fs::metadata(&path).await {
@@ -400,10 +415,13 @@ async fn serve_async_fn<S: Session>(
                     && file_info.size <= max_bytes_on_the_fly_size
                     && !range_requested
                 {
-                    let (status, body) =
-                        compress_then_respond(&mut rsp_headers, &file_info, "br", |b| {
-                            encode_brotli(b, buffer_size, quality, lgwindow)
-                        })?;
+                    let (status, body) = compress_then_respond(
+                        &mut rsp_headers,
+                        &file_info,
+                        "br",
+                        DISABLE_CONTENT_LENGTH,
+                        |b| encode_brotli(b, buffer_size, quality, lgwindow),
+                    )?;
 
                     return session
                         .status_code(status)
@@ -429,10 +447,13 @@ async fn serve_async_fn<S: Session>(
                     && file_info.size <= max_bytes_on_the_fly_size
                     && !range_requested
                 {
-                    let (status, body) =
-                        compress_then_respond(&mut rsp_headers, &file_info, "gzip", |b| {
-                            encode_gzip(b, level)
-                        })?;
+                    let (status, body) = compress_then_respond(
+                        &mut rsp_headers,
+                        &file_info,
+                        "gzip",
+                        DISABLE_CONTENT_LENGTH,
+                        |b| encode_gzip(b, level),
+                    )?;
                     return session
                         .status_code(status)
                         .headers(&rsp_headers)?
@@ -457,10 +478,13 @@ async fn serve_async_fn<S: Session>(
                     && file_info.size <= max_bytes_on_the_fly_size
                     && !range_requested
                 {
-                    let (status, body) =
-                        compress_then_respond(&mut rsp_headers, &file_info, "zstd", |b| {
-                            encode_zstd(b, level)
-                        })?;
+                    let (status, body) = compress_then_respond(
+                        &mut rsp_headers,
+                        &file_info,
+                        "zstd",
+                        DISABLE_CONTENT_LENGTH,
+                        |b| encode_zstd(b, level),
+                    )?;
 
                     return session
                         .status_code(status)
@@ -621,7 +645,7 @@ pub fn serve_h1<S: Session>(
         content_disposition,
         allow_ranges,
         &mut file_tuple,
-        CLOSE_CONNECTION_ON_FAILED,
+        (CLOSE_CONNECTION_ON_FAILED, false),
     )?;
 
     // If we have a file tuple, it means it is ready to be served
@@ -770,7 +794,7 @@ pub async fn serve_h1_async<S: Session>(
         min_max_compress_thresholds,
         content_disposition_allow_ranges,
         &mut file_tuple,
-        CLOSE_CONNECTION_ON_FAILED,
+        (CLOSE_CONNECTION_ON_FAILED, false),
     )?;
 
     // If serve_fn already responded (HEAD / 304 / 406 etc.), it wouldn't set file_tuple.
@@ -902,7 +926,7 @@ pub async fn serve_h2<S: Session>(
         min_max_compress_thresholds,
         content_disposition_allow_ranges,
         &mut file_tuple,
-        CLOSE_CONNECTION_ON_FAILED,
+        (CLOSE_CONNECTION_ON_FAILED, true),
     );
 
     // If we have a file tuple, it means it is ready to be served
@@ -914,7 +938,7 @@ pub async fn serve_h2<S: Session>(
 
         if bytes_to_send == 0 {
             // Just finish with empty body and headers already set by serve_fn.
-            return Ok(());
+            return session.body(Bytes::new()).eom();
         }
 
         let stream_threshold = if stream_threshold_and_chunk_size.0 == 0 {
@@ -1089,6 +1113,7 @@ fn compress_then_respond(
     headers: &mut HeaderMap,
     file_info: &FileInfo,
     encoding_name: &str,
+    disable_content_length: bool,
     compress_fn: impl Fn(&[u8]) -> std::io::Result<Bytes>,
 ) -> std::io::Result<(StatusCode, Bytes)> {
     let res = (|| {
@@ -1100,15 +1125,17 @@ fn compress_then_respond(
     match res {
         Ok(compressed) => {
             let etag_val = rep_etag(&file_info.etag, Some(encoding_name));
+            if !disable_content_length {
+                headers.insert(
+                    header::CONTENT_LENGTH,
+                    HeaderValue::from_str(&compressed.len().to_string())
+                        .map_err(std::io::Error::other)?,
+                );
+            }
             headers.extend([
                 (
                     header::CONTENT_ENCODING,
                     HeaderValue::from_str(encoding_name).map_err(std::io::Error::other)?,
-                ),
-                (
-                    header::CONTENT_LENGTH,
-                    HeaderValue::from_str(&compressed.len().to_string())
-                        .map_err(std::io::Error::other)?,
                 ),
                 (
                     header::CONTENT_TYPE,
@@ -1382,11 +1409,6 @@ pub async fn serve_h2_streaming<S: Session>(
         header::ACCEPT_RANGES,
         http::HeaderValue::from_static("bytes"),
     );
-    headers.insert(
-        header::CONTENT_LENGTH,
-        http::HeaderValue::from_str(&total.to_string())
-            .map_err(|e| std::io::Error::other(format!("bad Content-Length: {e}")))?,
-    );
     if status == http::StatusCode::PARTIAL_CONTENT && total > 0 {
         let end_inclusive = end_excl - 1;
         let cr = format!("bytes {}-{}/{}", start, end_inclusive, file_len);
@@ -1517,10 +1539,6 @@ pub async fn serve_h3_streaming<S: Session>(
     headers.insert(
         header::ACCEPT_RANGES,
         http::HeaderValue::from_static("bytes"),
-    );
-    headers.insert(
-        header::CONTENT_LENGTH,
-        http::HeaderValue::from_str(&total.to_string()).map_err(std::io::Error::other)?,
     );
     if status == http::StatusCode::PARTIAL_CONTENT && total > 0 {
         let end_inclusive = end_excl - 1;
