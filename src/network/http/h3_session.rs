@@ -191,6 +191,13 @@ impl Session for H3Session {
     }
 
     #[cfg(feature = "net-h2-server")]
+    async fn start_h1_streaming_async(&mut self) -> std::io::Result<()> {
+        Err(io::Error::other(
+            "start_h1_streaming_async is not supported in H3Session",
+        ))
+    }
+
+    #[cfg(feature = "net-h2-server")]
     /// Start an HTTP/2 streaming response: send headers now, return a `H2Stream`
     /// so the caller later can push data frames and decide when to end the stream.
     #[inline]
@@ -225,6 +232,13 @@ impl Session for H3Session {
     fn send_h1_data(&mut self, _chunk: &[u8], _end_stream: bool) -> std::io::Result<()> {
         Err(std::io::Error::other(
             "send_h1_data is not supported in H3Session",
+        ))
+    }
+
+    #[cfg(feature = "net-h2-server")]
+    async fn send_h1_data_async(&mut self, data: &[u8], last: bool) -> io::Result<()> {
+        Err(io::Error::other(
+            "send_h1_data_async is not supported in H3Session",
         ))
     }
 

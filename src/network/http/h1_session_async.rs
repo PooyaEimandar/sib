@@ -235,10 +235,7 @@ where
     }
 
     /// Async header flush for H1 streaming (chunked).
-    async fn start_h1_streaming_async(&mut self) -> io::Result<()>
-    where
-        S: tokio::io::AsyncWrite + Unpin,
-    {
+    async fn start_h1_streaming_async(&mut self) -> std::io::Result<()> {
         use tokio::io::AsyncWriteExt;
 
         if self.sent {
@@ -345,10 +342,7 @@ where
     }
 
     /// Async chunk send. If `last` is true, sends terminating chunk.
-    async fn send_h1_data_async(&mut self, data: &[u8], last: bool) -> io::Result<()>
-    where
-        S: tokio::io::AsyncWrite + Unpin,
-    {
+    async fn send_h1_data_async(&mut self, data: &[u8], last: bool) -> io::Result<()> {
         use core::fmt::Write as _;
         use tokio::io::AsyncWriteExt;
 
