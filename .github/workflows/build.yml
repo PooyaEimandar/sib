@@ -88,14 +88,6 @@ jobs:
           choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' -y
           choco install ninja nasm -y
 
-      - name: Install GStreamer
-        run: |
-          Invoke-WebRequest -Uri https://gstreamer.freedesktop.org/data/pkg/windows/1.26.2/msvc/gstreamer-1.0-msvc-x86_64-1.26.2.msi -OutFile gstreamer.msi
-          Invoke-WebRequest -Uri https://gstreamer.freedesktop.org/data/pkg/windows/1.26.2/msvc/gstreamer-1.0-devel-msvc-x86_64-1.26.2.msi -OutFile gstreamer-devel.msi
-          Start-Process msiexec.exe -Wait -ArgumentList '/i gstreamer.msi /quiet /norestart'
-          Start-Process msiexec.exe -Wait -ArgumentList '/i gstreamer-devel.msi /quiet /norestart'
-          echo "C:\\gstreamer\\1.0\\msvc_x86_64\\bin" | Out-File -Append $env:GITHUB_PATH
-
       - name: Setup Rust
         run: |
           rustup default stable
