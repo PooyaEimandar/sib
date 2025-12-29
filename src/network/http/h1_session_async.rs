@@ -1,7 +1,7 @@
 use crate::network::http::session::Session;
 use bytes::Bytes;
 use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri, Version, header};
-use std::{io, net::IpAddr};
+use std::net::IpAddr;
 
 /// Async HTTP/1.x session
 pub struct H1SessionAsync<'a, S> {
@@ -72,18 +72,18 @@ impl<'a, S> H1SessionAsync<'a, S> {
         self.sent
     }
 
-    fn write_blocking(&mut self, data: &[u8]) -> io::Result<()>
+    fn write_blocking(&mut self, data: &[u8]) -> std::io::Result<()>
     where
         S: tokio::io::AsyncWrite + Unpin,
     {
         use tokio::io::AsyncWriteExt;
 
         let handle = tokio::runtime::Handle::try_current()
-            .map_err(|_| io::Error::other("H1SessionAsync requires a Tokio runtime"))?;
+            .map_err(|_| std::io::Error::other("H1SessionAsync requires a Tokio runtime"))?;
 
         // block_in_place is only valid on multi-thread runtime.
         if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread {
-            return Err(io::Error::other(
+            return Err(std::io::Error::other(
                 "H1SessionAsync blocking writes are not supported on Tokio current-thread runtime. \
                  Use the async APIs (eom_async / streaming async) or run a multi-thread runtime.",
             ));
@@ -93,7 +93,7 @@ impl<'a, S> H1SessionAsync<'a, S> {
             handle.block_on(async {
                 self.stream.write_all(data).await?;
                 self.stream.flush().await?;
-                Ok::<(), io::Error>(())
+                Ok::<(), std::io::Error>(())
             })
         })
     }
@@ -160,18 +160,21 @@ where
     }
 
     #[inline]
-    fn req_body(&mut self, _timeout: std::time::Duration) -> io::Result<&[u8]> {
+    fn req_body(&mut self, _timeout: std::time::Duration) -> std::io::Result<&[u8]> {
         Ok(&self.req_body)
     }
 
     #[inline]
-    async fn req_body_async(&mut self, _timeout: std::time::Duration) -> Option<io::Result<Bytes>> {
+    async fn req_body_async(
+        &mut self,
+        _timeout: std::time::Duration,
+    ) -> Option<std::io::Result<Bytes>> {
         Some(Ok(self.req_body.clone()))
     }
 
     #[inline]
-    fn write_all_eom(&mut self, status: &[u8]) -> io::Result<()> {
-        self.status_code(StatusCode::from_bytes(status).map_err(io::Error::other)?);
+    fn write_all_eom(&mut self, status: &[u8]) -> std::io::Result<()> {
+        self.status_code(StatusCode::from_bytes(status).map_err(std::io::Error::other)?);
         self.eom()
     }
 
@@ -182,12 +185,12 @@ where
     }
 
     #[inline]
-    fn start_h1_streaming(&mut self) -> io::Result<()> {
+    fn start_h1_streaming(&mut self) -> std::io::Result<()> {
         // If we’re on a current-thread runtime, this returns an error instead of panicking.
         // Prefer calling the handler using async + send_h1_data_async() via the service layer
         // or switch the server runtime to multi-thread
         if self.sent {
-            return Err(io::Error::other("response already sent"));
+            return Err(std::io::Error::other("response already sent"));
         }
         if self.h1_streaming {
             return Ok(());
@@ -239,7 +242,7 @@ where
         use tokio::io::AsyncWriteExt;
 
         if self.sent {
-            return Err(io::Error::other("response already sent"));
+            return Err(std::io::Error::other("response already sent"));
         }
         if self.h1_streaming {
             return Ok(());
@@ -294,31 +297,31 @@ where
     }
 
     #[inline]
-    fn start_h2_streaming(&mut self) -> io::Result<super::h2_session::H2Stream> {
-        Err(io::Error::other(
+    fn start_h2_streaming(&mut self) -> std::io::Result<super::h2_session::H2Stream> {
+        Err(std::io::Error::other(
             "start_h2_streaming is not supported in H1SessionAsync",
         ))
     }
 
     #[inline]
-    async fn start_h3_streaming(&mut self) -> io::Result<()> {
-        Err(io::Error::other(
+    async fn start_h3_streaming(&mut self) -> std::io::Result<()> {
+        Err(std::io::Error::other(
             "start_h3_streaming is not supported in H1SessionAsync",
         ))
     }
 
     #[inline]
-    fn send_h1_data(&mut self, data: &[u8], last: bool) -> io::Result<()> {
+    fn send_h1_data(&mut self, data: &[u8], last: bool) -> std::io::Result<()> {
         if self.sent {
-            return Err(io::Error::other("response already sent"));
+            return Err(std::io::Error::other("response already sent"));
         }
         if !self.h1_streaming {
-            return Err(io::Error::other(
+            return Err(std::io::Error::other(
                 "start_h1_streaming() must be called before send_h1_data()",
             ));
         }
         if !self.h1_streaming_headers_sent {
-            return Err(io::Error::other(
+            return Err(std::io::Error::other(
                 "internal error: streaming headers not sent",
             ));
         }
@@ -327,7 +330,7 @@ where
         if !data.is_empty() {
             use core::fmt::Write;
             let mut s = heapless::String::<32>::new();
-            write!(&mut s, "{:X}\r\n", data.len()).map_err(io::Error::other)?;
+            write!(&mut s, "{:X}\r\n", data.len()).map_err(std::io::Error::other)?;
             self.write_blocking(s.as_bytes())?;
             self.write_blocking(data)?;
             self.write_blocking(b"\r\n")?;
@@ -342,15 +345,15 @@ where
     }
 
     /// Async chunk send. If `last` is true, sends terminating chunk.
-    async fn send_h1_data_async(&mut self, data: &[u8], last: bool) -> io::Result<()> {
+    async fn send_h1_data_async(&mut self, data: &[u8], last: bool) -> std::io::Result<()> {
         use core::fmt::Write as _;
         use tokio::io::AsyncWriteExt;
 
         if self.sent {
-            return Err(io::Error::other("response already sent"));
+            return Err(std::io::Error::other("response already sent"));
         }
         if !self.h1_streaming {
-            return Err(io::Error::other(
+            return Err(std::io::Error::other(
                 "start_h1_streaming() must be called before send_h1_data()",
             ));
         }
@@ -362,7 +365,7 @@ where
         // Chunk frame: "<HEX>\r\n<data>\r\n"
         if !data.is_empty() {
             let mut s = heapless::String::<32>::new();
-            write!(&mut s, "{:X}\r\n", data.len()).map_err(io::Error::other)?;
+            write!(&mut s, "{:X}\r\n", data.len()).map_err(std::io::Error::other)?;
             self.stream.write_all(s.as_bytes()).await?;
             self.stream.write_all(data).await?;
             self.stream.write_all(b"\r\n").await?;
@@ -380,28 +383,28 @@ where
     }
 
     #[inline]
-    async fn send_h3_data(&mut self, _chunk: Bytes, _end_stream: bool) -> io::Result<()> {
-        Err(io::Error::other(
+    async fn send_h3_data(&mut self, _chunk: Bytes, _end_stream: bool) -> std::io::Result<()> {
+        Err(std::io::Error::other(
             "send_h3_data is not supported in H1SessionAsync",
         ))
     }
 
     #[inline]
-    fn header(&mut self, key: HeaderName, val: HeaderValue) -> io::Result<&mut Self> {
+    fn header(&mut self, key: HeaderName, val: HeaderValue) -> std::io::Result<&mut Self> {
         self.rsp_headers.insert(key, val);
         Ok(self)
     }
 
     #[inline]
-    fn header_str(&mut self, name: &str, value: &str) -> io::Result<&mut Self> {
-        let header_name = HeaderName::from_bytes(name.as_bytes()).map_err(io::Error::other)?;
-        let header_value = HeaderValue::from_str(value).map_err(io::Error::other)?;
+    fn header_str(&mut self, name: &str, value: &str) -> std::io::Result<&mut Self> {
+        let header_name = HeaderName::from_bytes(name.as_bytes()).map_err(std::io::Error::other)?;
+        let header_value = HeaderValue::from_str(value).map_err(std::io::Error::other)?;
         self.rsp_headers.insert(header_name, header_value);
         Ok(self)
     }
 
     #[inline]
-    fn headers(&mut self, headers: &HeaderMap) -> io::Result<&mut Self> {
+    fn headers(&mut self, headers: &HeaderMap) -> std::io::Result<&mut Self> {
         for (k, v) in headers.iter() {
             self.rsp_headers.insert(k.clone(), v.clone());
         }
@@ -409,10 +412,11 @@ where
     }
 
     #[inline]
-    fn headers_str(&mut self, header_val: &[(&str, &str)]) -> io::Result<&mut Self> {
+    fn headers_str(&mut self, header_val: &[(&str, &str)]) -> std::io::Result<&mut Self> {
         for (name, value) in header_val.iter() {
-            let header_name = HeaderName::from_bytes(name.as_bytes()).map_err(io::Error::other)?;
-            let header_value = HeaderValue::from_str(value).map_err(io::Error::other)?;
+            let header_name =
+                HeaderName::from_bytes(name.as_bytes()).map_err(std::io::Error::other)?;
+            let header_value = HeaderValue::from_str(value).map_err(std::io::Error::other)?;
             self.rsp_headers.insert(header_name, header_value);
         }
         Ok(self)
@@ -425,9 +429,9 @@ where
     }
 
     #[inline]
-    fn eom(&mut self) -> io::Result<()> {
+    fn eom(&mut self) -> std::io::Result<()> {
         if self.sent {
-            return Err(io::Error::other("response already sent"));
+            return Err(std::io::Error::other("response already sent"));
         }
 
         if self.h1_streaming {
@@ -441,10 +445,10 @@ where
         }
 
         let handle = tokio::runtime::Handle::try_current()
-            .map_err(|_| io::Error::other("H1SessionAsync requires a Tokio runtime"))?;
+            .map_err(|_| std::io::Error::other("H1SessionAsync requires a Tokio runtime"))?;
 
         if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread {
-            return Err(io::Error::other(
+            return Err(std::io::Error::other(
                 "H1SessionAsync::eom() (sync) is not supported on Tokio current-thread runtime; \
                  use eom_async().await or run a multi-thread runtime.",
             ));
@@ -454,7 +458,7 @@ where
     }
 
     #[inline]
-    async fn eom_async(&mut self) -> io::Result<()> {
+    async fn eom_async(&mut self) -> std::io::Result<()> {
         use tokio::io::AsyncWriteExt;
 
         // If the response MUST NOT have a body, force empty body and Content-Length: 0
@@ -469,7 +473,7 @@ where
                 let len = self.rsp_body.len().to_string();
                 self.rsp_headers.insert(
                     header::CONTENT_LENGTH,
-                    HeaderValue::from_str(&len).map_err(io::Error::other)?,
+                    HeaderValue::from_str(&len).map_err(std::io::Error::other)?,
                 );
             }
         }
@@ -542,7 +546,7 @@ where
     #[cfg(all(feature = "net-ws-server", feature = "net-h1-server"))]
     #[inline]
     fn ws_accept(&mut self) -> io::Result<()> {
-        Err(io::Error::other(
+        Err(std::io::Error::other(
             "ws_accept is not implemented for H1SessionAsync",
         ))
     }
@@ -550,7 +554,7 @@ where
     #[cfg(all(feature = "net-ws-server", feature = "net-h1-server"))]
     #[inline]
     fn ws_read(&mut self) -> io::Result<(crate::network::http::ws::OpCode, &[u8], bool)> {
-        Err(io::Error::other(
+        Err(std::io::Error::other(
             "ws_read is not implemented for H1SessionAsync",
         ))
     }
@@ -563,14 +567,14 @@ where
         _payload: &[u8],
         _fin: bool,
     ) -> io::Result<()> {
-        Err(io::Error::other(
+        Err(std::io::Error::other(
             "ws_write is not implemented for H1SessionAsync",
         ))
     }
 
     #[cfg(all(feature = "net-ws-server", feature = "net-h1-server"))]
-    fn ws_close(&mut self, _reason: Option<&[u8]>) -> io::Result<()> {
-        Err(io::Error::other(
+    fn ws_close(&mut self, _reason: Option<&[u8]>) -> std::io::Result<()> {
+        Err(std::io::Error::other(
             "ws_close is not implemented for H1SessionAsync",
         ))
     }

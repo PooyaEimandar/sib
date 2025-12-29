@@ -229,7 +229,6 @@ where
         Ok(&self.req_buf[..content_length])
     }
 
-    #[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
     #[inline]
     async fn req_body_async(
         &mut self,
@@ -271,7 +270,6 @@ where
         self
     }
 
-    #[cfg(feature = "net-h1-server")]
     fn start_h1_streaming(&mut self) -> std::io::Result<()> {
         use std::io::{ErrorKind, IoSlice};
 
@@ -340,22 +338,19 @@ where
         Ok(())
     }
 
-    #[cfg(feature = "net-h2-server")]
     async fn start_h1_streaming_async(&mut self) -> std::io::Result<()> {
-        Err(io::Error::other(
+        Err(std::io::Error::other(
             "start_h1_streaming_async is not supported in H1Session",
         ))
     }
 
-    #[cfg(feature = "net-h2-server")]
     #[inline]
     fn start_h2_streaming(&mut self) -> std::io::Result<super::h2_session::H2Stream> {
-        Err(io::Error::other(
+        Err(std::io::Error::other(
             "start_h2_streaming is not supported in H1Session",
         ))
     }
 
-    #[cfg(feature = "net-h3-server")]
     #[inline]
     async fn start_h3_streaming(&mut self) -> std::io::Result<()> {
         Err(std::io::Error::other(
@@ -363,7 +358,6 @@ where
         ))
     }
 
-    #[cfg(feature = "net-h1-server")]
     fn send_h1_data(&mut self, chunk: &[u8], end_stream: bool) -> std::io::Result<()> {
         if !self.streaming {
             // Safer to fail fast instead of implicitly starting:
@@ -397,14 +391,12 @@ where
         Ok(())
     }
 
-    #[cfg(feature = "net-h2-server")]
-    async fn send_h1_data_async(&mut self, data: &[u8], last: bool) -> io::Result<()> {
+    async fn send_h1_data_async(&mut self, _data: &[u8], _last: bool) -> io::Result<()> {
         Err(io::Error::other(
             "send_h1_data_async is not supported in H1Session",
         ))
     }
 
-    #[cfg(feature = "net-h3-server")]
     #[inline]
     async fn send_h3_data(
         &mut self,
