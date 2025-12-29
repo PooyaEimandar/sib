@@ -93,7 +93,6 @@ impl Session for H3Session {
         self.req.headers().get(header).cloned()
     }
 
-    #[cfg(feature = "net-h1-server")]
     #[inline]
     fn req_body(&mut self, _timeout: std::time::Duration) -> std::io::Result<&[u8]> {
         Err(std::io::Error::other(
@@ -183,21 +182,18 @@ impl Session for H3Session {
         Some(Ok(out.freeze()))
     }
 
-    #[cfg(any(feature = "net-h1-server", feature = "net-h2-server"))]
     fn start_h1_streaming(&mut self) -> std::io::Result<()> {
         Err(std::io::Error::other(
             "start_h1_streaming is not supported in H3Session",
         ))
     }
 
-    #[cfg(feature = "net-h2-server")]
     async fn start_h1_streaming_async(&mut self) -> std::io::Result<()> {
         Err(std::io::Error::other(
             "start_h1_streaming_async is not supported in H3Session",
         ))
     }
 
-    #[cfg(feature = "net-h2-server")]
     /// Start an HTTP/2 streaming response: send headers now, return a `H2Stream`
     /// so the caller later can push data frames and decide when to end the stream.
     #[inline]
@@ -207,7 +203,6 @@ impl Session for H3Session {
         ))
     }
 
-    #[cfg(feature = "net-h3-server")]
     #[inline]
     async fn start_h3_streaming(&mut self) -> std::io::Result<()> {
         // Build response head from current status + accumulated headers
@@ -228,21 +223,20 @@ impl Session for H3Session {
             .map_err(|e| std::io::Error::other(e.to_string()))
     }
 
-    #[cfg(any(feature = "net-h1-server", feature = "net-h2-server"))]
+    #[inline]
     fn send_h1_data(&mut self, _chunk: &[u8], _end_stream: bool) -> std::io::Result<()> {
         Err(std::io::Error::other(
             "send_h1_data is not supported in H3Session",
         ))
     }
 
-    #[cfg(feature = "net-h2-server")]
-    async fn send_h1_data_async(&mut self, ـdata: &[u8], ـlast: bool) -> std::io::Result<()> {
+    #[inline]
+    async fn send_h1_data_async(&mut self, _data: &[u8], _last: bool) -> std::io::Result<()> {
         Err(std::io::Error::other(
             "send_h1_data_async is not supported in H3Session",
         ))
     }
 
-    #[cfg(feature = "net-h3-server")]
     #[inline]
     async fn send_h3_data(&mut self, chunk: bytes::Bytes, end_stream: bool) -> std::io::Result<()> {
         self.stream
