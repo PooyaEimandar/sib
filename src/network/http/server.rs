@@ -651,7 +651,6 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                             "SO_REUSEPORT unavailable; falling back to a single shard ({} -> 1)",
                             requested_shards
                         );
-                        // keep only the first listener
                         std_listeners.truncate(1);
                         break;
                     } else {
@@ -661,12 +660,24 @@ pub trait HFactory: Send + Sync + Sized + 'static {
             }
         }
 
+        // Local helper (shareable across threads/tasks)
+        let is_tls_eof_no_close_notify: Arc<dyn Fn(&std::io::Error) -> bool + Send + Sync> =
+            Arc::new(|e: &std::io::Error| -> bool {
+                let msg = e.to_string();
+                matches!(e.kind(), std::io::ErrorKind::UnexpectedEof)
+                    || msg.contains("peer closed connection without sending TLS close_notify")
+                    || msg.contains("unexpected eof")
+                    || msg.contains("UnexpectedEof")
+            });
+
         // One OS thread per shard, each with a current-thread Tokio runtime + LocalSet
         let mut handles = Vec::with_capacity(std_listeners.len());
+
         for (shard_id, std_listener) in std_listeners.into_iter().enumerate() {
             let tls_acceptor = tls_acceptor.clone();
             let factory = factory.clone();
             let h2_cfg = h2_cfg_arc.clone();
+            let is_tls_eof_no_close_notify = is_tls_eof_no_close_notify.clone();
 
             handles.push(
             std::thread::Builder::new()
@@ -684,12 +695,9 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                             "Tokio H2/TLS shard {shard_id} listening on {}",
                             listener
                                 .local_addr()
-                                .map_err(|e| {
-                                    std::io::Error::other(format!("local_addr: {e}"))
-                                })?,
+                                .map_err(|e| std::io::Error::other(format!("local_addr: {e}")))?,
                         );
 
-                        // Per-shard concurrency guard
                         let sem = Arc::new(Semaphore::new(h2_cfg.max_sessions as usize));
                         let local = tokio::task::LocalSet::new();
 
@@ -719,6 +727,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                                     let tls_acceptor = tls_acceptor.clone();
                                     let factory = factory.clone();
                                     let h2_cfg_cloned = h2_cfg.clone();
+                                    let is_tls_eof_no_close_notify = is_tls_eof_no_close_notify.clone();
 
                                     tokio::task::spawn_local(async move {
                                         let _permit = permit;
@@ -747,36 +756,43 @@ pub trait HFactory: Send + Sync + Sized + 'static {
 
                                                 let service = factory.async_service(shard_id);
 
-                                                if let Err(e) = serve_h2(tls_stream, service, &h2_cfg_cloned, peer_ip).await 
-                                                    && !is_tls_eof_no_close_notify(&e) {
-                                                        eprintln!("h2 serve error (shard {shard_id}) from {peer_addr}: {e}");
+                                                if let Err(e) =
+                                                    serve_h2(tls_stream, service, &h2_cfg_cloned, peer_ip).await  
+                                                    && !(*is_tls_eof_no_close_notify)(&e) {
+                                                        eprintln!(
+                                                            "h2 serve error (shard {shard_id}) from {peer_addr}: {e}"
+                                                        );
                                                 }
                                             }
                                             _ => {
                                                 use crate::network::http::h2_server::serve_h1;
+
                                                 let service = factory.async_service(shard_id);
-                                                if let Err(e) = serve_h1(tls_stream, service, &h2_cfg_cloned, peer_ip).await 
-                                                    && !is_tls_eof_no_close_notify(&e) {
+
+                                                if let Err(e) =
+                                                    serve_h1(tls_stream, service, &h2_cfg_cloned, peer_ip).await
+                                                    && !(*is_tls_eof_no_close_notify)(&e) {
                                                         eprintln!(
                                                             "h1 fallback serve error (shard {shard_id}) from {peer_addr}: {e}"
                                                         );
                                                 }
                                             }
-                                        };
+                                        }
                                     });
                                 }
+
                                 #[allow(unreachable_code)]
                                 Ok::<(), std::io::Error>(())
                             })
                             .await
                     })?;
 
-                Ok(())
-            })?,
+                    Ok(())
+                })?,
         );
         }
 
-        // Typical server behavior: block by joining the shard threads
+        // block by joining shard threads
         for h in handles {
             h.join()
                 .map_err(|_| std::io::Error::other("A shard thread panicked in start_h2_tls"))??;
@@ -1265,14 +1281,6 @@ pub(crate) fn parse_authority(s: &str) -> Option<(String, Option<u16>)> {
         }
     }
     Some((trim.to_string(), None))
-}
-
-#[cfg(feature = "net-h2-server")]
-fn is_tls_eof_no_close_notify(e: &std::io::Error) -> bool {
-    let msg = e.to_string();
-    msg.contains("peer closed connection without sending TLS close_notify")
-        || msg.contains("unexpected eof")
-        || msg.contains("UnexpectedEof")
 }
 
 #[cfg(test)]
