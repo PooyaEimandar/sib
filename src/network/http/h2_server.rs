@@ -1,4 +1,4 @@
-use crate::network::http::{server::H2Config, session::Session};
+use crate::network::http::server::H2Config;
 cfg_if::cfg_if! {
     // Glommio runtime (Linux)
     if #[cfg(all(target_os = "linux", feature = "rt-glommio", not(feature = "rt-tokio")))] {
@@ -343,6 +343,7 @@ cfg_if::cfg_if! {
                     keep_alive,
                 );
 
+                use crate::network::http::session::Session;
                 if let Err(e) = service.call(&mut session).await {
                     eprintln!("h1 service error: {e}");
                     if !session.response_sent() {

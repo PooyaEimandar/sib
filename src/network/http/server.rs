@@ -1267,6 +1267,7 @@ pub(crate) fn parse_authority(s: &str) -> Option<(String, Option<u16>)> {
     Some((trim.to_string(), None))
 }
 
+#[cfg(feature = "net-h2-server")]
 fn is_tls_eof_no_close_notify(e: &std::io::Error) -> bool {
     let msg = e.to_string();
     msg.contains("peer closed connection without sending TLS close_notify")
