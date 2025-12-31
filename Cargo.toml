@@ -85,6 +85,10 @@ sha2 = { version = "0.10.9", optional = true, default-features = false, features
 socket2 = { version = "0.6.1", optional = true, default-features = false, features = [
     "all",
 ] }
+tracing = { version = "0.1.44", default-features = false, features = [
+    "attributes",
+    "std",
+] }
 tokio = { version = "1.48.0", optional = true, default-features = false, features = [
     "fs",
     "io-util",
@@ -123,7 +127,7 @@ quinn = { version = "0.11.9", optional = true, default-features = false, feature
 ] }
 
 [features]
-default = []
+default = ["net-kafka-cli", "rt-may"]
 db-fdb = ["foundationdb-sys", "crossbeam"]
 net-file-server = [
     "brotli",
@@ -135,7 +139,7 @@ net-file-server = [
     "mime",
     "zstd",
 ]
-net-kafka-cli = ["rdkafka"]
+net-kafka-cli = ["rdkafka", "futures-lite"]
 net-h1-server = [
     "arc-swap",
     "async-trait",
