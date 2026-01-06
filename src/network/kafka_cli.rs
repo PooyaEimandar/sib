@@ -43,8 +43,8 @@ fn base_client_config(cfg: &KafkaSettings) -> ClientConfig {
 
 fn create_producer_client_config(cfg: &KafkaSettings) -> ClientConfig {
     let mut cc = base_client_config(cfg);
-    cc.set("message.timeout.ms", &cfg.timeout.as_millis().to_string());
-    cc.set("queue.buffering.max.ms", &cfg.buffering_max_ms.to_string());
+    cc.set("message.timeout.ms", cfg.timeout.as_millis().to_string());
+    cc.set("queue.buffering.max.ms", cfg.buffering_max_ms.to_string());
     cc
 }
 
@@ -73,7 +73,7 @@ cfg_if::cfg_if! {
             pub fn new(settings: KafkaSettings) -> std::io::Result<Self> {
                 let producer: BaseProducer = create_producer_client_config(&settings)
                     .create()
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Kafka producer creation failed: {e}")))?;
+                    .map_err(|e| std::io::Error::other(format!("Kafka producer creation failed: {e}")))?;
 
                 Ok(Self {
                     producer: Arc::new(producer),
@@ -92,7 +92,7 @@ cfg_if::cfg_if! {
                 use rdkafka::util::Timeout;
                 self.producer
                     .flush(Timeout::After(self.settings.timeout))
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Kafka producer flush error: {e}")))
+                    .map_err(|e| std::io::Error::other(format!("Kafka producer flush error: {e}")))
             }
         }
 
@@ -125,7 +125,7 @@ cfg_if::cfg_if! {
             {
                 self.consumer
                     .subscribe(&[topic])
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("subscribe failed: {e}")))?;
+                    .map_err(|e| std::io::Error::other(format!("subscribe failed: {e}")))?;
 
                 let consumer = Arc::clone(&self.consumer);
 
