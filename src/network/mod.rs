@@ -13,6 +13,3 @@ compile_error!("Features `rt-glommio` and `rt-tokio` are mutually exclusive. Pic
     feature = "net-wt-server",
 ))]
 pub mod http;
-
-#[cfg(feature = "net-kafka-cli")]
-pub mod kafka_cli;
