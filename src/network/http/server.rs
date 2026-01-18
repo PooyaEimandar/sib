@@ -168,55 +168,43 @@ fn make_rustls_config(
     chain_cert_key: &(Option<&[u8]>, &[u8], &[u8]),
     alpn_protocols: Vec<Vec<u8>>,
 ) -> std::io::Result<rustls::ServerConfig> {
+    use rustls::pki_types::pem::PemObject;
     use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-    use rustls_pemfile::{certs, pkcs8_private_keys};
 
-    // Load certs & key
-    let certs: Vec<CertificateDer<'static>> = {
-        let mut reader = std::io::Cursor::new(chain_cert_key.1);
-        certs(&mut reader)
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .collect()
-    };
+    fn io_err(e: impl std::fmt::Display) -> std::io::Error {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string())
+    }
 
-    let key: PrivateKeyDer<'static> = {
-        let mut reader = std::io::Cursor::new(chain_cert_key.2);
-        let keys: Result<Vec<_>, std::io::Error> = pkcs8_private_keys(&mut reader)
-            .map(|res| {
-                res.map_err(|e| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        format!("Server got a bad private key: {e}"),
-                    )
-                })
-            })
-            .collect();
-        let keys = keys?;
-        if let Some(key) = keys.into_iter().next() {
-            PrivateKeyDer::from(key)
-        } else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Server could not find a private key",
-            ));
-        }
-    };
+    // Load optional chain certs from PEM.
+    let mut certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(chain_cert_key.1)
+        .map(|c| c.map(|x| x.into_owned()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(io_err)?;
+
+    if let Some(extra_chain_pem) = chain_cert_key.0 {
+        let extra: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(extra_chain_pem)
+            .map(|c| c.map(|x| x.into_owned()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(io_err)?;
+        certs.extend(extra);
+    }
+
+    if certs.is_empty() {
+        return Err(io_err("Server could not find any certificates in PEM"));
+    }
+
+    // Load private key (supports PKCS#8, PKCS#1 RSA, SEC1 EC) from PEM.
+    let key: PrivateKeyDer<'static> = PrivateKeyDer::from_pem_slice(chain_cert_key.2)
+        .map_err(io_err)?
+        .clone_key();
 
     // TLS config
     let mut cfg = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, key)
-        .map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("Server could not load cert/key: {e}"),
-            )
-        })?;
+        .map_err(|e| io_err(format!("Server could not load cert/key: {e}")))?;
 
-    // set ALPN
     cfg.alpn_protocols = alpn_protocols;
-
     Ok(cfg)
 }
 
