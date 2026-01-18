@@ -1431,9 +1431,11 @@ pub mod tests {
             let req_path = session.req_path();
             let http_version = session.req_http_version();
             let req_body = session.req_body(std::time::Duration::from_secs(5))?;
+            let req_body_text = std::str::from_utf8(req_body.as_ref())
+                .unwrap_or("<non-utf8 body>");
 
             let body = bytes::Bytes::from(format!(
-                "Http version: {http_version:?}, Echo: {req_method:?} {req_host:?} {req_path:?}\r\nBody: {req_body:?}"
+                "Http version: {http_version:?}, Echo: {req_method:?} {req_host:?} {req_path:?}\r\nBody: {req_body_text}"
             ));
 
             session
@@ -1528,6 +1530,48 @@ pub mod tests {
         }
     }
 
+    // fn read_http_response(mut stream: &mut may::net::TcpStream) -> String {
+    //     use std::io::Read;
+
+    //     let mut data = Vec::new();
+    //     let mut buf = [0u8; 4096];
+
+    //     // read until we have headers
+    //     loop {
+    //         let n = stream.read(&mut buf).expect("read");
+    //         if n == 0 { break; }
+    //         data.extend_from_slice(&buf[..n]);
+    //         if data.windows(4).any(|w| w == b"\r\n\r\n") {
+    //             break;
+    //         }
+    //     }
+
+    //     let head_end = data.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+    //     let headers = &data[..head_end];
+    //     let headers_str = String::from_utf8_lossy(headers);
+
+    //     // find content-length
+    //     let mut content_len = 0usize;
+    //     for line in headers_str.split("\r\n") {
+    //         if let Some(v) = line.strip_prefix("Content-Length:") {
+    //             content_len = v.trim().parse().unwrap_or(0);
+    //         }
+    //     }
+
+    //     // read the rest of body
+    //     let have_body = data.len() - head_end;
+    //     while have_body + (data.len() - head_end - have_body) < content_len {
+    //         let n = stream.read(&mut buf).expect("read body");
+    //         if n == 0 { break; }
+    //         data.extend_from_slice(&buf[..n]);
+    //         if data.len() - head_end >= content_len {
+    //             break;
+    //         }
+    //     }
+
+    //     String::from_utf8_lossy(&data).to_string()
+    // }
+
     #[cfg(any(
         feature = "net-h1-server",
         feature = "net-h2-server",
@@ -1614,11 +1658,7 @@ pub mod tests {
     #[test]
     fn test_h1_server_get() {
         use crate::network::http::server::H1Config;
-        use may::net::TcpStream;
-        use std::{
-            io::{Read, Write},
-            time::Duration,
-        };
+        use std::time::Duration;
 
         const NUMBER_OF_WORKERS: usize = 1;
         crate::init_global_poller(NUMBER_OF_WORKERS, 2 * 1024 * 1024);
@@ -1630,20 +1670,27 @@ pub mod tests {
             .expect("h1 start server");
 
         let client_handler = may::go!(move || {
+            // Give the server a moment to start listening
             may::coroutine::sleep(Duration::from_millis(500));
 
-            // Client sends HTTP request
-            let mut stream = TcpStream::connect(addr).expect("connect");
-            stream
-                .write_all(b"GET /test HTTP/1.1\r\nHost: localhost\r\n\r\n")
-                .unwrap();
+            // Use reqwest (blocking) in this coroutine.
+            // If your server is plain HTTP, this is exactly what you want.
+            let client = reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .expect("build reqwest client");
 
-            let mut buf = [0u8; 1024];
-            let n = stream.read(&mut buf).unwrap();
-            let response = std::str::from_utf8(&buf[..n]).unwrap();
+            let url = format!("http://{addr}/test");
 
-            eprintln!("H1 GET Response: {response}");
-            assert!(response.contains("/test"));
+            let resp = client.get(&url).body("Hello").send().expect("send GET");
+            let status = resp.status();
+            let body = resp.text().expect("read body");
+
+            eprintln!("H1 GET Status: {status}");
+            eprintln!("H1 GET Body: {body}");
+
+            assert!(status.is_success(), "status was {status}");
+            assert!(body.contains("/test"), "body did not contain /test");
         });
 
         may::join!(server_handle, client_handler);
@@ -1651,12 +1698,13 @@ pub mod tests {
         std::thread::sleep(Duration::from_secs(1));
     }
 
+
     #[cfg(feature = "net-h1-server")]
     #[test]
     fn test_h1_server_post() {
         use crate::network::http::server::H1Config;
-        use may::net::TcpStream;
         use std::time::Duration;
+
         const NUMBER_OF_WORKERS: usize = 1;
         crate::init_global_poller(NUMBER_OF_WORKERS, 2 * 1024 * 1024);
 
@@ -1666,33 +1714,43 @@ pub mod tests {
             .expect("h1 start server");
 
         let client_handler = may::go!(move || {
-            use std::io::{Read, Write};
             may::coroutine::sleep(Duration::from_millis(500));
 
-            let mut stream = TcpStream::connect(addr).expect("connect");
+            let client = reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .expect("build reqwest client");
 
-            let body = b"hello=world";
-            let req = format!(
-                "POST /submit HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\r\n",
-                body.len()
-            );
+            let url = format!("http://{addr}/submit");
 
-            stream.write_all(req.as_bytes()).unwrap();
-            stream.write_all(body).unwrap();
+            let body = "hello=world";
 
-            let mut buf = [0u8; 1024];
-            let n = stream.read(&mut buf).unwrap();
-            let response = std::str::from_utf8(&buf[..n]).unwrap();
-            eprintln!("H1 POST Response: {response}");
+            let resp = client
+                .post(&url)
+                .header(
+                    reqwest::header::CONTENT_TYPE,
+                    "application/x-www-form-urlencoded",
+                )
+                .body(body)
+                .send()
+                .expect("send POST");
 
-            // Should include method, path, and echoed body contents
-            assert!(response.contains("POST"));
-            assert!(response.contains("/submit"));
+            let status = resp.status();
+            let text = resp.text().expect("read body");
+
+            eprintln!("H1 POST Status: {status}");
+            eprintln!("H1 POST Body: {text}");
+
+            assert!(status.is_success(), "status was {status}");
+            assert!(text.contains("POST"));
+            assert!(text.contains("/submit"));
+            assert!(text.contains("hello=world"));
         });
 
         may::join!(server_handle, client_handler);
         std::thread::sleep(Duration::from_secs(1));
     }
+
 
     #[cfg(all(feature = "net-ws-server", feature = "net-h1-server"))]
     #[test]

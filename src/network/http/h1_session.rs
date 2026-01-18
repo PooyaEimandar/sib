@@ -344,6 +344,7 @@ where
         ))
     }
 
+    #[cfg(feature = "net-h2-server")]
     #[inline]
     fn start_h2_streaming(&mut self) -> std::io::Result<super::h2_session::H2Stream> {
         Err(std::io::Error::other(
@@ -534,10 +535,11 @@ where
         Ok(())
     }
 
-    #[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
     #[inline]
     async fn eom_async(&mut self) -> std::io::Result<()> {
-        Err(io::Error::other("eom_async is not supported in H1Session"))
+        Err(std::io::Error::other(
+            "eom_async is not supported in H1Session",
+        ))
     }
 
     #[cfg(feature = "net-ws-server")]

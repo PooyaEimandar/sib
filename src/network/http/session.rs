@@ -23,7 +23,10 @@ pub trait Session {
 
     fn start_h1_streaming(&mut self) -> std::io::Result<()>;
     async fn start_h1_streaming_async(&mut self) -> std::io::Result<()>;
+
+    #[cfg(feature = "net-h2-server")]
     fn start_h2_streaming(&mut self) -> std::io::Result<super::h2_session::H2Stream>;
+
     async fn start_h3_streaming(&mut self) -> std::io::Result<()>;
 
     fn send_h1_data(&mut self, chunk: &[u8], end_stream: bool) -> std::io::Result<()>;

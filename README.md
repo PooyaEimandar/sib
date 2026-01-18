@@ -7,20 +7,20 @@ it is designed for **real-time streaming**, **low-latency networking**, and **sc
 
 ## ✨ Features
 
-| Feature          | Description                        
-| ---------------- | ---------------------------------
-| `net-h1-server`  | Enable HTTP/1 server            
-| `net-h2-server`  | Enable HTTP/2 server
-| `net-h3-server`  | Enable HTTP/3 server
-| `net-ratelimiter`| Enable Ratelimiter service wrapper  
-| `net-ws-server`  | Enable WebSocket server   
-| `net-wt-server`  | Enable WebTransport server   
-| `db-fdb`         | FoundationDB client database + cache      
-| `rt-glommio`     | Enable glommio runtime for HTTP/2/3      
-| `rt-tokio`       | Enable tokio runtime for HTTP/2/3 and/or db-fdb
-| `rt-may`         | Enable may runtime for  HTTP/1 and/or db-fdb
-| `stm-sender`     | Real-time video/audio streamer    
-| `stm-receiver`   | Real-time video/audio receiver    
+| Feature           | Description                                     |
+| ----------------- | ----------------------------------------------- |
+| `net-h1-server`   | Enable HTTP/1 server                            |
+| `net-h2-server`   | Enable HTTP/2 server                            |
+| `net-h3-server`   | Enable HTTP/3 server                            |
+| `net-ratelimiter` | Enable Ratelimiter service wrapper              |
+| `net-ws-server`   | Enable WebSocket server                         |
+| `net-wt-server`   | Enable WebTransport server                      |
+| `db-fdb`          | FoundationDB client database + cache            |
+| `rt-glommio`      | Enable glommio runtime for HTTP/2/3             |
+| `rt-tokio`        | Enable tokio runtime for HTTP/2/3 and/or db-fdb |
+| `rt-may`          | Enable may runtime for HTTP/1 and/or db-fdb     |
+| `stm-sender`      | Real-time video/audio streamer                  |
+| `stm-receiver`    | Real-time video/audio receiver                  |
 
 ## 📊 Benchmarks
 
@@ -52,6 +52,15 @@ You’ll need to set up the LLVM toolchain and related libraries first for using
 sudo apt install -y cmake clang lld llvm libclang-dev
 ```
 
+## 📦 Prerequisites (Windows)
+
+Setup
+
+- MSVC
+- [CMake](https://cmake.org/download/)
+- [Clang](https://github.com/llvm/llvm-project/releases)
+- [NASM](https://www.nasm.us/)
+
 ## 📚 Documentation
 
 - 📦 [Crate](https://crates.io/crates/sib)
@@ -73,4 +82,3 @@ at your option.
 ## 📜 [Code of conduct](https://github.com/PooyaEimandar/sib/blob/main/CODE_OF_CONDUCT.md)
 
 ## 🔐 [Security](https://github.com/PooyaEimandar/sib/blob/main/SECURITY.md)
-
