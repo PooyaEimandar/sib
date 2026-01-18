@@ -12,6 +12,7 @@ it is designed for **real-time streaming**, **low-latency networking**, and **sc
 | `net-h1-server`   | Enable HTTP/1 server                            |
 | `net-h2-server`   | Enable HTTP/2 server                            |
 | `net-h3-server`   | Enable HTTP/3 server                            |
+| `net-kafka-cli`   | Enable Kafka client                             |
 | `net-ratelimiter` | Enable Ratelimiter service wrapper              |
 | `net-ws-server`   | Enable WebSocket server                         |
 | `net-wt-server`   | Enable WebTransport server                      |
