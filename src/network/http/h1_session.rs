@@ -13,6 +13,7 @@ const CRLF: &[u8] = b"\r\n";
 
 pub(crate) const BUF_LEN: usize = 8 * 4096;
 pub(crate) const MAX_HEADERS: usize = 32;
+
 pub static CURRENT_DATE: once_cell::sync::Lazy<Arc<ArcSwap<Arc<str>>>> =
     once_cell::sync::Lazy::new(|| {
         let now = httpdate::HttpDate::from(std::time::SystemTime::now()).to_string();
@@ -32,6 +33,31 @@ pub static CURRENT_DATE: once_cell::sync::Lazy<Arc<ArcSwap<Arc<str>>>> =
         swap
     });
 
+#[inline]
+fn drain_nb<W: Write>(w: &mut W, buf: &mut BytesMut) -> io::Result<()> {
+    use std::io::ErrorKind;
+
+    while !buf.is_empty() {
+        match w.write(&buf[..]) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    ErrorKind::WriteZero,
+                    "drain_nb: write returned 0",
+                ));
+            }
+            Ok(n) => {
+                // advance readable window
+                buf.advance(n);
+            }
+            Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
+                may::coroutine::yield_now();
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
 pub struct H1Session<'buf, 'header, 'stream, S>
 where
     S: Read + Write,
@@ -44,7 +70,7 @@ where
     req_buf: &'buf mut BytesMut,
     // length of response headers (those you append with header/header_str)
     rsp_headers_len: usize,
-    // buffer for response (your headers + blank line + body)
+    // buffer for response (your headers + blank line + body) OR ws send queue after upgrade
     rsp_buf: &'buf mut BytesMut,
     // stream to write to
     stream: &'stream mut S,
@@ -566,7 +592,10 @@ where
 
         // complete handshake (101)
         let mut resp = format!(
-            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n"
+            "HTTP/1.1 101 Switching Protocols\r\n\
+             Upgrade: websocket\r\n\
+             Connection: Upgrade\r\n\
+             Sec-WebSocket-Accept: {accept}\r\n"
         );
         if let Some(sub_protocol) =
             self.req_header(&HeaderName::from_static("sec-websocket-protocol"))
@@ -579,7 +608,14 @@ where
         resp.push_str("\r\n");
         self.stream.write_all(resp.as_bytes())?;
 
-        // stream is ready for websocket frames
+        // after upgrade, start WS mode with clean buffers/state
+        self.req_buf.clear();
+        self.rsp_buf.clear();
+        self.status_buf.clear();
+        self.status_set = false;
+        self.rsp_headers_len = 0;
+        self.streaming = false;
+
         Ok(())
     }
 
@@ -590,7 +626,6 @@ where
     ) -> std::io::Result<(crate::network::http::ws::OpCode, bytes::Bytes, bool)> {
         use crate::network::http::ws::OpCode;
 
-        // get first two bytes
         let h = take_exact_nb(self.stream, self.req_buf, 2)?;
         let b0 = h[0];
         let b1 = h[1];
@@ -681,18 +716,17 @@ where
         payload: &bytes::Bytes,
         fin: bool,
     ) -> std::io::Result<()> {
-        use crate::network::http::h1_server::write;
-        use std::io::{ErrorKind, IoSlice};
-
         // Build WS header (server frames are unmasked)
         let mut hdr = [0u8; 10];
         let mut pos = 0;
-        hdr[pos] = (if fin { 0x80 } else { 0 }) | (code as u8);
+
+        // be defensive: only low nibble is opcode
+        hdr[pos] = (if fin { 0x80 } else { 0 }) | ((code as u8) & 0x0F);
         pos += 1;
 
         let len = payload.len();
         if len < 126 {
-            hdr[pos] = len as u8;
+            hdr[pos] = (len as u8) & 0x7F; // MASK=0
             pos += 1;
         } else if len <= 0xFFFF {
             hdr[pos] = 126;
@@ -706,70 +740,17 @@ where
             pos += 8;
         }
 
-        // If we already have bytes queued, preserve order: buffer + drain.
-        if !self.rsp_buf.is_empty() {
-            self.rsp_buf.extend_from_slice(&hdr[..pos]);
-            self.rsp_buf.extend_from_slice(payload);
-            while !self.rsp_buf.is_empty() {
-                let (_, blocked) = write(self.stream, self.rsp_buf)?;
-                if blocked && !self.rsp_buf.is_empty() {
-                    may::coroutine::yield_now();
-                }
-            }
-            return Ok(());
-        }
+        // Always queue frame into rsp_buf then drain with raw writer.
+        // This avoids HTTP helper logic and avoids vectored-write corner cases on Windows.
+        self.rsp_buf.extend_from_slice(&hdr[..pos]);
+        self.rsp_buf.extend_from_slice(payload);
 
-        // Fast path: try one zero-copy vectored write (header + payload)
-        let total = pos + len;
-        let bufs = [IoSlice::new(&hdr[..pos]), IoSlice::new(payload)];
-        match self.stream.write_vectored(&bufs) {
-            Ok(n) if n == total => {
-                // All done, nothing buffered.
-                return Ok(());
-            }
-            Ok(n) => {
-                // Partial write: buffer whatever remains, then drain.
-                let mut remaining_hdr_off = 0usize;
-                let mut remaining_payload_off = 0usize;
-
-                if n < pos {
-                    remaining_hdr_off = n;
-                } else {
-                    remaining_payload_off = n - pos;
-                }
-
-                if remaining_hdr_off < pos {
-                    self.rsp_buf.extend_from_slice(&hdr[remaining_hdr_off..pos]);
-                }
-                if remaining_payload_off < len {
-                    // Copies only the tail we couldn't write
-                    self.rsp_buf
-                        .extend_from_slice(&payload[remaining_payload_off..]);
-                }
-            }
-            Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
-                // Socket not ready: buffer entire frame, then drain later.
-                self.rsp_buf.extend_from_slice(&hdr[..pos]);
-                self.rsp_buf.extend_from_slice(payload);
-            }
-            Err(e) => return Err(e),
-        }
-
-        // Buffered drain using your existing nonblocking writer
-        while !self.rsp_buf.is_empty() {
-            let (_, blocked) = write(self.stream, self.rsp_buf)?;
-            if blocked && !self.rsp_buf.is_empty() {
-                may::coroutine::yield_now();
-            }
-        }
-        Ok(())
+        drain_nb(self.stream, self.rsp_buf)
     }
 
     #[cfg(feature = "net-ws-server")]
     #[inline]
     fn ws_close(&mut self, reason: Option<&bytes::Bytes>) -> std::io::Result<()> {
-        use crate::network::http::h1_server::write;
-
         // RFC 6455 §5.5.1 — Close frame payload: 2-byte code + UTF-8 reason (optional)
         let mut payload = [0u8; 2 + 123]; // max 125 total (control frame limit)
         payload[..2].copy_from_slice(&1000u16.to_be_bytes()); // normal closure
@@ -798,21 +779,12 @@ where
         // Build the WS frame header (FIN | CLOSE opcode)
         let mut hdr = [0u8; 4];
         hdr[0] = 0x88; // FIN + opcode = Close (0x8)
-        hdr[1] = total as u8; // always <126 (control frame limit)
+        hdr[1] = (total as u8) & 0x7F; // MASK=0, always <126
 
-        // Append to the shared rsp_buf
         self.rsp_buf.extend_from_slice(&hdr[..2]);
         self.rsp_buf.extend_from_slice(&payload[..total]);
 
-        // Non-blocking drain using same helper as HTTP
-        while !self.rsp_buf.is_empty() {
-            let (_, blocked) = write(&mut self.stream, &mut self.rsp_buf)?;
-            if blocked && !self.rsp_buf.is_empty() {
-                may::coroutine::yield_now();
-            }
-        }
-
-        Ok(())
+        drain_nb(self.stream, self.rsp_buf)
     }
 }
 
@@ -904,9 +876,9 @@ fn ensure_bytes<S: Read + Write>(
 ) -> std::io::Result<()> {
     use crate::network::http::h1_server::read;
     while buf.len() < need {
-        let _ = read(stream, buf)?; // fills buf.chunk_mut()
+        let _ = read(stream, buf)?;
         if buf.len() < need {
-            may::coroutine::yield_now(); // cooperate with may
+            may::coroutine::yield_now();
         }
     }
     Ok(())

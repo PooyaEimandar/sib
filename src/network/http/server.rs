@@ -1518,48 +1518,6 @@ pub mod tests {
         }
     }
 
-    // fn read_http_response(mut stream: &mut may::net::TcpStream) -> String {
-    //     use std::io::Read;
-
-    //     let mut data = Vec::new();
-    //     let mut buf = [0u8; 4096];
-
-    //     // read until we have headers
-    //     loop {
-    //         let n = stream.read(&mut buf).expect("read");
-    //         if n == 0 { break; }
-    //         data.extend_from_slice(&buf[..n]);
-    //         if data.windows(4).any(|w| w == b"\r\n\r\n") {
-    //             break;
-    //         }
-    //     }
-
-    //     let head_end = data.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
-    //     let headers = &data[..head_end];
-    //     let headers_str = String::from_utf8_lossy(headers);
-
-    //     // find content-length
-    //     let mut content_len = 0usize;
-    //     for line in headers_str.split("\r\n") {
-    //         if let Some(v) = line.strip_prefix("Content-Length:") {
-    //             content_len = v.trim().parse().unwrap_or(0);
-    //         }
-    //     }
-
-    //     // read the rest of body
-    //     let have_body = data.len() - head_end;
-    //     while have_body + (data.len() - head_end - have_body) < content_len {
-    //         let n = stream.read(&mut buf).expect("read body");
-    //         if n == 0 { break; }
-    //         data.extend_from_slice(&buf[..n]);
-    //         if data.len() - head_end >= content_len {
-    //             break;
-    //         }
-    //     }
-
-    //     String::from_utf8_lossy(&data).to_string()
-    // }
-
     #[cfg(any(
         feature = "net-h1-server",
         feature = "net-h2-server",
