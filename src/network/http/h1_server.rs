@@ -20,7 +20,7 @@ pub(crate) fn serve<T: HService>(
             #[cfg(unix)]
             {
                 use may::io::WaitIo;
-                stream.get_mut().wait_io();
+                stream.wait_io();
             }
             #[cfg(windows)]
             {
