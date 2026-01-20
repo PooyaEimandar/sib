@@ -4,7 +4,8 @@
 it is designed for **real-time streaming**, **low-latency networking**, and **scalable HTTP services**.
 
 > 🏷️ _"Sib" means **apple** in Persian (سیب). Sib was the name of my first dog, a companion through the years._
-![Sib](https://github.com/PooyaEimandar/sib/sib.png)
+<img src="https://raw.githubusercontent.com/PooyaEimandar/sib/main/sib.png" width="256" height="256" alt="Sib">
+
 
 ## ✨ Features
 
