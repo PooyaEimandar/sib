@@ -52,7 +52,7 @@ jobs:
           fi
 
       - name: Run FoundationDB setup
-        run: bash ./bash/foundationDB.sh
+        run: bash ./bash/fdb.sh
 
       - name: Add Rust target
         run: rustup target add ${{ matrix.target }}
@@ -147,7 +147,7 @@ jobs:
           echo "PATH=/Library/Frameworks/GStreamer.framework/Versions/1.0/bin:$PATH" >> $GITHUB_ENV
 
       - name: Run FoundationDB setup
-        run: bash ./bash/foundationDB.sh
+        run: bash ./bash/fdb.sh
 
       - name: Setup Rust
         run: |
