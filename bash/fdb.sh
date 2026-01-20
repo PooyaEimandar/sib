@@ -90,9 +90,9 @@ install_fdb_macos_arm64() {
 
   need_sudo
 
-  local workdir
+  local workdir=""
   workdir="$(mktemp -d)"
-  trap 'rm -rf "$workdir"' EXIT
+  trap '[[ -n "${workdir:-}" ]] && rm -rf "$workdir"' EXIT
 
   local pkg="FoundationDB-${FDB_VERSION}_arm64.pkg"
   local pkg_path="$workdir/$pkg"
@@ -120,9 +120,12 @@ install_fdb_linux_amd64() {
     exit 1
   fi
 
-  local workdir
+  export DEBIAN_FRONTEND="${DEBIAN_FRONTEND:-noninteractive}"
+  export NEEDRESTART_MODE="${NEEDRESTART_MODE:-a}"
+
+  local workdir=""
   workdir="$(mktemp -d)"
-  trap 'rm -rf "$workdir"' EXIT
+  trap '[[ -n "${workdir:-}" ]] && rm -rf "$workdir"' EXIT
 
   local client_deb="foundationdb-clients_${FDB_VERSION}-1_amd64.deb"
   local server_deb="foundationdb-server_${FDB_VERSION}-1_amd64.deb"
@@ -168,14 +171,14 @@ uninstall_fdb_macos_arm64() {
   echo -e "${COLOR_YELLOW}This removes common installed paths and launchd items (best-effort).${COLOR_OFF}"
   echo -e "${COLOR_YELLOW}Your data/config may still exist depending on prior setup.${COLOR_OFF}"
 
-  # Stop launchd services if present (best-effort)
+  # Stop launchd services if present
   sudo launchctl list | grep -qi foundationdb && {
     echo -e "${COLOR_YELLOW}Attempting to unload launchd items...${COLOR_OFF}"
     sudo launchctl remove com.foundationdb.fdbmonitor 2>/dev/null || true
     sudo launchctl remove com.apple.foundationdb.fdbmonitor 2>/dev/null || true
   } || true
 
-  # Kill running processes (best-effort)
+  # Kill running processes
   sudo pkill -x fdbserver 2>/dev/null || true
   sudo pkill -x fdbmonitor 2>/dev/null || true
 
@@ -184,7 +187,7 @@ uninstall_fdb_macos_arm64() {
   sudo rm -f /usr/local/lib/libfdb_c.dylib 2>/dev/null || true
   sudo rm -rf /usr/local/include/foundationdb 2>/dev/null || true
 
-  # Remove common launchd plists (names vary by installer version; best-effort)
+  # Remove common launchd plists
   sudo rm -f /Library/LaunchDaemons/com.foundationdb.*.plist /Library/LaunchDaemons/com.apple.foundationdb.*.plist 2>/dev/null || true
   sudo rm -f /Library/LaunchAgents/com.foundationdb.*.plist /Library/LaunchAgents/com.apple.foundationdb.*.plist 2>/dev/null || true
 
@@ -210,7 +213,7 @@ uninstall_fdb_linux_amd64() {
 
   echo -e "${COLOR_YELLOW}Uninstalling FoundationDB on Linux (apt)...${COLOR_OFF}"
 
-  # Stop service if present (best-effort)
+  # Stop service if present
   if is_command_exists systemctl && pidof systemd >/dev/null 2>&1; then
     sudo systemctl stop foundationdb.service 2>/dev/null || sudo systemctl stop foundationdb 2>/dev/null || true
     sudo systemctl disable foundationdb.service 2>/dev/null || sudo systemctl disable foundationdb 2>/dev/null || true
@@ -219,7 +222,7 @@ uninstall_fdb_linux_amd64() {
   # Remove packages
   if dpkg -s foundationdb-server >/dev/null 2>&1 || dpkg -s foundationdb-clients >/dev/null 2>&1; then
     sudo apt remove -y foundationdb-server foundationdb-clients
-    # Optional: purge configs too (comment out if you want to keep config files)
+    # purge configs too 
     sudo apt purge -y foundationdb-server foundationdb-clients || true
     sudo apt autoremove -y || true
     echo -e "${COLOR_GREEN}Linux uninstall completed.${COLOR_OFF}"
