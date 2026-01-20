@@ -1419,7 +1419,7 @@ pub mod tests {
             let req_path = session.req_path();
             let http_version = session.req_http_version();
             let req_body = session.req_body(std::time::Duration::from_secs(5))?;
-            let req_body_text = std::str::from_utf8(req_body.as_ref())
+            let req_body_text = std::str::from_utf8(req_body)
                 .unwrap_or("<non-utf8 body>");
 
             let body = bytes::Bytes::from(format!(
