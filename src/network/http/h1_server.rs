@@ -2,18 +2,14 @@ use crate::network::http::{h1_session::BUF_LEN, session::HService};
 use bytes::{BufMut, BytesMut};
 use may::net::TcpStream;
 
-#[cfg(unix)]
 use std::{
     io::{Read, Write},
     net::IpAddr,
 };
 
-#[cfg(unix)]
-use may::io::WaitIo;
-
 pub(crate) fn serve<T: HService>(
     stream: &mut TcpStream,
-    peer_addr: &std::net::IpAddr,
+    peer_addr: &IpAddr,
     mut service: T,
 ) -> std::io::Result<()> {
     let mut req_buf = BytesMut::with_capacity(BUF_LEN);
@@ -23,6 +19,7 @@ pub(crate) fn serve<T: HService>(
         if read_write(stream, peer_addr, &mut req_buf, &mut rsp_buf, &mut service)? {
             #[cfg(unix)]
             {
+                use may::io::WaitIo;
                 stream.get_mut().wait_io();
             }
             #[cfg(windows)]
@@ -35,7 +32,7 @@ pub(crate) fn serve<T: HService>(
 
 pub(crate) fn serve_tls<T: HService>(
     stream: &mut boring::ssl::SslStream<TcpStream>,
-    peer_addr: &std::net::IpAddr,
+    peer_addr: &IpAddr,
     mut service: T,
 ) -> std::io::Result<()> {
     let mut req_buf = BytesMut::with_capacity(BUF_LEN);
@@ -45,6 +42,7 @@ pub(crate) fn serve_tls<T: HService>(
         if read_write(stream, peer_addr, &mut req_buf, &mut rsp_buf, &mut service)? {
             #[cfg(unix)]
             {
+                use may::io::WaitIo;
                 stream.get_mut().wait_io();
             }
             #[cfg(windows)]
@@ -56,10 +54,7 @@ pub(crate) fn serve_tls<T: HService>(
 }
 
 #[inline]
-pub(crate) fn read(
-    stream: &mut impl std::io::Read,
-    buf: &mut bytes::BytesMut,
-) -> std::io::Result<bool> {
+pub(crate) fn read(stream: &mut impl Read, buf: &mut bytes::BytesMut) -> std::io::Result<bool> {
     const MIN_RESERVE: usize = 1024;
     const BUF_LEN: usize = 16 * 1024;
 
@@ -118,7 +113,7 @@ pub(crate) fn read(
 
 #[inline]
 pub(crate) fn write(
-    stream: &mut impl std::io::Write,
+    stream: &mut impl Write,
     rsp_buf: &mut bytes::BytesMut,
 ) -> std::io::Result<(usize, bool)> {
     use bytes::Buf;
@@ -179,13 +174,13 @@ pub(crate) fn write(
 
 fn read_write<S, T>(
     stream: &mut S,
-    peer_addr: &std::net::IpAddr,
+    peer_addr: &IpAddr,
     req_buf: &mut BytesMut,
     rsp_buf: &mut BytesMut,
     service: &mut T,
 ) -> std::io::Result<bool>
 where
-    S: std::io::Read + std::io::Write,
+    S: Read + Write,
     T: HService,
 {
     // Prioritize draining any pending response bytes
