@@ -33,6 +33,7 @@ pub static CURRENT_DATE: once_cell::sync::Lazy<Arc<ArcSwap<Arc<str>>>> =
         swap
     });
 
+#[cfg(feature = "net-ws-server")]
 #[inline]
 fn drain_nb<W: Write>(w: &mut W, buf: &mut BytesMut) -> io::Result<()> {
     use std::io::ErrorKind;
