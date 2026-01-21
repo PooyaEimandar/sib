@@ -1,3 +1,4 @@
+#[cfg(feature = "db-fdb")]
 pub mod database;
 pub mod network;
 
