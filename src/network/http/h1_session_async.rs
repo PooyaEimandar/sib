@@ -49,7 +49,7 @@ impl<'a, S> H1SessionAsync<'a, S> {
         version: Version,
         req: (HeaderMap, Bytes),
         keep_alive: bool,
-        is_ws: bool,
+        #[cfg(feature = "net-ws-server")] is_ws: bool,
     ) -> Self {
         Self {
             peer,
