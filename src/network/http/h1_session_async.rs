@@ -41,6 +41,7 @@ pub struct H1SessionAsync<'a, S> {
 }
 
 impl<'a, S> H1SessionAsync<'a, S> {
+    #[allow(unused_variables)]
     pub fn new(
         peer: IpAddr,
         stream: &'a mut S,
@@ -49,7 +50,7 @@ impl<'a, S> H1SessionAsync<'a, S> {
         version: Version,
         req: (HeaderMap, Bytes),
         keep_alive: bool,
-        #[cfg(feature = "net-ws-server")] is_ws: bool,
+        is_ws: bool,
     ) -> Self {
         Self {
             peer,
