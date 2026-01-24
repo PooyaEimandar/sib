@@ -47,8 +47,16 @@ pub trait Session {
     #[cfg(all(feature = "net-ws-server", feature = "net-h1-server"))]
     fn ws_accept(&mut self) -> std::io::Result<()>;
 
+    #[cfg(all(feature = "net-ws-server", feature = "net-h2-server"))]
+    async fn ws_accept_async(&mut self) -> std::io::Result<()>;
+
     #[cfg(all(feature = "net-ws-server", feature = "net-h1-server"))]
     fn ws_read(
+        &mut self,
+    ) -> std::io::Result<(crate::network::http::ws::OpCode, bytes::Bytes, bool)>;
+
+    #[cfg(all(feature = "net-ws-server", feature = "net-h2-server"))]
+    async fn ws_read_async(
         &mut self,
     ) -> std::io::Result<(crate::network::http::ws::OpCode, bytes::Bytes, bool)>;
 
@@ -60,8 +68,19 @@ pub trait Session {
         fin: bool,
     ) -> std::io::Result<()>;
 
+    #[cfg(all(feature = "net-ws-server", feature = "net-h2-server"))]
+    async fn ws_write_async(
+        &mut self,
+        op: crate::network::http::ws::OpCode,
+        payload: bytes::Bytes,
+        fin: bool,
+    ) -> std::io::Result<()>;
+
     #[cfg(all(feature = "net-ws-server", feature = "net-h1-server"))]
     fn ws_close(&mut self, reason: Option<&bytes::Bytes>) -> std::io::Result<()>;
+
+    #[cfg(all(feature = "net-ws-server", feature = "net-h2-server"))]
+    async fn ws_close_async(&mut self, reason: Option<bytes::Bytes>) -> std::io::Result<()>;
 }
 
 pub trait HService {

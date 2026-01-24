@@ -8,6 +8,9 @@ use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 
+#[cfg(feature = "net-ws-server")]
+use crate::network::http::ws;
+
 const HTTP11: &[u8] = b"HTTP/1.1 ";
 const CRLF: &[u8] = b"\r\n";
 
@@ -572,16 +575,24 @@ where
     #[cfg(feature = "net-ws-server")]
     #[inline]
     fn is_ws(&self) -> bool {
-        self.req.headers.iter().any(|h| {
-            h.name.eq_ignore_ascii_case("upgrade") && h.value.eq_ignore_ascii_case(b"websocket")
-        })
+        ws::is_h1_ws_upgrade(&self.req_method(), &self.req_headers())
     }
 
     #[cfg(feature = "net-ws-server")]
     #[inline]
     fn ws_accept(&mut self) -> std::io::Result<()> {
-        let header_val = match self.req_header(&HeaderName::from_static("sec-websocket-key")) {
-            Some(val) => val,
+        // Validate it is a WS upgrade request (optional but recommended)
+        let method = self.req_method();
+        let headers = self.req_headers();
+        if !ws::is_h1_ws_upgrade(&method, &headers) {
+            return self
+                .status_code(http::StatusCode::BAD_REQUEST)
+                .header_str("Connection", "close")?
+                .eom();
+        }
+
+        let key = match self.req_header(&HeaderName::from_static("sec-websocket-key")) {
+            Some(v) => v,
             None => {
                 return self
                     .status_code(http::StatusCode::BAD_REQUEST)
@@ -589,27 +600,35 @@ where
                     .eom();
             }
         };
-        let accept = compute_accept(&header_val);
 
-        // complete handshake (101)
+        let key_str = key.to_str().map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "bad sec-websocket-key")
+        })?;
+
+        let accept = ws::sec_websocket_accept(key_str)?;
+
+        // Complete handshake (101)
         let mut resp = format!(
             "HTTP/1.1 101 Switching Protocols\r\n\
-             Upgrade: websocket\r\n\
-             Connection: Upgrade\r\n\
-             Sec-WebSocket-Accept: {accept}\r\n"
+         Upgrade: websocket\r\n\
+         Connection: Upgrade\r\n\
+         Sec-WebSocket-Accept: {accept}\r\n"
         );
+
         if let Some(sub_protocol) =
             self.req_header(&HeaderName::from_static("sec-websocket-protocol"))
         {
+            // If you want strict selection, do it here. For now: echo as-is (like your old code).
             resp.push_str(&format!(
                 "Sec-WebSocket-Protocol: {}\r\n",
                 sub_protocol.to_str().unwrap_or("")
             ));
         }
+
         resp.push_str("\r\n");
         self.stream.write_all(resp.as_bytes())?;
 
-        // after upgrade, start WS mode with clean buffers/state
+        // After upgrade, switch to WS mode with clean buffers/state
         self.req_buf.clear();
         self.rsp_buf.clear();
         self.status_buf.clear();
@@ -622,129 +641,47 @@ where
 
     #[cfg(feature = "net-ws-server")]
     #[inline]
-    fn ws_read(
-        &mut self,
-    ) -> std::io::Result<(crate::network::http::ws::OpCode, bytes::Bytes, bool)> {
-        use crate::network::http::ws::OpCode;
+    fn ws_read(&mut self) -> std::io::Result<(ws::OpCode, bytes::Bytes, bool)> {
+        const MAX_BUFFERED: usize = BUF_LEN + 64 * 1024;
 
-        let h = take_exact_nb(self.stream, self.req_buf, 2)?;
-        let b0 = h[0];
-        let b1 = h[1];
-        let fin = (b0 & 0x80) != 0;
-        if (b0 & 0x70) != 0 {
-            return Err(std::io::Error::other("WS RSV set"));
-        }
-
-        let opcode = match b0 & 0x0F {
-            0x0 => OpCode::Continue,
-            0x1 => OpCode::Text,
-            0x2 => OpCode::Binary,
-            0x8 => OpCode::Close,
-            0x9 => OpCode::Ping,
-            0xA => OpCode::Pong,
-            x => return Err(std::io::Error::other(format!("bad WS opcode {x}"))),
-        };
-
-        let is_control = matches!(opcode, OpCode::Close | OpCode::Ping | OpCode::Pong);
-        if is_control && !fin {
-            return Err(std::io::Error::other("WS control fragmented"));
-        }
-
-        if (b1 & 0x80) == 0 {
-            return Err(std::io::Error::other("WS client not masked"));
-        }
-        let mut len = (b1 & 0x7F) as u64;
-        if len == 126 {
-            len = u16::from_be_bytes(
-                take_exact_nb(self.stream, self.req_buf, 2)?
-                    .as_ref()
-                    .try_into()
-                    .map_err(|e| std::io::Error::other(format!("failed to read ws length: {e}")))?,
-            ) as u64;
-        } else if len == 127 {
-            len = u64::from_be_bytes(
-                take_exact_nb(self.stream, self.req_buf, 8)?
-                    .as_ref()
-                    .try_into()
-                    .map_err(|e| std::io::Error::other(format!("failed to read ws length: {e}")))?,
-            ) as u64;
-        }
-        if is_control && len > 125 {
-            return Err(std::io::Error::other("WS control too long"));
-        }
-        if len > (isize::MAX as u64) {
-            return Err(std::io::Error::other("WS frame too large"));
-        }
-
-        let mask = take_exact_nb(self.stream, self.req_buf, 4)?;
-        let need = len as usize;
-        if need > BUF_LEN {
-            return Err(std::io::Error::other(format!(
-                "max WS frame is {}",
-                BUF_LEN
-            )));
-        }
-
-        // read payload into req_buf then unmask in place
-        let payload = if need == 0 {
-            bytes::Bytes::new()
-        } else {
-            // fill exactly needed bytes
-            ensure_bytes(self.stream, self.req_buf, need)?;
-
-            // Unmask in place on the first `need` bytes
-            {
-                let data = &mut self.req_buf[..need];
-                // `mask` is a Bytes; indexing is cheap
-                for i in 0..need {
-                    data[i] ^= mask[i & 3];
+        loop {
+            // Try parse from already-buffered bytes
+            if let Some(frame) = ws::try_parse_frame(self.req_buf)? {
+                if frame.payload.len() > BUF_LEN {
+                    return Err(std::io::Error::other(format!(
+                        "max WS frame is {}",
+                        BUF_LEN
+                    )));
                 }
+                return Ok((frame.op, frame.payload, frame.fin));
             }
 
-            // Hand out the exact payload as Bytes, leaving any extra bytes
-            // (next frame) in req_buf.
-            self.req_buf.split_to(need).freeze()
-        };
+            // Cap buffered junk
+            if self.req_buf.len() > MAX_BUFFERED {
+                return Err(std::io::Error::other("ws buffered data too large"));
+            }
 
-        Ok((opcode, payload, fin))
+            // WouldBlock => yield and try again
+            if !crate::network::http::h1_server::read(self.stream, self.req_buf)? {
+                may::coroutine::yield_now();
+                continue;
+            }
+        }
     }
 
     #[cfg(feature = "net-ws-server")]
     #[inline]
     fn ws_write(
         &mut self,
-        code: crate::network::http::ws::OpCode,
+        code: ws::OpCode,
         payload: &bytes::Bytes,
         fin: bool,
     ) -> std::io::Result<()> {
-        // Build WS header (server frames are unmasked)
-        let mut hdr = [0u8; 10];
-        let mut pos = 0;
+        // Server-to-client: unmasked frames
+        let frame = ws::encode_frame(code, payload, fin, None);
 
-        // be defensive: only low nibble is opcode
-        hdr[pos] = (if fin { 0x80 } else { 0 }) | ((code as u8) & 0x0F);
-        pos += 1;
-
-        let len = payload.len();
-        if len < 126 {
-            hdr[pos] = (len as u8) & 0x7F; // MASK=0
-            pos += 1;
-        } else if len <= 0xFFFF {
-            hdr[pos] = 126;
-            pos += 1;
-            hdr[pos..pos + 2].copy_from_slice(&(len as u16).to_be_bytes());
-            pos += 2;
-        } else {
-            hdr[pos] = 127;
-            pos += 1;
-            hdr[pos..pos + 8].copy_from_slice(&(len as u64).to_be_bytes());
-            pos += 8;
-        }
-
-        // Always queue frame into rsp_buf then drain with raw writer.
-        // This avoids HTTP helper logic and avoids vectored-write corner cases on Windows.
-        self.rsp_buf.extend_from_slice(&hdr[..pos]);
-        self.rsp_buf.extend_from_slice(payload);
+        // Queue then drain (keeps your nonblocking + may yield behavior)
+        self.rsp_buf.extend_from_slice(&frame);
 
         drain_nb(self.stream, self.rsp_buf)
     }
@@ -835,52 +772,4 @@ where
         status_buf: heapless::Vec::new(),
         streaming: false,
     }))
-}
-
-#[cfg(feature = "net-ws-server")]
-#[inline]
-fn compute_accept(sec_key: &http::HeaderValue) -> String {
-    use base64::Engine as _;
-    use base64::engine::general_purpose::STANDARD as B64;
-    use sha1::{Digest, Sha1};
-
-    const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-    let mut sha = Sha1::new();
-    sha.update(sec_key.as_bytes());
-    sha.update(WS_GUID.as_bytes());
-    B64.encode(sha.finalize())
-}
-
-#[cfg(feature = "net-ws-server")]
-#[inline]
-fn take_exact_nb<S: Read + Write>(
-    stream: &mut S,
-    buf: &mut BytesMut,
-    need: usize,
-) -> std::io::Result<bytes::Bytes> {
-    use crate::network::http::h1_server::read;
-    while buf.len() < need {
-        let _blocked = read(stream, buf)?;
-        if buf.len() < need {
-            may::coroutine::yield_now();
-        }
-    }
-    Ok(buf.split_to(need).freeze())
-}
-
-#[cfg(feature = "net-ws-server")]
-#[inline]
-fn ensure_bytes<S: Read + Write>(
-    stream: &mut S,
-    buf: &mut BytesMut,
-    need: usize,
-) -> std::io::Result<()> {
-    use crate::network::http::h1_server::read;
-    while buf.len() < need {
-        let _ = read(stream, buf)?;
-        if buf.len() < need {
-            may::coroutine::yield_now();
-        }
-    }
-    Ok(())
 }

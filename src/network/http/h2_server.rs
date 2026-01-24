@@ -235,11 +235,10 @@ cfg_if::cfg_if! {
             use http::{header, HeaderMap, HeaderName, HeaderValue, Method, Uri, Version};
             use tokio::io::AsyncReadExt;
 
-            // Minimal keep-alive loop (no chunked request bodies yet)
             let mut buf: Vec<u8> = vec![0u8; 8192];
 
             loop {
-                // read headers into buf
+                // read headers
                 let mut read: usize = 0;
                 loop {
                     let n = stream.read(&mut buf[read..]).await?;
@@ -259,15 +258,14 @@ cfg_if::cfg_if! {
                 // parse request line + headers
                 let mut headers = [httparse::EMPTY_HEADER; 64];
                 let mut req = httparse::Request::new(&mut headers);
+
                 let status = req
                     .parse(&buf[..read])
                     .map_err(|e| std::io::Error::other(format!("httparse error: {e}")))?;
 
                 let header_len = match status {
                     httparse::Status::Complete(len) => len,
-                    httparse::Status::Partial => {
-                        return Err(std::io::Error::other("partial HTTP request"));
-                    }
+                    httparse::Status::Partial => return Err(std::io::Error::other("partial HTTP request")),
                 };
 
                 let method = req
@@ -287,36 +285,9 @@ cfg_if::cfg_if! {
 
                 let mut req_headers = HeaderMap::new();
                 for h in req.headers.iter() {
-                    let name =
-                        HeaderName::from_bytes(h.name.as_bytes()).map_err(std::io::Error::other)?;
+                    let name = HeaderName::from_bytes(h.name.as_bytes()).map_err(std::io::Error::other)?;
                     let value = HeaderValue::from_bytes(h.value).map_err(std::io::Error::other)?;
                     req_headers.append(name, value);
-                }
-
-                // read body if Content-Length is present
-                let content_length = req_headers
-                    .get(header::CONTENT_LENGTH)
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|s| s.parse::<usize>().ok())
-                    .unwrap_or(0);
-
-                if content_length > config.max_frame_size as usize {
-                    return Err(std::io::Error::other(
-                        "content-length exceeds max frame size or is zero",
-                    ));
-                }
-
-                let mut body: Vec<u8> = Vec::with_capacity(content_length);
-                body.extend_from_slice(&buf[header_len..read]);
-
-                while body.len() < content_length {
-                    let need = content_length - body.len();
-                    let mut tmp = vec![0u8; need.min(64 * 1024)];
-                    let n = stream.read(&mut tmp).await?;
-                    if n == 0 {
-                        break;
-                    }
-                    body.extend_from_slice(&tmp[..n]);
                 }
 
                 // keep-alive decision
@@ -332,19 +303,77 @@ cfg_if::cfg_if! {
                     conn_hdr == "keep-alive"
                 };
 
-                // Run your unified async service on this HTTP/1.x request
+                // WS detection BEFORE session creation
+                #[cfg(feature = "net-ws-server")]
+                let is_ws = crate::network::http::ws::is_h1_ws_upgrade(&method, &req_headers);
+
+                #[cfg(not(feature = "net-ws-server"))]
+                let is_ws = false;
+
+                // If WS upgrade: DO NOT read body (service will do ws_accept + ws loop).
+                let body_bytes = if is_ws {
+                    Bytes::new()
+                } else {
+                    let content_length = req_headers
+                        .get(header::CONTENT_LENGTH)
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.parse::<usize>().ok())
+                        .unwrap_or(0);
+
+                    if content_length > config.max_frame_size as usize {
+                        return Err(std::io::Error::other("content-length exceeds max frame size"));
+                    }
+
+                    let mut body: Vec<u8> = Vec::with_capacity(content_length);
+                    body.extend_from_slice(&buf[header_len..read]);
+
+                    while body.len() < content_length {
+                        let need = content_length - body.len();
+                        let mut tmp = vec![0u8; need.min(64 * 1024)];
+                        let n = stream.read(&mut tmp).await?;
+                        if n == 0 {
+                            break;
+                        }
+                        body.extend_from_slice(&tmp[..n]);
+                    }
+
+                    Bytes::from(body)
+                };
+
+                // create session with is_ws
                 let mut session = H1SessionAsync::new(
                     peer_addr,
                     &mut stream,
                     method,
                     uri,
                     version,
-                    (req_headers, Bytes::from(body)),
+                    (req_headers, body_bytes),
                     keep_alive,
+                    is_ws
                 );
 
+                #[cfg(feature = "net-ws-server")]
+                if is_ws && read > header_len {
+                    session.ws_seed(&buf[header_len..read]);
+                }
+
+                // delegate to service (service does ws_accept + ws loop if is_ws)
                 use crate::network::http::session::Session;
-                if let Err(e) = service.call(&mut session).await {
+
+                let r = service.call(&mut session).await;
+
+                if is_ws {
+                    // Service owns the socket now; it will run WS loop and end.
+                    // If service uses ConnectionAborted("ws done") to signal end, treat it as normal.
+                    return match r {
+                        Ok(()) => Ok(()),
+                        Err(e) if e.kind() == std::io::ErrorKind::ConnectionAborted => Ok(()),
+                        Err(e) => Err(e),
+                    };
+                }
+
+                // Normal HTTP error handling
+                if let Err(e) = r {
                     eprintln!("h1 service error: {e}");
                     if !session.response_sent() {
                         let _ = session
@@ -354,7 +383,6 @@ cfg_if::cfg_if! {
                             .await;
                     }
                 } else if !session.response_sent() {
-                    // Safety: if handler forgot eom_async
                     let _ = session
                         .status_code(http::StatusCode::OK)
                         .body(Bytes::new())
@@ -367,7 +395,6 @@ cfg_if::cfg_if! {
                 }
             }
         }
-
 
         pub(crate) async fn serve_h2<S, T>(
             stream: S,

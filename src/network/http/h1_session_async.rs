@@ -3,6 +3,9 @@ use bytes::Bytes;
 use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri, Version, header};
 use std::net::IpAddr;
 
+#[cfg(feature = "net-ws-server")]
+use crate::network::http::ws;
+
 /// Async HTTP/1.x session
 pub struct H1SessionAsync<'a, S> {
     peer: IpAddr,
@@ -29,6 +32,12 @@ pub struct H1SessionAsync<'a, S> {
 
     // underlying transport
     stream: &'a mut S,
+
+    #[cfg(feature = "net-ws-server")]
+    ws_scratch: bytes::BytesMut,
+
+    #[cfg(feature = "net-ws-server")]
+    is_ws: bool,
 }
 
 impl<'a, S> H1SessionAsync<'a, S> {
@@ -40,6 +49,7 @@ impl<'a, S> H1SessionAsync<'a, S> {
         version: Version,
         req: (HeaderMap, Bytes),
         keep_alive: bool,
+        is_ws: bool,
     ) -> Self {
         Self {
             peer,
@@ -59,6 +69,12 @@ impl<'a, S> H1SessionAsync<'a, S> {
 
             h1_streaming_headers_sent: false,
             h1_streaming: false,
+
+            #[cfg(feature = "net-ws-server")]
+            ws_scratch: bytes::BytesMut::new(),
+
+            #[cfg(feature = "net-ws-server")]
+            is_ws,
         }
     }
 
@@ -105,6 +121,14 @@ impl<'a, S> H1SessionAsync<'a, S> {
             || (100..200).contains(&code)
             || self.rsp_status == StatusCode::NO_CONTENT
             || self.rsp_status == StatusCode::NOT_MODIFIED
+    }
+
+    #[cfg(feature = "net-ws-server")]
+    #[inline]
+    pub fn ws_seed(&mut self, data: &[u8]) {
+        if !data.is_empty() {
+            self.ws_scratch.extend_from_slice(data);
+        }
     }
 }
 
@@ -521,42 +545,68 @@ where
     #[cfg(feature = "net-ws-server")]
     #[inline]
     fn is_ws(&self) -> bool {
-        self.method == Method::GET
-            && self
-                .req_headers
-                .get(header::UPGRADE)
-                .and_then(|v| v.to_str().ok())
-                .map(|v| v.eq_ignore_ascii_case("websocket"))
-                .unwrap_or(false)
-            && self
-                .req_headers
-                .get(header::CONNECTION)
-                .and_then(|v| v.to_str().ok())
-                .map(|v| v.to_ascii_lowercase().contains("upgrade"))
-                .unwrap_or(false)
-            && self.req_headers.contains_key("sec-websocket-key")
-            && self
-                .req_headers
-                .get("sec-websocket-version")
-                .and_then(|v| v.to_str().ok())
-                .map(|v| v == "13")
-                .unwrap_or(false)
+        self.is_ws
     }
 
     #[cfg(all(feature = "net-ws-server", feature = "net-h1-server"))]
     #[inline]
     fn ws_accept(&mut self) -> io::Result<()> {
         Err(std::io::Error::other(
-            "ws_accept is not implemented for H1SessionAsync",
+            "ws_accept is not implemented for H1SessionAsync, use ws_accept_async instead",
         ))
+    }
+
+    #[cfg(feature = "net-ws-server")]
+    async fn ws_accept_async(&mut self) -> std::io::Result<()> {
+        use crate::network::http::ws;
+
+        let key = self
+            .req_headers
+            .get("sec-websocket-key")
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| std::io::Error::other("missing sec-websocket-key"))?;
+
+        let accept = ws::sec_websocket_accept(key)?;
+        // You already have response builder primitives; simplest:
+        self.status_code(http::StatusCode::SWITCHING_PROTOCOLS);
+        self.header(
+            http::header::UPGRADE,
+            http::HeaderValue::from_static("websocket"),
+        )?;
+        self.header(
+            http::header::CONNECTION,
+            http::HeaderValue::from_static("Upgrade"),
+        )?;
+        self.header(
+            http::header::SEC_WEBSOCKET_ACCEPT,
+            http::HeaderValue::from_str(&accept).map_err(std::io::Error::other)?,
+        )?;
+
+        // End response headers with empty body
+        self.body(bytes::Bytes::new());
+        self.eom_async().await?;
+
+        self.is_ws = true;
+        Ok(())
     }
 
     #[cfg(all(feature = "net-ws-server", feature = "net-h1-server"))]
     #[inline]
     fn ws_read(&mut self) -> io::Result<(crate::network::http::ws::OpCode, &[u8], bool)> {
         Err(std::io::Error::other(
-            "ws_read is not implemented for H1SessionAsync",
+            "ws_read is not implemented for H1SessionAsync, use ws_read_async instead",
         ))
+    }
+
+    #[cfg(feature = "net-ws-server")]
+    async fn ws_read_async(&mut self) -> std::io::Result<(ws::OpCode, bytes::Bytes, bool)> {
+        use crate::network::http::ws;
+        if !self.is_ws {
+            return Err(std::io::Error::other(
+                "ws_read_async before ws_accept_async",
+            ));
+        }
+        ws::ws_read_from_io(&mut self.stream, &mut self.ws_scratch, 1 << 20).await
     }
 
     #[cfg(all(feature = "net-ws-server", feature = "net-h1-server"))]
@@ -568,8 +618,32 @@ where
         _fin: bool,
     ) -> io::Result<()> {
         Err(std::io::Error::other(
-            "ws_write is not implemented for H1SessionAsync",
+            "ws_write is not implemented for H1SessionAsync, use ws_write_async instead",
         ))
+    }
+
+    #[cfg(feature = "net-ws-server")]
+    async fn ws_write_async(
+        &mut self,
+        op: ws::OpCode,
+        payload: bytes::Bytes,
+        fin: bool,
+    ) -> std::io::Result<()> {
+        use crate::network::http::ws;
+        if !self.is_ws {
+            return Err(std::io::Error::other(
+                "ws_write_async before ws_accept_async",
+            ));
+        }
+        ws::ws_write_to_io(&mut self.stream, op, payload, fin).await
+    }
+
+    #[cfg(feature = "net-ws-server")]
+    async fn ws_close_async(&mut self, reason: Option<bytes::Bytes>) -> std::io::Result<()> {
+        use crate::network::http::ws;
+        let payload = reason.unwrap_or_else(|| ws::close_payload(1000, "bye"));
+        let _ = self.ws_write_async(ws::OpCode::Close, payload, true).await;
+        Ok(())
     }
 
     #[cfg(all(feature = "net-ws-server", feature = "net-h1-server"))]

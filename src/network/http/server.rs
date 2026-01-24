@@ -743,26 +743,24 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                                                 use crate::network::http::h2_server::serve_h2;
 
                                                 let service = factory.async_service(shard_id);
-
-                                                if let Err(e) =
-                                                    serve_h2(tls_stream, service, &h2_cfg_cloned, peer_ip).await  
-                                                    && !(*is_tls_eof_no_close_notify)(&e) {
-                                                        eprintln!(
-                                                            "h2 serve error (shard {shard_id}) from {peer_addr}: {e}"
-                                                        );
+                                                match serve_h2(tls_stream, service, &h2_cfg_cloned, peer_ip).await {
+                                                    Ok(()) => {}
+                                                    Err(e) if (*is_tls_eof_no_close_notify)(&e) => {}
+                                                    Err(e) => {
+                                                        eprintln!("h2 serve error (shard {shard_id}) from {peer_addr}: {e}");
+                                                    }
                                                 }
                                             }
                                             _ => {
                                                 use crate::network::http::h2_server::serve_h1;
 
                                                 let service = factory.async_service(shard_id);
-
-                                                if let Err(e) =
-                                                    serve_h1(tls_stream, service, &h2_cfg_cloned, peer_ip).await
-                                                    && !(*is_tls_eof_no_close_notify)(&e) {
-                                                        eprintln!(
-                                                            "h1 fallback serve error (shard {shard_id}) from {peer_addr}: {e}"
-                                                        );
+                                                match serve_h1(tls_stream, service, &h2_cfg_cloned, peer_ip).await {
+                                                    Ok(()) => {}
+                                                    Err(e) if (*is_tls_eof_no_close_notify)(&e) => {}
+                                                    Err(e) => {
+                                                        eprintln!("h1 serve error (shard {shard_id}) from {peer_addr}: {e}");
+                                                    }
                                                 }
                                             }
                                         }
@@ -1048,7 +1046,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
     ) -> std::io::Result<()> {
         use std::sync::Arc;
         use tokio::sync::Semaphore;
-       
+
         // Load full certificate chain (PEM or DER)
         fn load_cert_chain_pem(pem: &[u8]) -> std::io::Result<Vec<Vec<u8>>> {
             let mut reader = std::io::Cursor::new(pem);
@@ -1320,7 +1318,7 @@ pub mod tests {
                 // Pre-allocate small static replies as Bytes to satisfy &Bytes params
                 let reply_text = Bytes::from_static(b"hello ws client!");
                 let err_protocol = Bytes::from_static(b"protocol error");
-                let err_unexpected = Bytes::from_static(b"unexpected continuation");
+                let err_unexpected = Bytes::from_static(b"unexpected continue");
                 let err_utf8 = Bytes::from_static(b"invalid utf8");
 
                 loop {
@@ -1419,8 +1417,7 @@ pub mod tests {
             let req_path = session.req_path();
             let http_version = session.req_http_version();
             let req_body = session.req_body(std::time::Duration::from_secs(5))?;
-            let req_body_text = std::str::from_utf8(req_body)
-                .unwrap_or("<non-utf8 body>");
+            let req_body_text = std::str::from_utf8(req_body).unwrap_or("<non-utf8 body>");
 
             let body = bytes::Bytes::from(format!(
                 "Http version: {http_version:?}, Echo: {req_method:?} {req_host:?} {req_path:?}\r\nBody: {req_body_text}"
@@ -1449,6 +1446,129 @@ pub mod tests {
     #[async_trait::async_trait(?Send)]
     impl HAsyncService for EchoServer {
         async fn call<S: Session>(&mut self, session: &mut S) -> std::io::Result<()> {
+            // WebSocket upgrade path
+            #[cfg(feature = "net-ws-server")]
+            if session.is_ws() {
+                if let Err(e) = session.ws_accept_async().await {
+                    session
+                        .status_code(http::StatusCode::BAD_REQUEST)
+                        .header_str("Connection", "close")?
+                        .eom()?;
+                    return Err(e);
+                }
+
+                use crate::network::http::ws::OpCode;
+                use bytes::{Bytes, BytesMut};
+
+                let mut frag_buf = BytesMut::new();
+                let mut expecting_cont = false;
+                let mut initial_is_text = false;
+
+                // Pre-allocate small static replies as Bytes to satisfy &Bytes params
+                let err_protocol = Bytes::from_static(b"protocol error");
+                let err_unexpected = Bytes::from_static(b"unexpected continue");
+                let err_utf8 = Bytes::from_static(b"invalid utf8");
+
+                loop {
+                    let (code, payload, fin) = session.ws_read_async().await?; // payload: Bytes
+
+                    match code {
+                        OpCode::Ping => {
+                            // Echo same payload
+                            session.ws_write_async(OpCode::Pong, payload, true).await?;
+                        }
+                        OpCode::Pong => {
+                            // ignore
+                        }
+                        OpCode::Close => {
+                            // Echo client's Close payload back
+                            session.ws_write_async(OpCode::Close, payload, true).await?;
+                            break;
+                        }
+                        OpCode::Text | OpCode::Binary => {
+                            if expecting_cont {
+                                // Protocol error: new data frame while fragmented message pending
+                                session.ws_close_async(Some(err_protocol)).await?;
+                                break;
+                            }
+
+                            if !fin {
+                                // Start fragmented message; accumulate only if needed
+                                frag_buf.clear();
+                                frag_buf.extend_from_slice(payload.as_ref());
+                                expecting_cont = true;
+                                initial_is_text = matches!(code, OpCode::Text);
+                                continue;
+                            }
+
+                            // Single-frame message
+                            if matches!(code, OpCode::Text) {
+                                if let Ok(msg) = std::str::from_utf8(payload.as_ref()) {
+                                    let reply_text = Bytes::from_static(b"hello ws client!");
+                                    println!(
+                                        "WS server got: Text ({} bytes): {msg}",
+                                        payload.len()
+                                    );
+                                    session
+                                        .ws_write_async(OpCode::Text, reply_text, true)
+                                        .await?;
+                                } else {
+                                    session.ws_close_async(Some(err_utf8)).await?;
+                                    break;
+                                }
+                            } else {
+                                println!("WS server got Binary ({} bytes)", payload.len());
+                                session
+                                    .ws_write_async(OpCode::Binary, payload, true)
+                                    .await?;
+                            }
+                        }
+                        OpCode::Continue => {
+                            if !expecting_cont {
+                                session.ws_close_async(Some(err_unexpected)).await?;
+                                break;
+                            }
+
+                            frag_buf.extend_from_slice(payload.as_ref());
+
+                            if fin {
+                                // Complete fragmented message
+                                let whole = frag_buf.as_ref();
+                                if initial_is_text {
+                                    if let Ok(msg) = std::str::from_utf8(whole) {
+                                        let reply_text = Bytes::from_static(b"hello ws client!");
+                                        println!("WS server got (fragmented text): {msg}");
+                                        session
+                                            .ws_write_async(OpCode::Text, reply_text, true)
+                                            .await?;
+                                    } else {
+                                        session.ws_close_async(Some(err_utf8)).await?;
+                                        break;
+                                    }
+                                } else {
+                                    println!(
+                                        "WS server got (fragmented binary): {} bytes",
+                                        whole.len()
+                                    );
+                                    let whole_bytes = Bytes::copy_from_slice(whole);
+                                    session
+                                        .ws_write_async(OpCode::Binary, whole_bytes, true)
+                                        .await?;
+                                }
+                                frag_buf.clear();
+                                expecting_cont = false;
+                            }
+                        }
+                    }
+                }
+
+                // Tell the outer loop to stop using this socket
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionAborted,
+                    "ws done",
+                ));
+            }
+
             let req_host = session.req_host();
             let req_method = session.req_method();
             let req_path = session.req_path().to_owned();
@@ -1644,7 +1764,6 @@ pub mod tests {
         std::thread::sleep(Duration::from_secs(1));
     }
 
-
     #[cfg(feature = "net-h1-server")]
     #[test]
     fn test_h1_server_post() {
@@ -1696,7 +1815,6 @@ pub mod tests {
         may::join!(server_handle, client_handler);
         std::thread::sleep(Duration::from_secs(1));
     }
-
 
     #[cfg(all(feature = "net-ws-server", feature = "net-h1-server"))]
     #[test]
@@ -1874,6 +1992,72 @@ pub mod tests {
             assert!(body.contains("Echo:"));
             assert!(body.contains("Hello, World!"));
         }
+    }
+
+    #[cfg(all(feature = "net-h2-server", feature = "net-ws-server"))]
+    #[test]
+    fn test_h2_tls_ws_over_h1_upgrade() {
+        use std::{net::TcpStream, time::Duration};
+
+        let addr = "127.0.0.1:8087";
+
+        //Generate ONCE and reuse on both sides
+        let (cert_pem, key_pem) = create_self_signed_tls_pems();
+
+        // Clone into server thread
+        let cert_for_server = cert_pem.clone();
+        let key_for_server = key_pem.clone();
+
+        // Start H2 TLS server (it will also accept H1 via ALPN fallback path)
+        let _ = std::thread::spawn(move || {
+            use crate::network::http::server::H2Config;
+
+            EchoServer
+                .start_h2_tls(
+                    addr,
+                    (None, cert_for_server.as_bytes(), key_for_server.as_bytes()),
+                    H2Config::default(),
+                )
+                .expect("start_h2_tls");
+        });
+
+        std::thread::sleep(Duration::from_millis(800));
+
+        // Client trusts the SAME cert the server will present
+        let ca = native_tls::Certificate::from_pem(cert_pem.as_bytes()).expect("parse cert pem");
+
+        let connector = native_tls::TlsConnector::builder()
+            .add_root_certificate(ca)
+            .build()
+            .expect("build tls connector");
+
+        // Connect TCP to the bind address
+        let tcp = TcpStream::connect(addr).expect("tcp connect");
+        tcp.set_read_timeout(Some(Duration::from_secs(3))).ok();
+        tcp.set_write_timeout(Some(Duration::from_secs(3))).ok();
+        tcp.set_nodelay(true).ok();
+
+        // Perform TLS handshake (SNI = "localhost")
+        let tls_stream = connector.connect("localhost", tcp).expect("tls handshake");
+
+        // Perform WebSocket handshake
+        let (mut ws, resp) = tungstenite::client::client(&format!("wss://{}", addr), tls_stream)
+            .expect("wss handshake");
+
+        eprintln!("WS handshake response: {resp:?}");
+
+        ws.send(tungstenite::Message::Text("hello ws server".into()))
+            .expect("ws write");
+
+        let msg = ws.read().expect("ws read");
+        eprintln!("WS client got: {msg:?}");
+
+        assert!(
+            matches!(&msg, tungstenite::Message::Text(s) if s.contains("hello ws")),
+            "unexpected ws response: {msg:?}"
+        );
+
+        ws.close(None).ok();
     }
 
     #[cfg(feature = "net-h3-server")]
