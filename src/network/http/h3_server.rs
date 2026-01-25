@@ -1,4 +1,5 @@
 use crate::network::http::session::HAsyncService;
+use tracing::error;
 
 #[cfg(all(target_os = "linux", feature = "rt-glommio", not(feature = "rt-tokio")))]
 pub(crate) async fn serve<T>(
@@ -15,7 +16,7 @@ where
     {
         Ok(h) => h,
         Err(e) => {
-            eprintln!("h3 handshake failed: {e:?}");
+            error!("h3 handshake failed: {e:?}");
             return Err(std::io::Error::other(format!("h3 handshake failed: {e:?}")));
         }
     };
@@ -50,19 +51,19 @@ where
                             *svc_rc.borrow_mut() = Some(service);
 
                             if let Err(e) = result {
-                                eprintln!("h3 service error: {e}");
+                                error!("h3 service error: {e}");
                             }
                         })
                         .detach();
                     }
                     Err(e) => {
-                        eprintln!("resolve_request: {e:?}");
+                        error!("resolve_request: {e:?}");
                     }
                 };
             }
             Ok(None) => break,
             Err(e) => {
-                eprintln!("h3 accept error: {e:?}");
+                error!("h3 accept error: {e:?}");
                 break;
             }
         }
@@ -87,7 +88,7 @@ where
     {
         Ok(h) => h,
         Err(e) => {
-            eprintln!("h3 handshake failed: {e:?}");
+            error!("h3 handshake failed: {e:?}");
             return Err(std::io::Error::other(format!("h3 handshake failed: {e:?}")));
         }
     };
@@ -124,18 +125,18 @@ where
                             *svc_rc.borrow_mut() = Some(service);
 
                             if let Err(e) = result {
-                                eprintln!("h3 service error: {e}");
+                                error!("h3 service error: {e}");
                             }
                         });
                     }
                     Err(e) => {
-                        eprintln!("resolve_request: {e:?}");
+                        error!("resolve_request: {e:?}");
                     }
                 }
             }
             Ok(None) => break, // graceful close
             Err(e) => {
-                eprintln!("h3 accept error: {e:?}");
+                error!("h3 accept error: {e:?}");
                 break;
             }
         }

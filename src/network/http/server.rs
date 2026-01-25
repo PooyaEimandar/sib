@@ -1,10 +1,12 @@
+use tracing::error;
+
 #[cfg(feature = "net-h1-server")]
 macro_rules! mc {
     ($exp: expr) => {
         match $exp {
             Ok(v) => v,
             Err(e) => {
-                eprintln!("Accept error: {e}");
+                error!("Accept error: {e}");
                 continue;
             }
         }
@@ -150,7 +152,7 @@ fn make_socket(
         match i32::try_from(backlog) {
             Ok(y) => y,
             Err(_) => {
-                eprintln!("backlog too large, using {}", DEFAULT_BACKLOG);
+                error!("backlog too large, using {}", DEFAULT_BACKLOG);
                 DEFAULT_BACKLOG
             }
         }
@@ -277,7 +279,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         let stacksize = if cfg.stack_size > 0 {
             cfg.stack_size
         } else {
-            eprintln!("stacksize can not be zero, using default stack size (512 KB) for H1 server");
+            error!("stacksize can not be zero, using default stack size (512 KB) for H1 server");
             512 * 1024
         };
         let listener = may::net::TcpListener::bind(addr)?;
@@ -310,10 +312,10 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                     mc!(stream.set_nodelay(true));
                     let service = self.service(id);
                     let builder = may::coroutine::Builder::new().id(id);
-                    let _ = may::go!(builder, move || if let Err(_e) =
+                    let _ = may::go!(builder, move || if let Err(e) =
                         serve(&mut stream, &peer_addr.ip(), service)
                     {
-                        //s_error!("service err = {e:?}");
+                        error!("service err = {e:?}");
                         stream.shutdown(std::net::Shutdown::Both).ok();
                     });
                 }
@@ -366,7 +368,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                     .servername(boring::ssl::NameType::HOST_NAME)
                     .is_none()
                 {
-                    eprintln!("SNI not provided, rejecting connection");
+                    error!("SNI not provided, rejecting connection");
                     return Err(boring::ssl::SniError::ALERT_FATAL);
                 }
                 Ok(())
@@ -376,7 +378,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         let stacksize = if cfg.stack_size > 0 {
             cfg.stack_size
         } else {
-            eprintln!(
+            error!(
                 "stacksize can not be zero, using default stack size (512 KB) for H1 TLS server"
             );
             512 * 1024
@@ -425,17 +427,17 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                                 if let Err(e) = serve_tls(&mut tls_stream, &peer_addr.ip(), service)
                                 {
                                     tls_stream.get_mut().shutdown(Shutdown::Both).ok();
-                                    eprintln!("serve_tls failed with error: {e} from {peer_addr}");
+                                    error!("serve_tls failed with error: {e} from {peer_addr}");
                                 }
                             }
                             Err(e) => {
-                                eprintln!("TLS handshake failed {e} from {peer_addr}");
+                                error!("TLS handshake failed {e} from {peer_addr}");
                                 match stream_cloned {
                                     Ok(stream_owned) => {
                                         stream_owned.shutdown(Shutdown::Both).ok();
                                     }
                                     Err(e) => {
-                                        eprintln!(
+                                        error!(
                                             "Failed to shut down the stream after TLS handshake failure: {e} from {peer_addr}"
                                         );
                                     }
@@ -492,12 +494,12 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                             unsafe { glommio::net::TcpListener::from_raw_fd(socket.into_raw_fd()) }
                         }
                         Err(e) => {
-                            eprintln!("Failed to create h2 listener on {socket_addr}: {e}");
+                            error!("Failed to create h2 listener on {socket_addr}: {e}");
                             return;
                         }
                     };
 
-                println!("Shard {shard_id} listening for H2/TLS on {socket_addr}");
+                tracing::info!("Shard {shard_id} listening for H2/TLS on {socket_addr}");
 
                 // Per-shard session limiter
                 let sem = std::rc::Rc::new(glommio::sync::Semaphore::new(h2_cfg.max_sessions));
@@ -507,7 +509,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                     let stream = match listener.accept().await {
                         Ok(s) => s,
                         Err(e) => {
-                            eprintln!("H2 accept got an error on shard {shard_id}: {e}");
+                            error!("H2 accept got an error on shard {shard_id}: {e}");
                             continue;
                         }
                     };
@@ -538,7 +540,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                     let tls_stream = match tls_acceptor.accept(stream).await {
                         Ok(s) => s,
                         Err(e) => {
-                            eprintln!("H2 TLS handshake error (shard {shard_id}): {e}");
+                            error!("H2 TLS handshake error (shard {shard_id}): {e}");
                             // sess_token is dropped here, freeing the slot
                             continue;
                         }
@@ -566,7 +568,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                                     if let Err(e) =
                                         serve_h2(tls_stream, service, &h2_cfg_cloned, peer_ip).await
                                     {
-                                        eprintln!("h2 serve error (shard {shard_id}): {e}");
+                                        error!("h2 serve error (shard {shard_id}): {e}");
                                     }
                                 }
                                 _ => {
@@ -575,9 +577,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                                     if let Err(e) =
                                         serve_h1(tls_stream, service, &h2_cfg_cloned, peer_ip).await
                                     {
-                                        eprintln!(
-                                            "h1 fallback serve error (shard {shard_id}): {e}"
-                                        );
+                                        error!("h1 fallback serve error (shard {shard_id}): {e}");
                                     }
                                 }
                             };
@@ -635,7 +635,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                 Err(e) => {
                     // If additional binds fail (likely no SO_REUSEPORT), fall back to first listener.
                     if shard_id > 0 && e.kind() == std::io::ErrorKind::AddrInUse {
-                        eprintln!(
+                        tracing::warn!(
                             "SO_REUSEPORT unavailable; falling back to a single shard ({} -> 1)",
                             requested_shards
                         );
@@ -679,7 +679,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                         let listener = TcpListener::from_std(std_listener)
                             .map_err(|e| std::io::Error::other(format!("tokio from_std: {e}")))?;
 
-                        eprintln!(
+                        tracing::info!(
                             "Tokio H2/TLS shard {shard_id} listening on {}",
                             listener
                                 .local_addr()
@@ -695,7 +695,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                                     let (mut stream, peer_addr) = match listener.accept().await {
                                         Ok(x) => x,
                                         Err(e) => {
-                                            eprintln!("accept error (shard {shard_id}): {e}");
+                                            error!("accept error (shard {shard_id}): {e}");
                                             continue;
                                         }
                                     };
@@ -724,7 +724,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                                         let tls_stream = match tls_acceptor.accept(stream).await {
                                             Ok(s) => s,
                                             Err(e) => {
-                                                eprintln!(
+                                                error!(
                                                     "TLS handshake error (shard {shard_id}) from {peer_addr}: {e}"
                                                 );
                                                 return;
@@ -747,7 +747,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                                                     Ok(()) => {}
                                                     Err(e) if (*is_tls_eof_no_close_notify)(&e) => {}
                                                     Err(e) => {
-                                                        eprintln!("h2 serve error (shard {shard_id}) from {peer_addr}: {e}");
+                                                        error!("h2 serve error (shard {shard_id}) from {peer_addr}: {e}");
                                                     }
                                                 }
                                             }
@@ -759,7 +759,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                                                     Ok(()) => {}
                                                     Err(e) if (*is_tls_eof_no_close_notify)(&e) => {}
                                                     Err(e) => {
-                                                        eprintln!("h1 serve error (shard {shard_id}) from {peer_addr}: {e}");
+                                                        error!("h1 serve error (shard {shard_id}) from {peer_addr}: {e}");
                                                     }
                                                 }
                                             }
@@ -826,20 +826,20 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                             quinn::Endpoint::new(ep_cfg, Some(server), std_sock, runtime)
                         }
                         Err(e) => {
-                            eprintln!("Failed to create h3 listener on {socket_addr}: {e}");
+                            error!("Failed to create h3 listener on {socket_addr}: {e}");
                             return;
                         }
                     };
                 let endpoint = match &endpoint_res {
                     Ok(ep) => ep,
                     Err(e) => {
-                        eprintln!("H3 endpoint creation error on shard {shard_id}: {e}");
+                        error!("H3 endpoint creation error on shard {shard_id}: {e}");
                         return;
                     }
                 };
 
                 // Per-shard concurrency budget
-                println!("Shard {shard_id} listening for H3/TLS on {socket_addr}");
+                tracing::info!("Shard {shard_id} listening for H3/TLS on {socket_addr}");
 
                 let sem = std::rc::Rc::new(glommio::sync::Semaphore::new(h3_cfg.max_sessions));
                 while let Some(incoming) = endpoint.accept().await {
@@ -869,11 +869,11 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                                 let service = factory_cloned.async_service(shard_id);
 
                                 if let Err(e) = serve(connection, service, peer_ip).await {
-                                    eprintln!("h3 serve error (shard {shard_id}): {e}");
+                                    error!("h3 serve error (shard {shard_id}): {e}");
                                 }
                             }
                             Err(e) => {
-                                eprintln!("h3 handshake error (shard {shard_id}): {e}");
+                                error!("h3 handshake error (shard {shard_id}): {e}");
                             }
                         };
                     })
@@ -903,6 +903,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
     ) -> std::io::Result<()> {
         use std::sync::Arc;
         use tokio::sync::Semaphore;
+        use tracing::{info, warn};
 
         let server = make_quinn_server(&chain_cert_key, &h3_cfg)?;
         let socket_addr = resolve_addr!(addr)?;
@@ -918,7 +919,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                 Ok(sock) => udp_sockets.push(sock.into()),
                 Err(e) => {
                     if shard_id > 0 && e.kind() == std::io::ErrorKind::AddrInUse {
-                        eprintln!(
+                        warn!(
                             "H3: SO_REUSEPORT unavailable; falling back to a single shard ({} -> 1)",
                             requested_shards
                         );
@@ -955,14 +956,12 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                                 {
                                     Ok(ep) => ep,
                                     Err(e) => {
-                                        eprintln!(
-                                            "H3 endpoint creation error (shard {shard_id}): {e}"
-                                        );
+                                        info!("H3 endpoint creation error (shard {shard_id}): {e}");
                                         return Err(std::io::Error::other(e));
                                     }
                                 };
 
-                            println!("Tokio H3/TLS shard {shard_id} listening on {}", socket_addr);
+                            info!("Tokio H3/TLS shard {shard_id} listening on {}", socket_addr);
 
                             let sem = Arc::new(Semaphore::new(h3_cfg.max_sessions as usize));
                             let local = tokio::task::LocalSet::new();
@@ -1001,13 +1000,13 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                                                     if let Err(e) =
                                                         serve(connection, service, peer_ip).await
                                                     {
-                                                        eprintln!(
+                                                        error!(
                                                             "h3 serve error (shard {shard_id}): {e}"
                                                         );
                                                     }
                                                 }
                                                 Err(e) => {
-                                                    eprintln!(
+                                                    error!(
                                                         "h3 handshake error (shard {shard_id}): {e}"
                                                     );
                                                 }
@@ -1156,7 +1155,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                                 ))
                             })?;
 
-                            eprintln!("WT shard {shard_id} listening on {bind}");
+                            info!("WT shard {shard_id} listening on {bind}");
 
                             let sem = Arc::new(Semaphore::new(wt_cfg.max_sessions));
                             let local = tokio::task::LocalSet::new();
@@ -1179,7 +1178,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                                             let session_req = match incoming.await {
                                                 Ok(s) => s,
                                                 Err(e) => {
-                                                    eprintln!("WT session request error: {e}");
+                                                    error!("WT session request error: {e}");
                                                     return;
                                                 }
                                             };
@@ -1188,7 +1187,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                                             let conn = match session_req.accept().await {
                                                 Ok(c) => c,
                                                 Err(e) => {
-                                                    eprintln!("WT accept error: {e}");
+                                                    error!("WT accept error: {e}");
                                                     return;
                                                 }
                                             };
@@ -1198,7 +1197,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                                             let mut svc = service;
                                             let mut sess = WtSession::new(conn);
                                             if let Err(e) = svc.call(&mut sess).await {
-                                                eprintln!("WT service error: {e}");
+                                                error!("WT service error: {e}");
                                             }
                                         });
                                     }
@@ -1270,6 +1269,9 @@ pub(crate) fn parse_authority(s: &str) -> Option<(String, Option<u16>)> {
 #[cfg(test)]
 pub mod tests {
     use crate::network::http::server::HFactory;
+
+    #[allow(unused_imports)]
+    use tracing::{error, info, warn};
 
     #[cfg(feature = "net-h1-server")]
     use crate::network::http::session::HService;
@@ -1354,17 +1356,14 @@ pub mod tests {
                             // Single-frame message
                             if matches!(code, OpCode::Text) {
                                 if let Ok(msg) = std::str::from_utf8(payload.as_ref()) {
-                                    println!(
-                                        "WS server got: Text ({} bytes): {msg}",
-                                        payload.len()
-                                    );
+                                    info!("WS server got: Text ({} bytes): {msg}", payload.len());
                                     session.ws_write(OpCode::Text, &reply_text, true)?;
                                 } else {
                                     session.ws_close(Some(&err_utf8))?;
                                     break;
                                 }
                             } else {
-                                println!("WS server got Binary ({} bytes)", payload.len());
+                                info!("WS server got Binary ({} bytes)", payload.len());
                                 session.ws_write(OpCode::Binary, &payload, true)?;
                             }
                         }
@@ -1381,14 +1380,14 @@ pub mod tests {
                                 let whole = frag_buf.as_ref();
                                 if initial_is_text {
                                     if let Ok(msg) = std::str::from_utf8(whole) {
-                                        println!("WS server got (fragmented text): {msg}");
+                                        info!("WS server got (fragmented text): {msg}");
                                         session.ws_write(OpCode::Text, &reply_text, true)?;
                                     } else {
                                         session.ws_close(Some(&err_utf8))?;
                                         break;
                                     }
                                 } else {
-                                    println!(
+                                    info!(
                                         "WS server got (fragmented binary): {} bytes",
                                         whole.len()
                                     );
@@ -1503,10 +1502,7 @@ pub mod tests {
                             if matches!(code, OpCode::Text) {
                                 if let Ok(msg) = std::str::from_utf8(payload.as_ref()) {
                                     let reply_text = Bytes::from_static(b"hello ws client!");
-                                    println!(
-                                        "WS server got: Text ({} bytes): {msg}",
-                                        payload.len()
-                                    );
+                                    info!("WS server got: Text ({} bytes): {msg}", payload.len());
                                     session
                                         .ws_write_async(OpCode::Text, reply_text, true)
                                         .await?;
@@ -1515,7 +1511,7 @@ pub mod tests {
                                     break;
                                 }
                             } else {
-                                println!("WS server got Binary ({} bytes)", payload.len());
+                                info!("WS server got Binary ({} bytes)", payload.len());
                                 session
                                     .ws_write_async(OpCode::Binary, payload, true)
                                     .await?;
@@ -1535,7 +1531,7 @@ pub mod tests {
                                 if initial_is_text {
                                     if let Ok(msg) = std::str::from_utf8(whole) {
                                         let reply_text = Bytes::from_static(b"hello ws client!");
-                                        println!("WS server got (fragmented text): {msg}");
+                                        info!("WS server got (fragmented text): {msg}");
                                         session
                                             .ws_write_async(OpCode::Text, reply_text, true)
                                             .await?;
@@ -1544,7 +1540,7 @@ pub mod tests {
                                         break;
                                     }
                                 } else {
-                                    println!(
+                                    info!(
                                         "WS server got (fragmented binary): {} bytes",
                                         whole.len()
                                     );
@@ -1679,7 +1675,7 @@ pub mod tests {
         let hash = Sha256::digest(&cert_der);
         let base64_hash = b64.encode(hash);
 
-        println!("BASE64_SHA256_OF_DER_CERT: {}", base64_hash);
+        info!("BASE64_SHA256_OF_DER_CERT: {}", base64_hash);
 
         INIT.call_once(|| {
             rustls::crypto::CryptoProvider::install_default(
@@ -1750,8 +1746,8 @@ pub mod tests {
             let status = resp.status();
             let body = resp.text().expect("read body");
 
-            eprintln!("H1 GET Status: {status}");
-            eprintln!("H1 GET Body: {body}");
+            info!("H1 GET Status: {status}");
+            info!("H1 GET Body: {body}");
 
             assert!(status.is_success(), "status was {status}");
             assert!(body.contains("/test"), "body did not contain /test");
@@ -1801,8 +1797,8 @@ pub mod tests {
             let status = resp.status();
             let text = resp.text().expect("read body");
 
-            eprintln!("H1 POST Status: {status}");
-            eprintln!("H1 POST Body: {text}");
+            info!("H1 POST Status: {status}");
+            info!("H1 POST Body: {text}");
 
             assert!(status.is_success(), "status was {status}");
             assert!(text.contains("POST"));
@@ -1836,7 +1832,7 @@ pub mod tests {
         let (mut socket, response) = tungstenite::client::connect(format!("ws://{}", addr))
             .expect("websocket handshake failed");
 
-        eprintln!("WS GET Response: {response:?}");
+        info!("WS GET Response: {response:?}");
 
         if socket.can_write() {
             socket
@@ -1846,7 +1842,7 @@ pub mod tests {
         }
         if socket.can_read() {
             let msg = socket.read().expect("ws read");
-            eprintln!("WS client got: {msg:?}");
+            info!("WS client got: {msg:?}");
         }
         socket.close(None).expect("close failed");
 
@@ -1890,11 +1886,11 @@ pub mod tests {
                 .timeout(std::time::Duration::from_millis(300))
                 .send()
                 .expect("reqwest send");
-            eprintln!("H1 Response: {resp:?}");
+            info!("H1 Response: {resp:?}");
             assert!(resp.status().is_success());
 
             let body = resp.text().expect("resp text");
-            eprintln!("H1 Response: {body:?}");
+            info!("H1 Response: {body:?}");
             assert!(body.contains("Echo:"));
             assert!(body.contains("Hello, World!"));
         }
@@ -1914,11 +1910,11 @@ pub mod tests {
                 .timeout(std::time::Duration::from_millis(300))
                 .send()
                 .expect("reqwest send");
-            eprintln!("H2 Response: {resp:?}");
+            info!("H2 Response: {resp:?}");
             assert!(resp.status().is_success());
 
             let body = resp.text().expect("resp text");
-            eprintln!("H2 Response: {body:?}");
+            info!("H2 Response: {body:?}");
             assert!(body.contains("Echo:"));
             assert!(body.contains("Hello, World!"));
         }
@@ -1959,11 +1955,11 @@ pub mod tests {
                 .timeout(std::time::Duration::from_millis(300))
                 .send()
                 .expect("reqwest send");
-            eprintln!("H1 Response: {resp:?}");
+            info!("H1 Response: {resp:?}");
             assert!(resp.status().is_success());
 
             let body = resp.text().expect("resp text");
-            eprintln!("H1 Response: {body:?}");
+            info!("H1 Response: {body:?}");
             assert!(body.contains("Echo:"));
             assert!(body.contains("Hello, World!"));
         }
@@ -1982,11 +1978,11 @@ pub mod tests {
                 .timeout(std::time::Duration::from_millis(300))
                 .send()
                 .expect("reqwest send");
-            eprintln!("H2 Response: {resp:?}");
+            info!("H2 Response: {resp:?}");
             assert!(resp.status().is_success());
 
             let body = resp.text().expect("resp text");
-            eprintln!("H2 Response: {body:?}");
+            info!("H2 Response: {body:?}");
             assert!(body.contains("Echo:"));
             assert!(body.contains("Hello, World!"));
         }
@@ -2042,13 +2038,13 @@ pub mod tests {
         let (mut ws, resp) = tungstenite::client::client(&format!("wss://{}", addr), tls_stream)
             .expect("wss handshake");
 
-        eprintln!("WS handshake response: {resp:?}");
+        info!("WS handshake response: {resp:?}");
 
         ws.send(tungstenite::Message::Text("hello ws server".into()))
             .expect("ws write");
 
         let msg = ws.read().expect("ws read");
-        eprintln!("WS client got: {msg:?}");
+        info!("WS client got: {msg:?}");
 
         assert!(
             matches!(&msg, tungstenite::Message::Text(s) if s.contains("hello ws")),
@@ -2088,11 +2084,11 @@ pub mod tests {
             .timeout(std::time::Duration::from_millis(300))
             .send()
             .expect("reqwest send");
-        eprintln!("Response: {resp:?}");
+        info!("Response: {resp:?}");
         assert!(resp.status().is_success());
 
         let body = resp.text().expect("resp text");
-        eprintln!("Response: {body:?}");
+        info!("Response: {body:?}");
         assert!(body.contains("Echo:"));
         assert!(body.contains("Hello, World!"));
     }
@@ -2127,11 +2123,11 @@ pub mod tests {
             .timeout(std::time::Duration::from_millis(300))
             .send()
             .expect("reqwest send");
-        eprintln!("Response: {resp:?}");
+        info!("Response: {resp:?}");
         assert!(resp.status().is_success());
 
         let body = resp.text().expect("resp text");
-        eprintln!("Response: {body:?}");
+        info!("Response: {body:?}");
         assert!(body.contains("Echo:"));
         assert!(body.contains("Hello, World!"));
     }

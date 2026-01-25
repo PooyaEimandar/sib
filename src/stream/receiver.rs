@@ -4,6 +4,7 @@ use gstreamer::prelude::*;
 use gstreamer_app::{AppSink, AppSinkCallbacks};
 use gstreamer_video::VideoInfo;
 use std::sync::{Arc, Mutex};
+use tracing::{error, info, warn};
 
 #[derive(Clone)]
 pub struct Config {
@@ -110,12 +111,12 @@ impl Receiver {
         for msg in bus.iter_timed(gst::ClockTime::NONE) {
             use gst::MessageView;
             if *stop_flag.lock().unwrap() {
-                println!("Graceful shutdown triggered.");
+                warn!("Graceful shutdown triggered.");
                 break;
             }
             match msg.view() {
                 MessageView::Error(err) => {
-                    eprintln!(
+                    error!(
                         "Error from {:?}: {} ({:?})",
                         err.src().map(|s| s.path_string()),
                         err.error(),
@@ -124,7 +125,7 @@ impl Receiver {
                     break;
                 }
                 MessageView::Eos(..) => {
-                    println!("EOS received");
+                    info!("EOS received");
                     break;
                 }
                 _ => {}
@@ -158,7 +159,7 @@ mod tests {
             let receiver = Receiver::new(config).unwrap();
             receiver
                 .run(stop_flag_thread, move |data, width, height| {
-                    println!(
+                    info!(
                         "Received frame of size: {}x{} with len:{}",
                         width,
                         height,

@@ -1,4 +1,6 @@
 use crate::network::http::server::H2Config;
+use tracing::error;
+
 cfg_if::cfg_if! {
     // Glommio runtime (Linux)
     if #[cfg(all(target_os = "linux", feature = "rt-glommio", not(feature = "rt-tokio")))] {
@@ -108,7 +110,7 @@ cfg_if::cfg_if! {
                     *svc_rc.borrow_mut() = Some(service);
 
                     if let Err(e) = result {
-                        eprintln!("h2 service error: {e}");
+                        error!("h2 service error: {e}");
                     }
                 })
                 .detach();
@@ -373,7 +375,7 @@ cfg_if::cfg_if! {
 
                 // Normal HTTP error handling
                 if let Err(e) = r {
-                    eprintln!("h1 service error: {e}");
+                    error!("h1 service error: {e}");
                     if !session.response_sent() {
                         let _ = session
                             .status_code(http::StatusCode::INTERNAL_SERVER_ERROR)
@@ -442,12 +444,12 @@ cfg_if::cfg_if! {
                             *svc_rc.borrow_mut() = Some(service);
 
                             if let Err(e) = result {
-                                eprintln!("h2 service error: {e}");
+                                error!("h2 service error: {e}");
                             }
                         });
                     }
                     Some(Err(e)) => {
-                        eprintln!("accept stream error from {peer_addr}: {e}");
+                        error!("accept stream error from {peer_addr}: {e}");
                         break;
                     }
                     None => break, // connection closed

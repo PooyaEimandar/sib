@@ -4,6 +4,7 @@ use dashmap::DashMap;
 use http::{HeaderMap, HeaderValue, StatusCode, header};
 use mime::Mime;
 use std::{fs::Metadata, ops::Range, path::PathBuf, time::SystemTime};
+use tracing::{error, info};
 
 macro_rules! get_error_headers {
     ($close:expr) => {{
@@ -24,7 +25,7 @@ macro_rules! get_file_info {
         let modified = match $meta.modified() {
             Ok(sys_time) => sys_time,
             Err(e) => {
-                eprintln!("Failed to read modified time for: {}: {}", &key, e);
+                error!("Failed to read modified time for: {}: {}", &key, e);
 
                 let headers = get_error_headers!($close);
                 return $session
@@ -358,7 +359,7 @@ async fn serve_async_fn<S: Session>(
     let meta = match tokio::fs::metadata(&path).await {
         Ok(meta) => meta,
         Err(e) => {
-            eprintln!(
+            error!(
                 "File server failed to get metadata for path: {}: {}",
                 &path, e
             );
@@ -618,7 +619,7 @@ pub fn serve_h1<S: Session>(
     let meta = match std::fs::metadata(&path) {
         Ok(meta) => meta,
         Err(e) => {
-            eprintln!(
+            error!(
                 "File server failed to get metadata for path: {}: {}",
                 path.display(),
                 e
@@ -676,7 +677,7 @@ pub fn serve_h1<S: Session>(
         let file = match std::fs::File::open(&file_path) {
             Ok(f) => f,
             Err(e) => {
-                eprintln!("Failed to open file: {}: {}", file_path.display(), e);
+                error!("Failed to open file: {}: {}", file_path.display(), e);
                 let headers = get_error_headers!(true);
                 return session
                     .status_code(StatusCode::INTERNAL_SERVER_ERROR)
@@ -697,7 +698,7 @@ pub fn serve_h1<S: Session>(
             let mmap = match unsafe { memmap2::Mmap::map(&file) } {
                 Ok(m) => m,
                 Err(e) => {
-                    eprintln!("Failed to memory-map file: {}: {}", file_path.display(), e);
+                    error!("Failed to memory-map file: {}: {}", file_path.display(), e);
                     let headers = get_error_headers!(true);
                     return session
                         .status_code(StatusCode::INTERNAL_SERVER_ERROR)
@@ -767,7 +768,7 @@ pub async fn serve_h1_async<S: Session>(
     let meta = match tokio::fs::metadata(path).await {
         Ok(m) => m,
         Err(e) => {
-            eprintln!(
+            error!(
                 "File server failed to get metadata for path: {}: {}",
                 path.display(),
                 e
@@ -903,7 +904,7 @@ pub async fn serve_h2<S: Session>(
     let meta = match tokio::fs::metadata(&path).await {
         Ok(meta) => meta,
         Err(e) => {
-            eprintln!(
+            error!(
                 "File server failed to get metadata for path: {}: {}",
                 path.display(),
                 e
@@ -963,7 +964,7 @@ pub async fn serve_h2<S: Session>(
             Ok(std_file) => match unsafe { memmap2::Mmap::map(&std_file) } {
                 Ok(mmap) => mmap,
                 Err(e) => {
-                    eprintln!("Failed to memory-map file: {}: {}", file_path.display(), e);
+                    error!("Failed to memory-map file: {}: {}", file_path.display(), e);
                     return session
                         .status_code(StatusCode::INTERNAL_SERVER_ERROR)
                         .body(Bytes::new())
@@ -971,7 +972,7 @@ pub async fn serve_h2<S: Session>(
                 }
             },
             Err(e) => {
-                eprintln!("Failed to open file: {}: {}", file_path.display(), e);
+                error!("Failed to open file: {}: {}", file_path.display(), e);
                 return session
                     .status_code(StatusCode::INTERNAL_SERVER_ERROR)
                     .body(Bytes::new())
@@ -1029,7 +1030,7 @@ pub async fn serve_h3<S: Session>(
                 Ok(std_file) => match unsafe { memmap2::Mmap::map(&std_file) } {
                     Ok(mmap) => mmap,
                     Err(e) => {
-                        eprintln!("Failed to memory-map file: {}: {}", file_path.display(), e);
+                        error!("Failed to memory-map file: {}: {}", file_path.display(), e);
                         return session
                             .status_code(StatusCode::INTERNAL_SERVER_ERROR)
                             .body(Bytes::new())
@@ -1038,7 +1039,7 @@ pub async fn serve_h3<S: Session>(
                     }
                 },
                 Err(e) => {
-                    eprintln!("Failed to open file: {}: {}", file_path.display(), e);
+                    error!("Failed to open file: {}: {}", file_path.display(), e);
                     return session
                         .status_code(StatusCode::INTERNAL_SERVER_ERROR)
                         .body(Bytes::new())
@@ -1156,7 +1157,7 @@ fn compress_then_respond(
             Ok((StatusCode::OK, compressed))
         }
         Err(e) => {
-            eprintln!(
+            error!(
                 "Compression failed ({encoding_name}) for {}: {e}",
                 file_info.path.display()
             );
@@ -1673,7 +1674,7 @@ mod tests {
                 )
                 .await
                 {
-                    eprintln!("H3 FileService failed: {e}");
+                    error!("H3 FileService failed: {e}");
                     return session
                         .status_code(http::StatusCode::INTERNAL_SERVER_ERROR)
                         .body(bytes::Bytes::new())
@@ -1707,7 +1708,7 @@ mod tests {
                 )
                 .await
                 {
-                    eprintln!("H2 FileService failed: {e}");
+                    error!("H2 FileService failed: {e}");
                     return session
                         .status_code(http::StatusCode::INTERNAL_SERVER_ERROR)
                         .body(bytes::Bytes::new())
@@ -1740,7 +1741,7 @@ mod tests {
                 )
                 .await
                 {
-                    eprintln!("H2 FileService failed: {e}");
+                    error!("H2 FileService failed: {e}");
                     return session
                         .status_code(http::StatusCode::INTERNAL_SERVER_ERROR)
                         .body(bytes::Bytes::new())
@@ -1806,7 +1807,7 @@ mod tests {
         let hash = Sha256::digest(&cert_der);
         let base64_hash = b64.encode(hash);
 
-        println!("BASE64_SHA256_OF_DER_CERT: {}", base64_hash);
+        info!("BASE64_SHA256_OF_DER_CERT: {}", base64_hash);
 
         rustls::crypto::CryptoProvider::install_default(
             rustls::crypto::aws_lc_rs::default_provider(),
@@ -1836,7 +1837,7 @@ mod tests {
                     let key_pem = certs.1.clone();
                     let h1_handle = std::thread::spawn(move || {
                         let id = std::thread::current().id();
-                        println!("Starting H1 server on {addr} with thread: {id:?}");
+                        info!("Starting H1 server on {addr} with thread: {id:?}");
                         FileServer(FileService)
                             .start_h1_tls(
                                 addr,
@@ -1862,7 +1863,7 @@ mod tests {
                     let cert_pem = cert_h2_pem.as_bytes();
                     let key_pem = key_h2_pem.as_bytes();
                     let id = std::thread::current().id();
-                    println!("Starting H2 server on {addr} with thread: {id:?}");
+                    info!("Starting H2 server on {addr} with thread: {id:?}");
                     FileServer(FileService)
                         .start_h2_tls(addr, (None, cert_pem, key_pem), H2Config::default())
                         .unwrap_or_else(|_| panic!("H2 file server failed to start for thread {id:?}"));
@@ -1881,7 +1882,7 @@ mod tests {
                     let cert_pem = cert_h3_pem.as_bytes();
                     let key_pem = key_h3_pem.as_bytes();
                     let id = std::thread::current().id();
-                    println!("Starting H2 server on {addr} with thread: {id:?}");
+                    info!("Starting H2 server on {addr} with thread: {id:?}");
                     FileServer(FileService)
                         .start_h3_tls(addr, (None, cert_pem, key_pem), H3Config::default())
                         .unwrap_or_else(|_| panic!("H3 file server failed to start for thread {id:?}"));

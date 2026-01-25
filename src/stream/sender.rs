@@ -75,14 +75,14 @@ impl Sender {
         };
 
         set_pipeline_state(&pipeline, gst::State::Playing)?;
-        println!("GStreamer pipeline started");
+        info!("GStreamer pipeline started");
 
         loop {
             if let Some(msg) = bus.timed_pop(gst::ClockTime::from_mseconds(10)) {
                 match msg.view() {
                     gst::MessageView::Eos(..) => break,
                     gst::MessageView::Error(err) => {
-                        eprintln!(
+                        error!(
                             "Error from {:?}: {}",
                             err.src().map(|s| s.path_string()),
                             err.error()
@@ -114,7 +114,7 @@ impl Sender {
                             needs_restart = true;
                         }
                         Command::Stop => {
-                            println!("Received stop command, shutting down GStreamer");
+                            info!("Received stop command, shutting down GStreamer");
                             return pipeline
                                 .set_state(gst::State::Null)
                                 .map(|_| ())
@@ -138,36 +138,36 @@ impl Sender {
                 if !needs_restart && let Some(enc) = pipeline.by_name("encoder") {
                     if cfg.codec == Codec::H264 {
                         enc.set_property("bitrate", br);
-                        println!("GStreamer x264 bitrate updated to {br} kbps");
+                        info!("GStreamer x264 bitrate updated to {br} kbps");
                     } else {
-                        println!("GStreamer AV1 CRF update based on bitrate");
+                        info!("GStreamer AV1 CRF update based on bitrate");
                     }
                 }
             }
 
             if let Some(fps) = pending_fps {
                 cfg.fps = fps;
-                println!("GStreamer FPS changed to {fps}");
+                info!("GStreamer FPS changed to {fps}");
             }
 
             if let Some((w, h)) = pending_resolution {
                 cfg.width = w;
                 cfg.height = h;
-                println!("GStreamer resolution changed to {w}x{h}");
+                info!("GStreamer resolution changed to {w}x{h}");
             }
 
             drop(cfg);
 
             if needs_restart {
-                println!("Restarting GStreamer pipeline...");
+                info!("Restarting GStreamer pipeline...");
                 set_pipeline_state(&pipeline, gst::State::Null)?;
                 pipeline = self.build_pipeline()?;
                 set_pipeline_state(&pipeline, gst::State::Playing)?;
-                println!("GStreamer pipeline restarted");
+                info!("GStreamer pipeline restarted");
             }
         }
 
-        println!("GStreamer is shutting down");
+        info!("GStreamer is shutting down");
         set_pipeline_state(&pipeline, gst::State::Null)
     }
 
@@ -233,7 +233,7 @@ impl Sender {
             )
         };
 
-        println!("GStreamer is building: {pipeline_str}");
+        info!("GStreamer is building: {pipeline_str}");
         gst::parse::launch(&pipeline_str)
             .map_err(|e| {
                 std::io::Error::new(
@@ -298,13 +298,13 @@ mod tests {
             Command::SetFps(60),
             Command::SetResolution(1920, 1080),
         ]);
-        println!("Sent control commands to change bitrate, fps, and resolution");
+        info!("Sent control commands to change bitrate, fps, and resolution");
 
         // Let it run for another 10 seconds
         thread::sleep(Duration::from_secs(20));
 
         control.send(vec![Command::Stop]);
-        println!("Sent stop command to the streamer");
+        info!("Sent stop command to the streamer");
         // Wait for the streamer to finish
         thread::sleep(Duration::from_secs(3));
         handle.join().unwrap();

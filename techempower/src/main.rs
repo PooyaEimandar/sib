@@ -85,7 +85,7 @@ fn main() {
     for _ in 0..cpus {
         let handle = std::thread::spawn(move || {
             let id = std::thread::current().id();
-            println!("Listening {addr} on thread: {id:?}");
+            info!("Listening {addr} on thread: {id:?}");
             Server
                 .start_h1(
                     addr,
