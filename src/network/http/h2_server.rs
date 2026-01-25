@@ -344,9 +344,8 @@ cfg_if::cfg_if! {
                 let mut session = H1SessionAsync::new(
                     peer_addr,
                     &mut stream,
-                    method,
+                    (method,version),
                     uri,
-                    version,
                     (req_headers, body_bytes),
                     keep_alive,
                     is_ws

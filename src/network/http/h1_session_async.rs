@@ -45,9 +45,8 @@ impl<'a, S> H1SessionAsync<'a, S> {
     pub fn new(
         peer: IpAddr,
         stream: &'a mut S,
-        method: Method,
+        method_version: (Method, Version),
         uri: Uri,
-        version: Version,
         req: (HeaderMap, Bytes),
         keep_alive: bool,
         is_ws: bool,
@@ -55,9 +54,9 @@ impl<'a, S> H1SessionAsync<'a, S> {
         Self {
             peer,
             stream,
-            method,
+            method: method_version.0,
             uri,
-            version,
+            version: method_version.1,
             req_headers: req.0,
             req_body: req.1,
 

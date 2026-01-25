@@ -1027,11 +1027,9 @@ pub trait HFactory: Send + Sync + Sized + 'static {
 
         // Join shard threads and propagate any error
         for h in handles {
-            if let Err(e) = h.join().map_err(|_| {
+            h.join().map_err(|_| {
                 std::io::Error::other("A shard thread panicked in start_h3_tls (tokio)")
-            })? {
-                return Err(e);
-            }
+            })??
         }
 
         Ok(())
