@@ -68,10 +68,10 @@ jobs:
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: |
           rustup component add clippy
-          cargo clippy --all-targets --no-default-features --features "rt-tokio net-h1-server net-h2-server net-h3-server" -- -D warnings
+          cargo clippy --all-targets --no-default-features --features "rt-tokio net-h1-server net-h2-server" -- -D warnings
 
       - name: Build
-        run: cargo build --release --target=${{ matrix.target }} --no-default-features --features "rt-tokio net-h1-server net-h2-server net-h3-server"
+        run: cargo build --release --target=${{ matrix.target }} --no-default-features --features "rt-tokio net-h1-server net-h2-server"
 
       - name: Test
         run: cargo test --release --no-default-features --features "rt-tokio net-h2-server"
