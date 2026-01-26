@@ -135,7 +135,7 @@ quinn = { version = "0.11.9", optional = true, default-features = false, feature
 
 
 [features]
-default = ["stm-webrtc-sender"]
+default = []
 db-fdb = ["foundationdb-sys", "crossbeam"]
 net-file-server = [
     "brotli",
