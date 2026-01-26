@@ -28,6 +28,7 @@ SIB aims to become a next-generation, high-performance Rust-based networking run
 - [x] Auto benchmark mode (TechEmpower-compatible)
 - [x] ACID cache over FoundationDB
 - [x] Ratelimit per ip/session
+- [x] WebRTC server for real time streaming
 - [ ] Kafka client for all runtimes
 - [ ] Integration with RAFT
 - [ ] Integration with WebRTC

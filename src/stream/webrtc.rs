@@ -570,18 +570,19 @@ async fn stop_stream_runtime(rt: StreamRuntime) {
 
 /// Handle one complete JSON message (Offer / Ice / Ctrl / ClientStats).
 async fn handle_ws_json(
-    cfg: &ServerConfig,
+    cfg_and_txt: (&ServerConfig, &str),
     ctrl_state: Arc<RwLock<StreamCtrl>>,
-    dc_next_id: Arc<std::sync::atomic::AtomicU64>,
-    on_dc_message: Option<DataChannelMessageCallback>,
+    dc_id_msg: (
+        Arc<std::sync::atomic::AtomicU64>,
+        Option<DataChannelMessageCallback>,
+    ),
     out_tx: mpsc::Sender<WsMsg>,
     pc: Arc<RwLock<Option<Arc<RTCPeerConnection>>>>,
     runtime: Arc<RwLock<Option<StreamRuntime>>>,
-    text: &str,
     track_slot: Arc<RwLock<Option<Arc<TrackLocalStaticSample>>>>,
 ) -> std::io::Result<()> {
-    let m: WsMsg =
-        serde_json::from_str(text).map_err(|e| std::io::Error::other(format!("Bad JSON: {e}")))?;
+    let m: WsMsg = serde_json::from_str(cfg_and_txt.1)
+        .map_err(|e| std::io::Error::other(format!("Bad JSON: {e}")))?;
 
     match m {
         WsMsg::Offer(offer_sdp) => {
@@ -626,8 +627,11 @@ async fn handle_ws_json(
             // UDP ephemeral ports
             use webrtc::api::setting_engine::SettingEngine;
             let udp_network = webrtc::ice::udp_network::UDPNetwork::Ephemeral(
-                webrtc::ice::udp_network::EphemeralUDP::new(cfg.udp_min, cfg.udp_max)
-                    .map_err(|e| std::io::Error::other(format!("EphemeralUDP: {e}")))?,
+                webrtc::ice::udp_network::EphemeralUDP::new(
+                    cfg_and_txt.0.udp_min,
+                    cfg_and_txt.0.udp_max,
+                )
+                .map_err(|e| std::io::Error::other(format!("EphemeralUDP: {e}")))?,
             );
             let mut se = SettingEngine::default();
             se.set_udp_network(udp_network);
@@ -640,7 +644,7 @@ async fn handle_ws_json(
 
             let config = RTCConfiguration {
                 ice_servers: vec![RTCIceServer {
-                    urls: cfg.stun_urls.clone(),
+                    urls: cfg_and_txt.0.stun_urls.clone(),
                     ..Default::default()
                 }],
                 ..Default::default()
@@ -716,8 +720,8 @@ async fn handle_ws_json(
 
             {
                 peer.on_data_channel(Box::new(move |dc| {
-                    let on_dc_message = on_dc_message.clone();
-                    let dc_next_id = dc_next_id.clone();
+                    let dc_next_id = dc_id_msg.0.clone();
+                    let on_dc_message = dc_id_msg.1.clone();
 
                     Box::pin(async move {
                         let dc_id = dc_next_id.fetch_add(1, Ordering::Relaxed);
@@ -1034,14 +1038,12 @@ impl HAsyncService for WebRTCServer {
                             };
 
                             if let Err(e) = handle_ws_json(
-                                &self.cfg,
+                                (&self.cfg, text),
                                 ctrl_state.clone(),
-                                self.dc_next_id.clone(),
-                                self.on_dc_message.clone(),
+                                (self.dc_next_id.clone(), self.on_dc_message.clone()),
                                 out_tx.clone(),
                                 pc.clone(),
                                 runtime.clone(),
-                                text,
                                 track_slot.clone(),
                             ).await {
                                 let _ = out_tx.send(WsMsg::Error(format!("{e}"))).await;
@@ -1069,14 +1071,12 @@ impl HAsyncService for WebRTCServer {
                                     };
 
                                     if let Err(e) = handle_ws_json(
-                                        &self.cfg,
+                                        (&self.cfg, text),
                                         ctrl_state.clone(),
-                                        self.dc_next_id.clone(),
-                                        self.on_dc_message.clone(),
+                                        (self.dc_next_id.clone(), self.on_dc_message.clone()),
                                         out_tx.clone(),
                                         pc.clone(),
                                         runtime.clone(),
-                                        text,
                                         track_slot.clone(),
                                     ).await {
                                         let _ = out_tx.send(WsMsg::Error(format!("{e}"))).await;
