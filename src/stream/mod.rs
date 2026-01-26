@@ -33,3 +33,8 @@ pub mod receiver;
 
 #[cfg(feature = "stm-webrtc-sender")]
 pub mod webrtc;
+
+/// Initialize GStreamer once in your binary
+pub fn init() -> std::io::Result<()> {
+    gstreamer::init().map_err(|e| std::io::Error::other(format!("gst init failed: {e:?}")))
+}

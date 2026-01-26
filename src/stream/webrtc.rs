@@ -26,11 +26,6 @@ use webrtc::{
     track::track_local::track_local_static_sample::TrackLocalStaticSample,
 };
 
-/// Initialize GStreamer once in your binary
-pub fn init() -> std::io::Result<()> {
-    gst::init().map_err(|e| std::io::Error::other(format!("gst init failed: {e:?}")))
-}
-
 /// Public server/service config (extend as you need).
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -921,7 +916,7 @@ pub enum DataChannelPayload {
 pub type DataChannelMessageCallback =
     Arc<dyn Fn(u64 /*id*/, DataChannelPayload) + Send + Sync + 'static>;
 
-/// Public service you register into your router.
+/// Public service
 pub struct WebRTCServer {
     pub cfg: ServerConfig,
     pub initial_ctrl: StreamCtrl,
@@ -999,9 +994,6 @@ impl HAsyncService for WebRTCServer {
 
         loop {
             tokio::select! {
-                // Prefer reading frames so we don't build up backpressure if client is chatty
-                biased;
-
                 incoming = session.ws_read_async() => {
                     let (code, payload, fin) = incoming?;
 
@@ -1153,7 +1145,7 @@ impl HFactory for WebRTCServer {
 #[cfg(test)]
 pub mod tests {
     use crate::network::http::server::{H2Config, HFactory};
-    use crate::stream::webrtc::{DataChannelPayload, WebRTCServer, init};
+    use crate::stream::webrtc::{DataChannelPayload, WebRTCServer};
     use bytes::Bytes;
     use tracing::info;
 
@@ -1167,7 +1159,7 @@ pub mod tests {
             .unwrap()
             .join("webrtc.html");
 
-        init().expect("webRTC init failed");
+        crate::stream::init().expect("webRTC init failed");
         const ADDRESS_PORT: &str = "127.0.0.1:8080";
         let mut webrtc_server = WebRTCServer {
             cfg: Default::default(),
