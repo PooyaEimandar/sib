@@ -10,6 +10,7 @@ pub enum Protocol {
     SRT,
 }
 
+#[cfg(any(feature = "stm-udp-receiver", feature = "stm-udp-sender"))]
 pub(crate) fn set_pipeline_state(
     pipeline: &gstreamer::Pipeline,
     state: gstreamer::State,
@@ -21,11 +22,14 @@ pub(crate) fn set_pipeline_state(
 }
 
 cfg_if::cfg_if! {
-    if #[cfg(feature = "stm-sender")] {
+    if #[cfg(feature = "stm-udp-sender")] {
         pub mod control;
         pub mod sender;
     }
 }
 
-#[cfg(feature = "stm-receiver")]
+#[cfg(feature = "stm-udp-receiver")]
 pub mod receiver;
+
+#[cfg(feature = "stm-webrtc-sender")]
+pub mod webrtc;

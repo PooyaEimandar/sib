@@ -4,7 +4,7 @@ use dashmap::DashMap;
 use http::{HeaderMap, HeaderValue, StatusCode, header};
 use mime::Mime;
 use std::{fs::Metadata, ops::Range, path::PathBuf, time::SystemTime};
-use tracing::{error, info};
+use tracing::error;
 
 macro_rules! get_error_headers {
     ($close:expr) => {{
@@ -1708,7 +1708,7 @@ mod tests {
                 )
                 .await
                 {
-                    error!("H2 FileService failed: {e}");
+                    tracing::error!("H2 FileService failed: {e}");
                     return session
                         .status_code(http::StatusCode::INTERNAL_SERVER_ERROR)
                         .body(bytes::Bytes::new())
@@ -1741,7 +1741,7 @@ mod tests {
                 )
                 .await
                 {
-                    error!("H2 FileService failed: {e}");
+                    tracing::error!("H2 FileService failed: {e}");
                     return session
                         .status_code(http::StatusCode::INTERNAL_SERVER_ERROR)
                         .body(bytes::Bytes::new())
@@ -1807,7 +1807,7 @@ mod tests {
         let hash = Sha256::digest(&cert_der);
         let base64_hash = b64.encode(hash);
 
-        info!("BASE64_SHA256_OF_DER_CERT: {}", base64_hash);
+        tracing::info!("BASE64_SHA256_OF_DER_CERT: {}", base64_hash);
 
         rustls::crypto::CryptoProvider::install_default(
             rustls::crypto::aws_lc_rs::default_provider(),
@@ -1837,7 +1837,7 @@ mod tests {
                     let key_pem = certs.1.clone();
                     let h1_handle = std::thread::spawn(move || {
                         let id = std::thread::current().id();
-                        info!("Starting H1 server on {addr} with thread: {id:?}");
+                        tracing::info!("Starting H1 server on {addr} with thread: {id:?}");
                         FileServer(FileService)
                             .start_h1_tls(
                                 addr,
@@ -1863,7 +1863,7 @@ mod tests {
                     let cert_pem = cert_h2_pem.as_bytes();
                     let key_pem = key_h2_pem.as_bytes();
                     let id = std::thread::current().id();
-                    info!("Starting H2 server on {addr} with thread: {id:?}");
+                    tracing::info!("Starting H2 server on {addr} with thread: {id:?}");
                     FileServer(FileService)
                         .start_h2_tls(addr, (None, cert_pem, key_pem), H2Config::default())
                         .unwrap_or_else(|_| panic!("H2 file server failed to start for thread {id:?}"));
@@ -1882,7 +1882,7 @@ mod tests {
                     let cert_pem = cert_h3_pem.as_bytes();
                     let key_pem = key_h3_pem.as_bytes();
                     let id = std::thread::current().id();
-                    info!("Starting H2 server on {addr} with thread: {id:?}");
+                    tracing::info!("Starting H2 server on {addr} with thread: {id:?}");
                     FileServer(FileService)
                         .start_h3_tls(addr, (None, cert_pem, key_pem), H3Config::default())
                         .unwrap_or_else(|_| panic!("H3 file server failed to start for thread {id:?}"));

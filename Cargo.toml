@@ -74,6 +74,12 @@ rustls = { version = "0.23.36", optional = true, default-features = false, featu
     "tls12",
 ] }
 rustls-pki-types = { version = "1.14.0", optional = true, default-features = false }
+serde = { version = "1.0.188", optional = true, default-features = false, features = [
+    "std",
+] }
+serde_json = { version = "1.0.107", optional = true, default-features = false, features = [
+    "std",
+] }
 sha1 = { version = "0.10.6", optional = true, default-features = false, features = [
     "std",
 ] }
@@ -99,6 +105,9 @@ tokio-rustls = { version = "0.26.4", optional = true, default-features = false, 
     "aws-lc-rs",
     "tls12",
 ] }
+
+tokio-util = { version = "0.7.18", optional = true, default-features = false }
+webrtc = { version = "0.14.0", optional = true }
 wtransport = { version = "0.6.1", optional = true, default-features = false, features = [
     "ring",
 ] }
@@ -123,6 +132,7 @@ quinn = { version = "0.11.9", optional = true, default-features = false, feature
     "runtime-async-std",
     "rustls",
 ] }
+
 
 [features]
 default = []
@@ -196,8 +206,24 @@ rt-glommio = ["futures-rustls", "glommio", "tokio"]
 rt-tokio = ["tokio", "tokio-rustls"]
 rt-may = ["may"]
 
-stm-sender = ["crossbeam", "glib", "gstreamer", "gstreamer-video"]
-stm-receiver = ["glib", "gstreamer", "gstreamer-app", "gstreamer-video"]
+stm-udp-sender = ["crossbeam", "glib", "gstreamer", "gstreamer-video"]
+stm-udp-receiver = ["glib", "gstreamer", "gstreamer-app", "gstreamer-video"]
+stm-webrtc-sender = [
+    "bytes",
+    "futures-lite",
+    "glib",
+    "gstreamer-app",
+    "gstreamer-video",
+    "gstreamer",
+    "net-h2-server",
+    "net-ws-server",
+    "rt-tokio",
+    "serde_json",
+    "serde",
+    "tokio-util",
+    "tokio",
+    "webrtc",
+]
 
 [dev-dependencies]
 base64 = { version = "0.22.1", default-features = false, features = ["std"] }
@@ -207,7 +233,7 @@ nonzero_ext = { version = "0.3.0", default-features = false, features = [
     "std",
 ] }
 num_cpus = { version = "1.17.0" }
-rcgen = { version = "0.14.6" }
+rcgen = { version = "0.14.7" }
 reqwest = { version = "0.13.1", default-features = false, features = [
     "blocking",
     "http2",

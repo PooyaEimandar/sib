@@ -2,7 +2,11 @@
 pub mod database;
 pub mod network;
 
-#[cfg(any(feature = "stm-receiver", feature = "stm-sender"))]
+#[cfg(any(
+    feature = "stm-udp-receiver",
+    feature = "stm-udp-sender",
+    feature = "stm-webrtc-sender"
+))]
 pub mod stream;
 
 #[cfg(any(feature = "rt-may", feature = "net-h1-server"))]

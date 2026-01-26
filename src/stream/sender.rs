@@ -6,6 +6,7 @@ use crate::stream::{
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use std::sync::{Arc, Mutex};
+use tracing::{error, info};
 
 #[derive(Clone)]
 pub struct Config {
