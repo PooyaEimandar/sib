@@ -922,25 +922,25 @@ pub type DataChannelMessageCallback =
 
 /// Public service
 pub struct WebRTCServer {
-    pub cfg: ServerConfig,
-    pub initial_ctrl: StreamCtrl,
-    pub index: Option<Bytes>,
+    cfg: ServerConfig,
+    initial_ctrl: StreamCtrl,
+    index: Option<Bytes>,
     dc_next_id: Arc<std::sync::atomic::AtomicU64>,
     on_dc_message: Option<DataChannelMessageCallback>,
 }
 
 impl Default for WebRTCServer {
     fn default() -> Self {
-        WebRTCServer::new(ServerConfig::default())
+        WebRTCServer::new(ServerConfig::default(), StreamCtrl::default(), None)
     }
 }
 
 impl WebRTCServer {
-    pub fn new(cfg: ServerConfig) -> Self {
+    pub fn new(cfg: ServerConfig, initial_ctrl: StreamCtrl, index: Option<Bytes>) -> Self {
         Self {
             cfg,
-            initial_ctrl: StreamCtrl::default(),
-            index: None,
+            initial_ctrl: initial_ctrl,
+            index,
             dc_next_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             on_dc_message: None,
         }
