@@ -1,7 +1,8 @@
-use crate::network::http::server::HFactory;
-use crate::network::http::session::{HAsyncService, Session};
-use crate::network::http::ws::OpCode;
-
+use crate::network::http::{
+    server::HFactory,
+    session::{HAsyncService, Session},
+    ws::OpCode,
+};
 use bytes::{Bytes, BytesMut};
 use glib::{prelude::ObjectExt, types::StaticType};
 use gst::prelude::*;
@@ -26,10 +27,10 @@ use webrtc::{
     track::track_local::track_local_static_sample::TrackLocalStaticSample,
 };
 
-/// Public server/service config (extend as you need).
+/// Public webRTC server config
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
-    /// UDP ephemeral range for ICE (EphemeralUDP::new(min,max)).
+    /// UDP ephemeral range for ICE
     pub udp_min: u16,
     pub udp_max: u16,
     /// STUN servers.
@@ -392,6 +393,7 @@ fn apply_ctrl(stream: &GstStream, ctrl: &StreamCtrl) -> std::io::Result<()> {
         .field("height", ctrl.height)
         .field("framerate", gst::Fraction::new(ctrl.fps, 1))
         .build();
+
     stream.capsfilter.set_property("caps", &caps);
     set_prop_best_u32(&stream.encoder, "bitrate", ctrl.bitrate_kbps as u32);
     Ok(())
@@ -474,7 +476,7 @@ fn spawn_gst_bus_logger(
                             MessageView::StateChanged(s) => {
                                 if let Some(src) = msg.src()
                                     && src.type_().name() == "GstPipeline" {
-                                        info!("gst state changed: {:?} -> {:?}", s.old(), s.current());
+                                    info!("gst state changed: {:?} -> {:?}", s.old(), s.current());
                                 }
                             }
                             MessageView::Eos(..) => warn!("gst EOS"),
@@ -568,42 +570,136 @@ async fn stop_stream_runtime(rt: StreamRuntime) {
     info!("stream runtime fully stopped");
 }
 
-/// Handle one complete JSON message (Offer / Ice / Ctrl / ClientStats).
-async fn handle_ws_json(
-    cfg_and_txt: (&ServerConfig, &str),
-    ctrl_state: Arc<RwLock<StreamCtrl>>,
-    dc_id_msg: (
-        Arc<std::sync::atomic::AtomicU64>,
-        Option<DataChannelMessageCallback>,
-    ),
+#[derive(Debug, Clone)]
+pub enum SessionEvent {
+    // WebSocket events
+    WsAccepted {
+        ws_id: u64,
+    },
+    WsClosed {
+        ws_id: u64,
+        reason: Option<String>,
+    },
+    WsProtocolError {
+        ws_id: u64,
+        message: String,
+    },
+
+    // WebRTC events
+    PcCreated {
+        ws_id: u64,
+        pc_id: u64,
+    },
+    PcClosed {
+        ws_id: u64,
+        pc_id: u64,
+        reason: Option<String>,
+    },
+
+    PcState {
+        ws_id: u64,
+        pc_id: u64,
+        state: webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState,
+    },
+    IceState {
+        ws_id: u64,
+        pc_id: u64,
+        state: webrtc::ice_transport::ice_connection_state::RTCIceConnectionState,
+    },
+    IceGatheringState {
+        ws_id: u64,
+        pc_id: u64,
+        state: webrtc::ice_transport::ice_gatherer_state::RTCIceGathererState,
+    },
+
+    // DataChannel events
+    DataChannelOpen {
+        ws_id: u64,
+        pc_id: u64,
+        dc_id: u64,
+        label: String,
+    },
+
+    // StreamCtrl events
+    StreamCtrlApplied {
+        ws_id: u64,
+        pc_id: Option<u64>,
+        prev: StreamCtrl,
+        next: StreamCtrl,
+        restarted: bool,
+    },
+}
+
+pub type SessionEventCallback = Arc<dyn Fn(SessionEvent) + Send + Sync + 'static>;
+
+#[derive(Debug, Clone)]
+pub enum DataChannelPayload {
+    Text(String),
+    Binary(Bytes),
+}
+
+pub type DataChannelMessageCallback =
+    Arc<dyn Fn(u64 /*id*/, DataChannelPayload /*payload*/) + Send + Sync + 'static>;
+
+#[derive(Clone)]
+struct WsCtx {
+    ws_id: u64,
+    cfg: Arc<ServerConfig>,
+
     out_tx: mpsc::Sender<WsMsg>,
+
+    ctrl_state: Arc<RwLock<StreamCtrl>>,
     pc: Arc<RwLock<Option<Arc<RTCPeerConnection>>>>,
     runtime: Arc<RwLock<Option<StreamRuntime>>>,
     track_slot: Arc<RwLock<Option<Arc<TrackLocalStaticSample>>>>,
-) -> std::io::Result<()> {
-    let m: WsMsg = serde_json::from_str(cfg_and_txt.1)
-        .map_err(|e| std::io::Error::other(format!("Bad JSON: {e}")))?;
+    pc_id_slot: Arc<RwLock<Option<u64>>>,
+
+    pc_next_id: Arc<AtomicU64>,
+    on_event: Option<SessionEventCallback>,
+
+    dc_next_id: Arc<AtomicU64>,
+    on_dc_message: Option<DataChannelMessageCallback>,
+}
+
+/// Handle websocket JSON message
+async fn handle_ws_json(ctx: WsCtx, text: &str) -> std::io::Result<()> {
+    let m: WsMsg =
+        serde_json::from_str(text).map_err(|e| std::io::Error::other(format!("Bad JSON: {e}")))?;
 
     match m {
         WsMsg::Offer(offer_sdp) => {
-            // stop previous
-            if let Some(old) = runtime.write().await.take() {
+            // stop previous runtime
+            if let Some(old) = ctx.runtime.write().await.take() {
                 stop_stream_runtime(old).await;
             }
-            if let Some(old_peer) = pc.write().await.take() {
+
+            // close previous peer + emit PcClosed
+            if let Some(old_peer) = ctx.pc.write().await.take() {
+                if let Some(old_pc_id) = *ctx.pc_id_slot.read().await {
+                    if let Some(cb) = ctx.on_event.as_ref() {
+                        cb(SessionEvent::PcClosed {
+                            ws_id: ctx.ws_id,
+                            pc_id: old_pc_id,
+                            reason: Some("replaced by new Offer".into()),
+                        });
+                    }
+                }
                 let _ = old_peer.close().await;
             }
-            *track_slot.write().await = None;
+            *ctx.pc_id_slot.write().await = None;
+            *ctx.track_slot.write().await = None;
 
             let codec = choose_codec_from_offer(&offer_sdp);
             let negotiated_pt = find_pt_in_offer(&offer_sdp, codec.offer_rtpmap_token())
                 .unwrap_or(codec.default_pt());
             let fmtp = find_fmtp_in_offer(&offer_sdp, negotiated_pt);
 
-            let _ = out_tx
+            let _ = ctx
+                .out_tx
                 .send(WsMsg::Info(format!("Selected codec: {codec:?}")))
                 .await;
-            let _ = out_tx
+            let _ = ctx
+                .out_tx
                 .send(WsMsg::Info(format!("Negotiated PT: {negotiated_pt}")))
                 .await;
 
@@ -627,11 +723,8 @@ async fn handle_ws_json(
             // UDP ephemeral ports
             use webrtc::api::setting_engine::SettingEngine;
             let udp_network = webrtc::ice::udp_network::UDPNetwork::Ephemeral(
-                webrtc::ice::udp_network::EphemeralUDP::new(
-                    cfg_and_txt.0.udp_min,
-                    cfg_and_txt.0.udp_max,
-                )
-                .map_err(|e| std::io::Error::other(format!("EphemeralUDP: {e}")))?,
+                webrtc::ice::udp_network::EphemeralUDP::new(ctx.cfg.udp_min, ctx.cfg.udp_max)
+                    .map_err(|e| std::io::Error::other(format!("EphemeralUDP: {e}")))?,
             );
             let mut se = SettingEngine::default();
             se.set_udp_network(udp_network);
@@ -644,47 +737,93 @@ async fn handle_ws_json(
 
             let config = RTCConfiguration {
                 ice_servers: vec![RTCIceServer {
-                    urls: cfg_and_txt.0.stun_urls.clone(),
+                    urls: ctx.cfg.stun_urls.clone(),
                     ..Default::default()
                 }],
                 ..Default::default()
             };
 
+            // PeerConnection
             let peer = Arc::new(
                 api.new_peer_connection(config)
                     .await
                     .map_err(|e| std::io::Error::other(format!("new_peer_connection: {e}")))?,
             );
 
-            //state logs + Info pushes
+            let pc_id = ctx.pc_next_id.fetch_add(1, Ordering::Relaxed);
+            *ctx.pc_id_slot.write().await = Some(pc_id);
+
+            if let Some(cb) = ctx.on_event.as_ref() {
+                cb(SessionEvent::PcCreated {
+                    ws_id: ctx.ws_id,
+                    pc_id,
+                });
+            }
+
+            // WebRTC state events
             {
-                let out_tx = out_tx.clone();
+                let out_tx = ctx.out_tx.clone();
+                let on_event = ctx.on_event.clone();
+                let ws_id = ctx.ws_id;
+
                 peer.on_peer_connection_state_change(Box::new(move |s| {
                     let out_tx = out_tx.clone();
+                    let on_event = on_event.clone();
                     Box::pin(async move {
                         info!("pc state: {s:?}");
+                        if let Some(cb) = on_event.as_ref() {
+                            cb(SessionEvent::PcState {
+                                ws_id,
+                                pc_id,
+                                state: s,
+                            });
+                        }
                         let _ = out_tx.send(WsMsg::Info(format!("PC state: {s:?}"))).await;
                     })
                 }));
             }
+            // ICE state events
             {
-                let out_tx = out_tx.clone();
+                let out_tx = ctx.out_tx.clone();
+                let on_event = ctx.on_event.clone();
+                let ws_id = ctx.ws_id;
+
                 peer.on_ice_connection_state_change(Box::new(move |s| {
                     let out_tx = out_tx.clone();
+                    let on_event = on_event.clone();
                     Box::pin(async move {
                         info!("ice conn state: {s:?}");
+                        if let Some(cb) = on_event.as_ref() {
+                            cb(SessionEvent::IceState {
+                                ws_id,
+                                pc_id,
+                                state: s,
+                            });
+                        }
                         let _ = out_tx
                             .send(WsMsg::Info(format!("ICE conn state: {s:?}")))
                             .await;
                     })
                 }));
             }
+            // ICE gathering state events
             {
-                let out_tx = out_tx.clone();
+                let out_tx = ctx.out_tx.clone();
+                let on_event = ctx.on_event.clone();
+                let ws_id = ctx.ws_id;
+
                 peer.on_ice_gathering_state_change(Box::new(move |s| {
                     let out_tx = out_tx.clone();
+                    let on_event = on_event.clone();
                     Box::pin(async move {
                         info!("ice gathering state: {s:?}");
+                        if let Some(cb) = on_event.as_ref() {
+                            cb(SessionEvent::IceGatheringState {
+                                ws_id,
+                                pc_id,
+                                state: s,
+                            });
+                        }
                         let _ = out_tx
                             .send(WsMsg::Info(format!("ICE gathering: {s:?}")))
                             .await;
@@ -693,7 +832,7 @@ async fn handle_ws_json(
             }
             // ICE -> outgoing
             {
-                let out_tx = out_tx.clone();
+                let out_tx = ctx.out_tx.clone();
                 peer.on_ice_candidate(Box::new(move |c| {
                     let out_tx = out_tx.clone();
                     Box::pin(async move {
@@ -718,36 +857,48 @@ async fn handle_ws_json(
                 }));
             }
 
+            // DataChannel
             {
+                let dc_next_id = ctx.dc_next_id.clone();
+                let on_dc_message = ctx.on_dc_message.clone();
+                let on_event_outer = ctx.on_event.clone();
+                let ws_id = ctx.ws_id;
+
                 peer.on_data_channel(Box::new(move |dc| {
-                    let dc_next_id = dc_id_msg.0.clone();
-                    let on_dc_message = dc_id_msg.1.clone();
+                    let dc_next_id = dc_next_id.clone();
+                    let on_dc_message = on_dc_message.clone();
+                    let on_event = on_event_outer.clone();
 
                     Box::pin(async move {
                         let dc_id = dc_next_id.fetch_add(1, Ordering::Relaxed);
                         let label = dc.label().to_string();
+
+                        if let Some(cb) = on_event.as_ref() {
+                            cb(SessionEvent::DataChannelOpen {
+                                ws_id,
+                                pc_id,
+                                dc_id,
+                                label: label.clone(),
+                            });
+                        }
+
                         info!("[dc#{dc_id}] opened label={label}");
 
-                        // Per-channel message forwarder
                         let cb = on_dc_message.clone();
                         dc.on_message(Box::new(move |msg: DataChannelMessage| {
                             let cb = cb.clone();
                             Box::pin(async move {
-                                let Some(cb) = cb.as_ref() else {
-                                    return;
-                                };
+                                let Some(cb) = cb.as_ref() else { return };
 
                                 if msg.is_string {
                                     match String::from_utf8(msg.data.to_vec()) {
                                         Ok(s) => cb(dc_id, DataChannelPayload::Text(s)),
-                                        Err(_) => {
-                                            cb(
-                                                dc_id,
-                                                DataChannelPayload::Binary(Bytes::copy_from_slice(
-                                                    &msg.data,
-                                                )),
-                                            );
-                                        }
+                                        Err(_) => cb(
+                                            dc_id,
+                                            DataChannelPayload::Binary(Bytes::copy_from_slice(
+                                                &msg.data,
+                                            )),
+                                        ),
                                     }
                                 } else {
                                     cb(
@@ -792,23 +943,31 @@ async fn handle_ws_json(
                 .map_err(|e| std::io::Error::other(format!("set_local_description: {e}")))?;
 
             if let Some(local) = peer.local_description().await {
-                let _ = out_tx.send(WsMsg::Answer(local.sdp)).await;
+                let _ = ctx.out_tx.send(WsMsg::Answer(local.sdp)).await;
             }
 
             // Start runtime
-            let ctrl = ctrl_state.read().await.clone();
-            let rt = start_stream_runtime(ctrl, ctrl_state.clone(), track.clone(), out_tx.clone())
-                .await?;
+            let ctrl = ctx.ctrl_state.read().await.clone();
+            let rt = start_stream_runtime(
+                ctrl,
+                ctx.ctrl_state.clone(),
+                track.clone(),
+                ctx.out_tx.clone(),
+            )
+            .await?;
 
-            *track_slot.write().await = Some(track);
-            *runtime.write().await = Some(rt);
-            *pc.write().await = Some(peer);
+            *ctx.track_slot.write().await = Some(track);
+            *ctx.runtime.write().await = Some(rt);
+            *ctx.pc.write().await = Some(peer);
 
-            let _ = out_tx.send(WsMsg::Info("Streaming started".into())).await;
+            let _ = ctx
+                .out_tx
+                .send(WsMsg::Info("Streaming started".into()))
+                .await;
         }
 
         WsMsg::Ice(cand) => {
-            if let Some(peer) = pc.read().await.as_ref() {
+            if let Some(peer) = ctx.pc.read().await.as_ref() {
                 let c = webrtc::ice_transport::ice_candidate::RTCIceCandidateInit {
                     candidate: cand.candidate,
                     sdp_mid: cand.sdp_mid,
@@ -816,12 +975,14 @@ async fn handle_ws_json(
                     username_fragment: cand.username_fragment,
                 };
                 if let Err(e) = peer.add_ice_candidate(c).await {
-                    let _ = out_tx
+                    let _ = ctx
+                        .out_tx
                         .send(WsMsg::Error(format!("add_ice_candidate failed: {e}")))
                         .await;
                 }
             } else {
-                let _ = out_tx
+                let _ = ctx
+                    .out_tx
                     .send(WsMsg::Error("ICE received but peer is not ready".into()))
                     .await;
             }
@@ -840,30 +1001,45 @@ async fn handle_ws_json(
             fps,
             bitrate_kbps,
         } => {
-            let prev = ctrl_state.read().await.clone();
+            let prev = ctx.ctrl_state.read().await.clone();
+
             {
-                let mut st = ctrl_state.write().await;
+                let mut st = ctx.ctrl_state.write().await;
                 st.width = width;
                 st.height = height;
                 st.fps = fps;
                 st.bitrate_kbps = bitrate_kbps;
             }
-            let next = ctrl_state.read().await.clone();
+
+            let next = ctx.ctrl_state.read().await.clone();
             let need_restart = ctrl_needs_restart(&prev, &next);
 
+            // Emit StreamCtrlApplied
+            if let Some(cb) = ctx.on_event.as_ref() {
+                cb(SessionEvent::StreamCtrlApplied {
+                    ws_id: ctx.ws_id,
+                    pc_id: *ctx.pc_id_slot.read().await,
+                    prev: prev.clone(),
+                    next: next.clone(),
+                    restarted: need_restart,
+                });
+            }
+
             if need_restart {
-                let _ = out_tx
+                let _ = ctx
+                    .out_tx
                     .send(WsMsg::Info(
                         "CTRL requires restart (size/fps changed)".into(),
                     ))
                     .await;
 
-                if let Some(old) = runtime.write().await.take() {
+                if let Some(old) = ctx.runtime.write().await.take() {
                     stop_stream_runtime(old).await;
                 }
 
-                let Some(track) = track_slot.read().await.clone() else {
-                    let _ = out_tx
+                let Some(track) = ctx.track_slot.read().await.clone() else {
+                    let _ = ctx
+                        .out_tx
                         .send(WsMsg::Error(
                             "Cannot restart: track not initialized. Send Offer first.".into(),
                         ))
@@ -871,25 +1047,32 @@ async fn handle_ws_json(
                     return Ok(());
                 };
 
-                let rt =
-                    start_stream_runtime(next.clone(), ctrl_state.clone(), track, out_tx.clone())
-                        .await?;
-                *runtime.write().await = Some(rt);
+                let rt = start_stream_runtime(
+                    next.clone(),
+                    ctx.ctrl_state.clone(),
+                    track,
+                    ctx.out_tx.clone(),
+                )
+                .await?;
+                *ctx.runtime.write().await = Some(rt);
 
-                let _ = out_tx
+                let _ = ctx
+                    .out_tx
                     .send(WsMsg::Info(format!(
                         "CTRL applied with restart: {}x{}@{} bitrate={}kbps",
                         next.width, next.height, next.fps, next.bitrate_kbps
                     )))
                     .await;
-            } else if let Some(rt) = runtime.read().await.as_ref() {
+            } else if let Some(rt) = ctx.runtime.read().await.as_ref() {
                 if let Err(e) = apply_ctrl(&rt.stream, &next) {
-                    let _ = out_tx
+                    let _ = ctx
+                        .out_tx
                         .send(WsMsg::Error(format!("apply_ctrl failed: {e}")))
                         .await;
                 } else {
                     request_keyframe(&rt.stream.pipeline);
-                    let _ = out_tx
+                    let _ = ctx
+                        .out_tx
                         .send(WsMsg::Info(format!(
                             "CTRL applied: {}x{}@{} bitrate={}kbps",
                             next.width, next.height, next.fps, next.bitrate_kbps
@@ -897,62 +1080,66 @@ async fn handle_ws_json(
                         .await;
                 }
             } else {
-                let _ = out_tx
+                let _ = ctx
+                    .out_tx
                     .send(WsMsg::Error(
                         "CTRL received but stream is not running".into(),
                     ))
                     .await;
             }
         }
-        // Other messages are ignored
+
         _ => {}
     }
 
     Ok(())
 }
 
-#[derive(Debug, Clone)]
-pub enum DataChannelPayload {
-    Text(String),
-    Binary(Bytes),
-}
-
-pub type DataChannelMessageCallback =
-    Arc<dyn Fn(u64 /*id*/, DataChannelPayload) + Send + Sync + 'static>;
-
 /// Public service
-pub struct WebRTCServer {
+pub struct Server {
     cfg: ServerConfig,
     initial_ctrl: StreamCtrl,
     index: Option<Bytes>,
-    dc_next_id: Arc<std::sync::atomic::AtomicU64>,
+
+    dc_next_id: Arc<AtomicU64>,
     on_dc_message: Option<DataChannelMessageCallback>,
+
+    ws_next_id: Arc<AtomicU64>,
+    pc_next_id: Arc<AtomicU64>,
+    on_event: Option<SessionEventCallback>,
 }
 
-impl Default for WebRTCServer {
+impl Default for Server {
     fn default() -> Self {
-        WebRTCServer::new(ServerConfig::default(), StreamCtrl::default(), None)
+        Server::new(ServerConfig::default(), StreamCtrl::default(), None)
     }
 }
 
-impl WebRTCServer {
+impl Server {
     pub fn new(cfg: ServerConfig, initial_ctrl: StreamCtrl, index: Option<Bytes>) -> Self {
         Self {
             cfg,
-            initial_ctrl: initial_ctrl,
+            initial_ctrl,
             index,
-            dc_next_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            dc_next_id: Arc::new(AtomicU64::new(1)),
             on_dc_message: None,
+            ws_next_id: Arc::new(AtomicU64::new(1)),
+            pc_next_id: Arc::new(AtomicU64::new(1)),
+            on_event: None,
         }
     }
 
     pub fn set_on_dc_message(&mut self, cb: DataChannelMessageCallback) {
         self.on_dc_message = Some(cb);
     }
+
+    pub fn set_on_event(&mut self, cb: SessionEventCallback) {
+        self.on_event = Some(cb);
+    }
 }
 
 #[async_trait::async_trait(?Send)]
-impl HAsyncService for WebRTCServer {
+impl HAsyncService for Server {
     async fn call<S: Session>(&mut self, session: &mut S) -> std::io::Result<()> {
         if !session.is_ws() {
             if let Some(index) = self.index.clone() {
@@ -983,6 +1170,13 @@ impl HAsyncService for WebRTCServer {
             return Err(e);
         }
 
+        // WS session state
+        let ws_id = self.ws_next_id.fetch_add(1, Ordering::Relaxed);
+        let on_event = self.on_event.clone();
+        if let Some(cb) = on_event.as_ref() {
+            cb(SessionEvent::WsAccepted { ws_id });
+        }
+
         let (out_tx, mut out_rx) = mpsc::channel::<WsMsg>(64);
 
         let pc: Arc<RwLock<Option<Arc<RTCPeerConnection>>>> = Arc::new(RwLock::new(None));
@@ -990,12 +1184,35 @@ impl HAsyncService for WebRTCServer {
         let track_slot: Arc<RwLock<Option<Arc<TrackLocalStaticSample>>>> =
             Arc::new(RwLock::new(None));
         let ctrl_state: Arc<RwLock<StreamCtrl>> = Arc::new(RwLock::new(self.initial_ctrl.clone()));
+        let pc_id_slot: Arc<RwLock<Option<u64>>> = Arc::new(RwLock::new(None));
+
+        let cfg = Arc::new(self.cfg.clone());
+
+        // websocket context
+        let ctx = WsCtx {
+            ws_id,
+            cfg,
+
+            out_tx: out_tx.clone(),
+
+            ctrl_state: ctrl_state.clone(),
+            pc: pc.clone(),
+            runtime: runtime.clone(),
+            track_slot: track_slot.clone(),
+            pc_id_slot: pc_id_slot.clone(),
+
+            pc_next_id: self.pc_next_id.clone(),
+            on_event: on_event.clone(),
+
+            dc_next_id: self.dc_next_id.clone(),
+            on_dc_message: self.on_dc_message.clone(),
+        };
 
         let _ = out_tx.send(WsMsg::Info("WS connected".into())).await;
 
         // Fragmentation state
         let mut frag_buf = BytesMut::new();
-        let mut expecting_cont = false;
+        let mut expecting_continuation = false;
         let mut initial_is_text = false;
 
         let err_protocol = Bytes::from_static(b"protocol error");
@@ -1016,7 +1233,13 @@ impl HAsyncService for WebRTCServer {
                         }
 
                         OpCode::Text | OpCode::Binary => {
-                            if expecting_cont {
+                            if expecting_continuation {
+                                if let Some(cb) = on_event.as_ref() {
+                                    cb(SessionEvent::WsProtocolError {
+                                        ws_id,
+                                        message: "expected continuation frame".into(),
+                                    });
+                                }
                                 session.ws_close_async(Some(err_protocol)).await?;
                                 break;
                             }
@@ -1024,7 +1247,7 @@ impl HAsyncService for WebRTCServer {
                             if !fin {
                                 frag_buf.clear();
                                 frag_buf.extend_from_slice(payload.as_ref());
-                                expecting_cont = true;
+                                expecting_continuation = true;
                                 initial_is_text = matches!(code, OpCode::Text);
                                 continue;
                             }
@@ -1038,26 +1261,24 @@ impl HAsyncService for WebRTCServer {
                             let text = match std::str::from_utf8(payload.as_ref()) {
                                 Ok(s) => s,
                                 Err(_) => {
+                                    if let Some(cb) = on_event.as_ref() {
+                                        cb(SessionEvent::WsProtocolError { ws_id, message: "invalid utf8".into() });
+                                    }
                                     session.ws_close_async(Some(err_utf8)).await?;
                                     break;
                                 }
                             };
 
-                            if let Err(e) = handle_ws_json(
-                                (&self.cfg, text),
-                                ctrl_state.clone(),
-                                (self.dc_next_id.clone(), self.on_dc_message.clone()),
-                                out_tx.clone(),
-                                pc.clone(),
-                                runtime.clone(),
-                                track_slot.clone(),
-                            ).await {
+                            if let Err(e) = handle_ws_json(ctx.clone(), text).await {
                                 let _ = out_tx.send(WsMsg::Error(format!("{e}"))).await;
                             }
                         }
 
                         OpCode::Continue => {
-                            if !expecting_cont {
+                            if !expecting_continuation {
+                                if let Some(cb) = on_event.as_ref() {
+                                    cb(SessionEvent::WsProtocolError { ws_id, message: "unexpected continuation".into() });
+                                }
                                 session.ws_close_async(Some(err_unexpected)).await?;
                                 break;
                             }
@@ -1071,20 +1292,15 @@ impl HAsyncService for WebRTCServer {
                                     let text = match std::str::from_utf8(whole) {
                                         Ok(s) => s,
                                         Err(_) => {
+                                            if let Some(cb) = on_event.as_ref() {
+                                                cb(SessionEvent::WsProtocolError { ws_id, message: "invalid utf8".into() });
+                                            }
                                             session.ws_close_async(Some(err_utf8)).await?;
                                             break;
                                         }
                                     };
 
-                                    if let Err(e) = handle_ws_json(
-                                        (&self.cfg, text),
-                                        ctrl_state.clone(),
-                                        (self.dc_next_id.clone(), self.on_dc_message.clone()),
-                                        out_tx.clone(),
-                                        pc.clone(),
-                                        runtime.clone(),
-                                        track_slot.clone(),
-                                    ).await {
+                                    if let Err(e) = handle_ws_json(ctx.clone(), text).await {
                                         let _ = out_tx.send(WsMsg::Error(format!("{e}"))).await;
                                     }
                                 } else {
@@ -1092,7 +1308,7 @@ impl HAsyncService for WebRTCServer {
                                 }
 
                                 frag_buf.clear();
-                                expecting_cont = false;
+                                expecting_continuation = false;
                                 initial_is_text = false;
                             }
                         }
@@ -1115,14 +1331,34 @@ impl HAsyncService for WebRTCServer {
             }
         }
 
-        // Cleanup
+        // WS loop ended
+        if let Some(cb) = on_event.as_ref() {
+            cb(SessionEvent::WsClosed {
+                ws_id,
+                reason: Some("ws loop ended".into()),
+            });
+        }
+
+        // Cleanup: stop runtime first
         if let Some(rt) = runtime.write().await.take() {
             stop_stream_runtime(rt).await;
         }
-        if let Some(peer) = pc.write().await.take()
-            && let Err(e) = peer.close().await
-        {
-            warn!("peer.close failed: {e}");
+
+        // Cleanup: close peer + emit PcClosed
+        if let Some(peer) = pc.write().await.take() {
+            if let Some(cb) = on_event.as_ref() {
+                if let Some(pc_id) = *pc_id_slot.read().await {
+                    cb(SessionEvent::PcClosed {
+                        ws_id,
+                        pc_id,
+                        reason: Some("call() cleanup".into()),
+                    });
+                }
+            }
+
+            if let Err(e) = peer.close().await {
+                warn!("peer.close failed: {e}");
+            }
         }
 
         Err(std::io::Error::new(
@@ -1132,18 +1368,23 @@ impl HAsyncService for WebRTCServer {
     }
 }
 
-impl HFactory for WebRTCServer {
+impl HFactory for Server {
     #[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
     type HAsyncService = Self;
 
     #[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
     fn async_service(&self, _id: usize) -> Self::HAsyncService {
-        WebRTCServer {
+        Server {
             cfg: self.cfg.clone(),
             initial_ctrl: self.initial_ctrl.clone(),
             index: self.index.clone(),
+
             dc_next_id: self.dc_next_id.clone(),
             on_dc_message: self.on_dc_message.clone(),
+
+            ws_next_id: self.ws_next_id.clone(),
+            pc_next_id: self.pc_next_id.clone(),
+            on_event: self.on_event.clone(),
         }
     }
 }
@@ -1151,7 +1392,7 @@ impl HFactory for WebRTCServer {
 #[cfg(test)]
 pub mod tests {
     use crate::network::http::server::{H2Config, HFactory};
-    use crate::stream::webrtc::{DataChannelPayload, WebRTCServer};
+    use crate::stream::webrtc::{DataChannelPayload, Server};
     use bytes::Bytes;
     use tracing::info;
 
@@ -1167,17 +1408,22 @@ pub mod tests {
 
         crate::stream::init().expect("webRTC init failed");
         const ADDRESS_PORT: &str = "127.0.0.1:8080";
-        let mut webrtc_server = WebRTCServer {
-            cfg: Default::default(),
-            initial_ctrl: Default::default(),
-            index: std::fs::read(html_file).ok().map(Bytes::from),
-            dc_next_id: Default::default(),
-            on_dc_message: Default::default(),
-        };
+
+        let mut webrtc_server = Server::new(
+            Default::default(),
+            Default::default(),
+            std::fs::read(html_file).ok().map(Bytes::from),
+        );
+
         webrtc_server.set_on_dc_message(std::sync::Arc::new(|dc_id, payload| match payload {
             DataChannelPayload::Text(s) => info!("[dc#{dc_id}] TEXT: {}", s),
             DataChannelPayload::Binary(b) => info!("[dc#{dc_id}] BIN: {} bytes", b.len()),
         }));
+
+        webrtc_server.set_on_event(std::sync::Arc::new(|ev| {
+            info!("[event] {:?}", ev);
+        }));
+
         webrtc_server
             .start_h2_tls(
                 ADDRESS_PORT,
