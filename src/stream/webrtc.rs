@@ -929,6 +929,12 @@ pub struct WebRTCServer {
     on_dc_message: Option<DataChannelMessageCallback>,
 }
 
+impl Default for WebRTCServer {
+    fn default() -> Self {
+        WebRTCServer::new(ServerConfig::default())
+    }
+}
+
 impl WebRTCServer {
     pub fn new(cfg: ServerConfig) -> Self {
         Self {
