@@ -3,6 +3,7 @@ pub struct FDB {
     pub db: *mut foundationdb_sys::FDBDatabase,
 }
 
+// SAFETY: FoundationDB's FDBDatabase handle is thread-safe to use across threads.
 unsafe impl Send for FDB {}
 unsafe impl Sync for FDB {}
 

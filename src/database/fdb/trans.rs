@@ -108,6 +108,11 @@ pub struct FDBRange<'a> {
     pub reverse: bool,
 }
 
+pub enum FDBTransactionOutcome<R> {
+    Ok(R),
+    Retry(i32), // FDB error code
+}
+
 pub struct FDBTransaction {
     pub trs: *mut foundationdb_sys::FDBTransaction,
 }
@@ -119,20 +124,6 @@ fn fdb_err(code: i32) -> std::io::Error {
         .to_string_lossy()
         .into_owned();
     std::io::Error::new(std::io::ErrorKind::Other, format!("FDB error {code}: {s}"))
-}
-
-impl FDBTransaction {
-    #[inline]
-    fn on_error_blocking(&self, code: i32) -> std::io::Result<()> {
-        let fut =
-            FDBFuture::new(unsafe { foundationdb_sys::fdb_transaction_on_error(self.trs, code) })?;
-        fut.block_until_ready();
-        let rc = fut.get_error_code();
-        if rc != 0 {
-            return Err(fdb_err(rc));
-        }
-        Ok(())
-    }
 }
 
 impl FDBTransaction {
@@ -327,31 +318,23 @@ impl FDBTransaction {
         Ok(())
     }
 
-    /// Canonical commit with retry that **replays** mutations via closure.
-    /// Each retry uses a fresh transaction.
-    pub fn commit_with_retry<F>(db: &FDB, mut f: F) -> std::io::Result<()>
-    where
-        F: FnMut(&FDBTransaction) -> std::io::Result<()>,
-    {
-        loop {
-            let trx = FDBTransaction::new(db)?;
-            f(&trx)?;
-            let fut = trx.commit()?;
-            fut.block_until_ready();
-            let code = fut.get_error_code();
-            if code == 0 {
-                return Ok(());
-            }
-            trx.on_error_blocking(code)?;
-            // loop: new trx & replay f
-        }
-    }
-
     #[inline]
     pub fn watch(&self, key: &[u8]) -> std::io::Result<FDBFuture> {
         FDBFuture::new(unsafe {
             foundationdb_sys::fdb_transaction_watch(self.trs, key.as_ptr(), key.len() as i32)
         })
+    }
+
+    #[inline]
+    fn on_error_blocking(&self, code: i32) -> std::io::Result<()> {
+        let fut =
+            FDBFuture::new(unsafe { foundationdb_sys::fdb_transaction_on_error(self.trs, code) })?;
+        fut.block_until_ready();
+        let rc = fut.get_error_code();
+        if rc != 0 {
+            return Err(fdb_err(rc));
+        }
+        Ok(())
     }
 }
 
@@ -360,5 +343,35 @@ impl Drop for FDBTransaction {
         if !self.trs.is_null() {
             unsafe { foundationdb_sys::fdb_transaction_destroy(self.trs) }
         }
+    }
+}
+
+#[inline]
+pub fn run<R, F>(db: &FDB, mut f: F) -> std::io::Result<R>
+where
+    F: FnMut(&FDBTransaction) -> std::io::Result<FDBTransactionOutcome<R>>,
+{
+    loop {
+        let trx = FDBTransaction::new(db)?;
+
+        // user logic
+        let out = match f(&trx)? {
+            FDBTransactionOutcome::Ok(v) => v,
+            FDBTransactionOutcome::Retry(code) => {
+                trx.on_error_blocking(code)?;
+                continue;
+            }
+        };
+
+        // commit
+        let fut = trx.commit()?;
+        fut.block_until_ready();
+        let code = fut.get_error_code();
+
+        if code == 0 {
+            return Ok(out);
+        }
+
+        trx.on_error_blocking(code)?;
     }
 }

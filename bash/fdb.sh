@@ -1,3 +1,13 @@
+# bash/fdb.sh
+# FoundationDB install/uninstall script for macOS and Linux
+# Supports:
+#   - macOS arm64
+#   - Linux amd64 (Debian/Ubuntu with apt)
+# Usage:
+#   ./fdb.sh install        # Install FoundationDB (default)
+#   ./fdb.sh uninstall      # Uninstall FoundationDB
+#   ./fdb.sh help           # Show help
+
 #!/usr/bin/env bash
 set -euo pipefail
 IFS=$'\n\t'
@@ -8,7 +18,7 @@ COLOR_RED="${COLOR_RED:-\033[0;31m}"
 COLOR_YELLOW="${COLOR_YELLOW:-\033[0;33m}"
 COLOR_OFF="${COLOR_OFF:-\033[0m}"
 
-FDB_VERSION="7.3.63"
+FDB_VERSION="7.3.69"
 FDB_BASE_URL="https://github.com/apple/foundationdb/releases/download/${FDB_VERSION}"
 
 ARCH="$(uname -m)"
