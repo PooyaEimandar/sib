@@ -12,7 +12,7 @@ it is designed for **real-time streaming**, **low-latency networking**, and **sc
 | Feature            | Description                                           |
 | -------------------|-------------------------------------------------------|
 | `net-h1-server`    | HTTP/1 server                                         |
-| `net-h2-server`    | HTTP/2 server                                         |
+| `net-h2-server`    | HTTP/2/1 server                                       |
 | `net-h3-server`    | HTTP/3 server                                         |
 | `net-kafka-cli`    | Kafka client                                          |
 | `net-ratelimiter`  | Ratelimiter service wrapper                           |
