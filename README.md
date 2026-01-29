@@ -19,9 +19,9 @@ it is designed for **real-time streaming**, **low-latency networking**, and **sc
 | `net-ws-server`    | WebSocket server                                      |
 | `net-wt-server`    | WebTransport server                                   |
 | `db-fdb`           | FoundationDB client database + cache                  |
-| `rt-glommio`       | glommio runtime for HTTP/2/3                          |
-| `rt-tokio`         | tokio runtime for HTTP/2/3 and/or db-fdb              |
-| `rt-may`           | may runtime for HTTP/1 and/or db-fdb                  |
+| `rt-glommio`       | glommio runtime                                       |
+| `rt-tokio`         | tokio runtime                                         |
+| `rt-may`           | may runtime                                           |
 | `stm-udp-sender`   | UDP based Real-time video/audio streamer (SRT/RTP)    |
 | `stm-udp-receiver` | UDP based Real-time video/audio receiver (SRT/RTP)    |
 | `stm-webrtc-sender`| Web based Real-time video/audio/data streamer (WebRTC)|
