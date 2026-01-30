@@ -454,14 +454,9 @@ mod tests {
 
     #[test]
     fn test_fdb_run_transaction_set_and_get() {
-        use crate::database::fdb::{network::FDBNetwork, trans::FDBTransaction};
+        use crate::database::fdb::trans::FDBTransaction;
 
-        let network = FDBNetwork::new(None).expect("Failed to create FDB network");
-        let mut network_for_stop = network.clone();
-
-        let handle = std::thread::spawn(move || {
-            network.run().expect("Failed to run FDB network");
-        });
+        let fdb_guard = crate::fdb_network_start!();
 
         // give it time to start
         std::thread::sleep(Duration::from_secs(1));
@@ -490,21 +485,12 @@ mod tests {
         }
 
         // Now stop FDB network
-        let result = network_for_stop.stop();
-        assert!(result.is_ok(), "Failed to stop network");
-        handle.join().unwrap();
+        crate::fdb_network_stop!(fdb_guard);
     }
 
     #[test]
     fn test_fdb_run_transaction_set_and_get_with_run() {
-        use crate::database::fdb::network::FDBNetwork;
-
-        let network = FDBNetwork::new(None).expect("Failed to create FDB network");
-        let mut network_for_stop = network.clone();
-
-        let handle = std::thread::spawn(move || {
-            network.run().expect("Failed to run FDB network");
-        });
+        let fdb_guard = crate::fdb_network_start!();
 
         // give it time to start
         std::thread::sleep(Duration::from_secs(1));
@@ -535,14 +521,11 @@ mod tests {
         .expect("commit failed");
 
         // Now stop FDB network
-        let result = network_for_stop.stop();
-        assert!(result.is_ok(), "Failed to stop network");
-        handle.join().unwrap();
+        crate::fdb_network_stop!(fdb_guard);
     }
 
     #[test]
     fn test_fdb_run_transaction_retries_on_conflict_increment() {
-        use crate::database::fdb::network::FDBNetwork;
         use crate::database::fdb::pool::FDBPool;
         use crate::database::fdb::trans::{self, FDBTransactionOutcome};
 
@@ -554,12 +537,7 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        // Start FDB network
-        let network = FDBNetwork::new(None).expect("Failed to create FDB network");
-        let mut network_for_stop = network.clone();
-        let net_handle = thread::spawn(move || {
-            network.run().expect("Failed to run FDB network");
-        });
+        let fdb_guard = crate::fdb_network_start!();
 
         // give it time to start
         thread::sleep(Duration::from_secs(1));
@@ -669,13 +647,11 @@ mod tests {
         );
 
         // Stop FDB network
-        network_for_stop.stop().expect("Failed to stop FDB network");
-        net_handle.join().unwrap();
+        crate::fdb_network_stop!(fdb_guard);
     }
 
     #[test]
     fn test_fdb_run_transaction_retry_branch_is_executed() {
-        use crate::database::fdb::network::FDBNetwork;
         use crate::database::fdb::pool::FDBPool;
         use crate::database::fdb::trans::{self, FDBTransactionOutcome};
         use std::num::NonZeroU64;
@@ -686,11 +662,7 @@ mod tests {
         use std::time::Duration;
 
         // Start FDB network
-        let network = FDBNetwork::new(None).expect("Failed to create FDB network");
-        let mut network_for_stop = network.clone();
-        let handle = std::thread::spawn(move || {
-            network.run().expect("Failed to run FDB network");
-        });
+        let fdb_guard = crate::fdb_network_start!();
 
         std::thread::sleep(Duration::from_secs(1));
 
@@ -737,7 +709,6 @@ mod tests {
         .expect("verify commit failed");
 
         // Stop network
-        network_for_stop.stop().expect("Failed to stop network");
-        handle.join().unwrap();
+        crate::fdb_network_stop!(fdb_guard);
     }
 }
