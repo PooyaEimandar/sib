@@ -27,12 +27,12 @@ pub struct KafkaSettings {
     pub tls_verify_hostname: bool, // verify hostname/SAN match
 }
 
-impl KafkaSettings {
-    pub fn new(brokers: &str, group_id: &str) -> Self {
+impl Default for KafkaSettings {
+    fn default() -> Self {
         Self {
-            brokers: brokers.into(),
+            brokers: "localhost:9092".into(),
             client_id: None,
-            group_id: group_id.into(),
+            group_id: "default-group".into(),
             auto_offset_reset: "latest".into(),
             partition_assignment_strategy: "cooperative-sticky".into(),
             timeout: Duration::from_secs(5),
@@ -417,24 +417,18 @@ mod tests {
     static PAYLOAD: &[u8] = b"hello-world";
 
     fn tls_settings(group_id: &str) -> KafkaSettings {
-        let brokers = "".to_string();
-        let chain: String = "".to_string();
-        let cert: String = "".to_string();
-        let key: String = "".to_string();
-
-        let mut s = KafkaSettings::new(&brokers, group_id);
-        s.auto_offset_reset = "earliest".into();
-        s.timeout = Duration::from_secs(10);
-
-        // TLS fields must exist on KafkaSettings (as in the previous message):
-        s.tls_ca = Some(chain);
-        s.tls_cert = Some(cert);
-        s.tls_key = Some(key);
-        s.tls_key_password = None;
-        s.tls_verify = true;
-        s.tls_verify_hostname = false;
-
-        s
+        KafkaSettings {
+            brokers: "localhost:9093".into(),
+            group_id: group_id.into(),
+            auto_offset_reset: "earliest".into(),
+            timeout: Duration::from_secs(10),
+            tls_ca: Some(chain),
+            tls_cert: Some(cert),
+            tls_key: Some(key),
+            tls_key_password: None,
+            tls_verify: true,
+            tls_verify_hostname: false,
+        }
     }
 
     // rt-may
