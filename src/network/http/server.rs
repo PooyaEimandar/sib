@@ -31,15 +31,17 @@ macro_rules! resolve_addr {
 #[cfg(feature = "net-h1-server")]
 #[derive(Debug, Clone)]
 pub struct H1Config {
+    pub client_ca_pem: Option<Vec<u8>>,
     pub io_timeout: std::time::Duration,
-    pub stack_size: usize,
     pub sni: bool,
+    pub stack_size: usize,
 }
 
 #[cfg(feature = "net-h1-server")]
 impl Default for H1Config {
     fn default() -> Self {
         Self {
+            client_ca_pem: None,
             io_timeout: std::time::Duration::from_secs(60),
             sni: false,
             stack_size: 1024 * 1024,
@@ -52,7 +54,7 @@ impl Default for H1Config {
 pub struct H2Config {
     pub alpn_protocols: Vec<Vec<u8>>,
     pub backlog: usize,
-    pub enable_connect_protocol: bool,
+    pub client_ca_pem: Option<Vec<u8>>,
     pub initial_connection_window_size: u32,
     pub initial_window_size: u32,
     pub io_timeout: std::time::Duration,
@@ -70,7 +72,7 @@ impl Default for H2Config {
         Self {
             alpn_protocols: vec![b"h2".to_vec(), b"http/1.1".to_vec()],
             backlog: 512,
-            enable_connect_protocol: false,
+            client_ca_pem: None,
             initial_connection_window_size: 64 * 1024,
             initial_window_size: 256 * 1024,
             io_timeout: std::time::Duration::from_secs(60),
@@ -88,7 +90,7 @@ impl Default for H2Config {
 #[derive(Debug, Clone)]
 pub struct H3Config {
     pub backlog: usize,
-    pub enable_connect_protocol: bool,
+    pub client_ca_pem: Option<Vec<u8>>,
     pub io_timeout: std::time::Duration,
     pub keep_alive_interval: std::time::Duration,
     pub max_concurrent_bidi_streams: u32,
@@ -105,7 +107,7 @@ impl Default for H3Config {
     fn default() -> Self {
         Self {
             backlog: 512,
-            enable_connect_protocol: false,
+            client_ca_pem: None,
             io_timeout: std::time::Duration::from_secs(60),
             keep_alive_interval: std::time::Duration::from_secs(10),
             max_concurrent_bidi_streams: 1024,
@@ -169,6 +171,7 @@ fn make_socket(
 fn make_rustls_config(
     chain_cert_key: &(Option<&[u8]>, &[u8], &[u8]),
     alpn_protocols: Vec<Vec<u8>>,
+    client_ca_pem: Option<&[u8]>,
 ) -> std::io::Result<rustls::ServerConfig> {
     use rustls::pki_types::pem::PemObject;
     use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -200,14 +203,132 @@ fn make_rustls_config(
         .map_err(io_err)?
         .clone_key();
 
-    // TLS config
-    let mut cfg = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certs, key)
-        .map_err(|e| io_err(format!("Server could not load cert/key: {e}")))?;
+    let mut cfg = if let Some(client_ca_pem) = client_ca_pem {
+        // Build trust store for verifying client certificates
+        let mut roots = rustls::RootCertStore::empty();
+        let ca_certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(client_ca_pem)
+            .map(|c| c.map(|x| x.into_owned()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(io_err)?;
+
+        if ca_certs.is_empty() {
+            return Err(io_err("Client CA PEM contained no certificates"));
+        }
+
+        for ca in ca_certs {
+            roots.add(ca).map_err(io_err)?;
+        }
+
+        let verifier = rustls::server::WebPkiClientVerifier::builder(std::sync::Arc::new(roots))
+            .build()
+            .map_err(io_err)?;
+
+        rustls::ServerConfig::builder()
+            .with_client_cert_verifier(verifier)
+            .with_single_cert(certs, key)
+            .map_err(|e| io_err(format!("Server could not load cert/key: {e}")))?
+    } else {
+        rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .map_err(|e| io_err(format!("Server could not load cert/key: {e}")))?
+    };
 
     cfg.alpn_protocols = alpn_protocols;
     Ok(cfg)
+}
+
+#[cfg(feature = "net-h1-server")]
+fn add_mtls_client_auth_to_boringssl(
+    tls_builder: &mut boring::ssl::SslAcceptorBuilder,
+    client_ca_pem: &[u8],
+) -> std::io::Result<()> {
+    use boring::{
+        ssl::SslVerifyMode,
+        stack::Stack,
+        x509::{X509, X509Name, store::X509StoreBuilder},
+    };
+
+    // Parse CA certs from PEM
+    let ca_vec: Vec<X509> = X509::stack_from_pem(client_ca_pem).map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("client_ca pem: {e}"),
+        )
+    })?;
+
+    if ca_vec.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "client_ca_pem contained no certificates",
+        ));
+    }
+
+    // Build X509 store
+    let mut store_builder = X509StoreBuilder::new().map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("store builder: {e}"),
+        )
+    })?;
+
+    for ca in &ca_vec {
+        store_builder.add_cert(ca.clone()).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("add ca cert: {e}"),
+            )
+        })?;
+    }
+
+    let store = store_builder.build();
+
+    // Use this store to verify *client* certificates
+    tls_builder.set_verify_cert_store(store).map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("set verify store: {e}"),
+        )
+    })?;
+
+    // Require a client certificate and verify it
+    tls_builder.set_verify(SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT);
+    tls_builder.set_verify_depth(4);
+
+    // Send “acceptable CA list” to clients
+    let mut ca_name_list: Stack<X509Name> = Stack::new().map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("create ca name stack: {e}"),
+        )
+    })?;
+
+    for ca in &ca_vec {
+        let der = ca.subject_name().to_der().map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("name to_der: {e}"),
+            )
+        })?;
+
+        let owned_name = X509Name::from_der(&der).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("name from_der: {e}"),
+            )
+        })?;
+
+        ca_name_list.push(owned_name).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("push ca name: {e}"),
+            )
+        })?;
+    }
+
+    tls_builder.set_client_ca_list(ca_name_list);
+
+    Ok(())
 }
 
 #[cfg(feature = "net-h3-server")]
@@ -361,6 +482,10 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         tls_builder.set_options(boring::ssl::SslOptions::NO_TICKET);
         tls_builder.set_session_id_context(b"sib\0")?;
         tls_builder.set_alpn_protos(b"\x08http/1.1")?;
+
+        if let Some(client_ca_pem) = cfg.client_ca_pem.as_deref() {
+            add_mtls_client_auth_to_boringssl(&mut tls_builder, client_ca_pem)?;
+        }
 
         if cfg.sni {
             tls_builder.set_servername_callback(|ssl_ref, _| {
@@ -617,6 +742,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         let tls_acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(make_rustls_config(
             &chain_cert_key,
             h2_cfg.alpn_protocols.clone(),
+            h2_cfg.client_ca_pem.as_deref(),
         )?));
 
         let factory = Arc::new(self);
@@ -1645,7 +1771,7 @@ pub mod tests {
         };
         use sha2::{Digest, Sha256};
 
-        let mut params: CertificateParams = Default::default();
+        let mut params = CertificateParams::default();
         params.not_before = date_time_ymd(1975, 1, 1);
         params.not_after = date_time_ymd(4096, 1, 1);
         params.distinguished_name = DistinguishedName::new();
@@ -1687,6 +1813,61 @@ pub mod tests {
         (cert_pem, key_pem)
     }
 
+    //  create client-auth CA + one client cert (PEM)
+    fn create_client_auth_ca_and_one_client_pems() -> (String, String, String) {
+        use rcgen::{
+            BasicConstraints, CertificateParams, DistinguishedName, DnType,
+            ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, SanType,
+        };
+
+        // CA
+        let mut ca_dn = DistinguishedName::new();
+        ca_dn.push(DnType::CountryName, "AE");
+        ca_dn.push(DnType::OrganizationName, "Sib");
+        ca_dn.push(DnType::CommonName, "Sib Client Root CA");
+
+        let mut ca_params = CertificateParams::new(vec![]).expect("create CA params");
+        ca_params.distinguished_name = ca_dn;
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params.key_usages = vec![
+            KeyUsagePurpose::KeyCertSign,
+            KeyUsagePurpose::CrlSign,
+            KeyUsagePurpose::DigitalSignature,
+        ];
+
+        let ca_key = KeyPair::generate().expect("generate CA keypair");
+        let ca = ca_params.self_signed(&ca_key).expect("create client CA");
+        let ca_cert_pem = ca.pem();
+
+        // Client
+        let mut client_dn = DistinguishedName::new();
+        client_dn.push(DnType::CountryName, "AE");
+        client_dn.push(DnType::OrganizationName, "Sib");
+        client_dn.push(DnType::CommonName, "client-sample");
+
+        let client_key = KeyPair::generate().expect("generate client keypair");
+
+        let mut client_params = CertificateParams::new(vec![]).expect("create client params");
+        client_params.distinguished_name = client_dn;
+        client_params.subject_alt_names =
+            vec![SanType::DnsName("client-sample".try_into().unwrap())];
+        client_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        client_params.key_usages = vec![
+            KeyUsagePurpose::DigitalSignature,
+            KeyUsagePurpose::KeyEncipherment,
+        ];
+        client_params.is_ca = IsCa::NoCa;
+
+        let ca_issuer = rcgen::Issuer::new(ca_params, ca_key);
+        let client_cert = client_params
+            .signed_by(&client_key, &ca_issuer)
+            .expect("create client cert");
+        let client_cert_pem = client_cert.pem();
+        let client_key_pem = client_key.serialize_pem();
+
+        (ca_cert_pem, client_cert_pem, client_key_pem)
+    }
+
     #[cfg(feature = "net-h1-server")]
     #[test]
     fn test_h1_tls_server_gracefull_shutdown() {
@@ -1716,6 +1897,68 @@ pub mod tests {
 
     #[cfg(feature = "net-h1-server")]
     #[test]
+    fn test_h1_tls_server_get_with_client_auth() {
+        use crate::network::http::server::H1Config;
+        use std::time::Duration;
+
+        const NUMBER_OF_WORKERS: usize = 1;
+        crate::init_global_poller(NUMBER_OF_WORKERS, 2 * 1024 * 1024);
+
+        // Pick a port and start the server
+        const ADDR: &str = "localhost:8081";
+        let (cert_pem, key_pem) = create_self_signed_tls_pems();
+        let (client_ca_cert_pem, client_cert_pem, client_key_pem) =
+            create_client_auth_ca_and_one_client_pems();
+        let server_handle = EchoServer
+            .start_h1_tls(
+                ADDR,
+                (None, cert_pem.as_bytes(), key_pem.as_bytes()),
+                H1Config {
+                    client_ca_pem: Some(client_ca_cert_pem.into_bytes()),
+                    ..Default::default()
+                },
+            )
+            .expect("h1 tls start server");
+
+        let client_handler = may::go!(move || {
+            // Give the server a moment to start listening
+            may::coroutine::sleep(Duration::from_millis(500));
+
+            let server_ca =
+                reqwest::Certificate::from_pem(cert_pem.as_bytes()).expect("parse server cert");
+            // Use reqwest blocking in this coroutine.
+            let client = reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .add_root_certificate(server_ca)
+                .identity(
+                    reqwest::Identity::from_pem(
+                        format!("{}\n{}", client_cert_pem, client_key_pem).as_bytes(),
+                    )
+                    .expect("build client identity"),
+                )
+                .build()
+                .expect("build reqwest client");
+
+            let url = format!("https://{ADDR}/test");
+
+            let resp = client.get(&url).body("Hello").send().expect("send GET");
+            let status = resp.status();
+            let body = resp.text().expect("read body");
+
+            info!("H1 GET Status: {status}");
+            info!("H1 GET Body: {body}");
+
+            assert!(status.is_success(), "status was {status}");
+            assert!(body.contains("/test"), "body did not contain /test");
+        });
+
+        may::join!(server_handle, client_handler);
+
+        std::thread::sleep(Duration::from_secs(1));
+    }
+
+    #[cfg(feature = "net-h1-server")]
+    #[test]
     fn test_h1_server_get() {
         use crate::network::http::server::H1Config;
         use std::time::Duration;
@@ -1734,7 +1977,6 @@ pub mod tests {
             may::coroutine::sleep(Duration::from_millis(500));
 
             // Use reqwest (blocking) in this coroutine.
-            // If your server is plain HTTP, this is exactly what you want.
             let client = reqwest::blocking::Client::builder()
                 .timeout(Duration::from_secs(5))
                 .build()
@@ -2048,6 +2290,108 @@ pub mod tests {
 
         assert!(
             matches!(&msg, tungstenite::Message::Text(s) if s.contains("hello ws")),
+            "unexpected ws response: {msg:?}"
+        );
+
+        ws.close(None).ok();
+    }
+
+    #[cfg(all(feature = "net-h2-server", feature = "net-ws-server"))]
+    #[test]
+    fn test_h2_tls_ws_over_h1_upgrade_with_client_auth() {
+        use rustls::pki_types::pem::PemObject;
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+        use std::{net::TcpStream, sync::Arc, time::Duration};
+        use tungstenite::Message;
+
+        // helper: parse PEM cert list
+        fn parse_certs(pem: &[u8]) -> Vec<CertificateDer<'static>> {
+            CertificateDer::pem_slice_iter(pem)
+                .map(|c| c.expect("cert pem parse").into_owned())
+                .collect()
+        }
+
+        // helper: parse PEM private key
+        fn parse_key(pem: &[u8]) -> PrivateKeyDer<'static> {
+            PrivateKeyDer::from_pem_slice(pem)
+                .expect("key pem parse")
+                .clone_key()
+        }
+
+        // Server TLS (self-signed) — reused on both sides
+        let (server_cert_pem, server_key_pem) = create_self_signed_tls_pems();
+        let cert_for_server = server_cert_pem.clone();
+        let key_for_server = server_key_pem.clone();
+
+        // Client-auth PKI
+        let (client_ca_cert_pem, client_cert_pem, client_key_pem) =
+            create_client_auth_ca_and_one_client_pems();
+
+        const ADDR: &str = "127.0.0.1:8088";
+
+        // Start server with client auth enabled
+        let _ = std::thread::spawn(move || {
+            use crate::network::http::server::H2Config;
+
+            let cfg = H2Config {
+                client_ca_pem: Some(client_ca_cert_pem.into_bytes()),
+                ..Default::default()
+            };
+
+            EchoServer
+                .start_h2_tls(
+                    ADDR,
+                    (None, cert_for_server.as_bytes(), key_for_server.as_bytes()),
+                    cfg,
+                )
+                .expect("start_h2_tls (mtls)");
+        });
+
+        std::thread::sleep(Duration::from_millis(800));
+
+        // Trust the server cert (self-signed) by adding it as a root for the test.
+        let mut roots = rustls::RootCertStore::empty();
+        for c in parse_certs(server_cert_pem.as_bytes()) {
+            roots.add(c).expect("add server cert as root");
+        }
+
+        // Provide client identity (client cert + key)
+        let client_chain = parse_certs(client_cert_pem.as_bytes());
+        assert!(!client_chain.is_empty(), "client cert chain empty");
+        let client_key = parse_key(client_key_pem.as_bytes());
+
+        let tls_cfg = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_client_auth_cert(client_chain, client_key)
+            .expect("build rustls client config with mTLS");
+
+        // TCP connect to server
+        let tcp = TcpStream::connect(ADDR).expect("tcp connect");
+        tcp.set_read_timeout(Some(Duration::from_secs(3))).ok();
+        tcp.set_write_timeout(Some(Duration::from_secs(3))).ok();
+        tcp.set_nodelay(true).ok();
+
+        // TLS handshake (SNI must match what your server cert covers; for self-signed tests we use localhost)
+        let server_name = ServerName::try_from("localhost").expect("server name");
+        let conn =
+            rustls::ClientConnection::new(Arc::new(tls_cfg), server_name).expect("client conn");
+
+        // rustls stream implementing Read+Write
+        let tls_stream = rustls::StreamOwned::new(conn, tcp);
+
+        // WebSocket handshake over the established TLS stream
+        let (mut ws, resp) = tungstenite::client::client(format!("wss://{}", ADDR), tls_stream)
+            .expect("wss handshake");
+        info!("WS handshake response: {resp:?}");
+
+        ws.send(Message::Text("hello ws server (mtls)".into()))
+            .expect("ws write");
+
+        let msg = ws.read().expect("ws read");
+        info!("WS client got: {msg:?}");
+
+        assert!(
+            matches!(&msg, Message::Text(s) if s.contains("hello ws")),
             "unexpected ws response: {msg:?}"
         );
 
