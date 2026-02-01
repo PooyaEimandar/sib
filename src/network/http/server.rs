@@ -55,6 +55,7 @@ pub struct H2Config {
     pub alpn_protocols: Vec<Vec<u8>>,
     pub backlog: usize,
     pub client_ca_pem: Option<Vec<u8>>,
+    pub enable_connect_protocol: bool,
     pub initial_connection_window_size: u32,
     pub initial_window_size: u32,
     pub io_timeout: std::time::Duration,
@@ -73,6 +74,7 @@ impl Default for H2Config {
             alpn_protocols: vec![b"h2".to_vec(), b"http/1.1".to_vec()],
             backlog: 512,
             client_ca_pem: None,
+            enable_connect_protocol: false,
             initial_connection_window_size: 64 * 1024,
             initial_window_size: 256 * 1024,
             io_timeout: std::time::Duration::from_secs(60),
@@ -91,6 +93,7 @@ impl Default for H2Config {
 pub struct H3Config {
     pub backlog: usize,
     pub client_ca_pem: Option<Vec<u8>>,
+    pub enable_connect_protocol: bool,
     pub io_timeout: std::time::Duration,
     pub keep_alive_interval: std::time::Duration,
     pub max_concurrent_bidi_streams: u32,
@@ -108,6 +111,7 @@ impl Default for H3Config {
         Self {
             backlog: 512,
             client_ca_pem: None,
+            enable_connect_protocol: false,
             io_timeout: std::time::Duration::from_secs(60),
             keep_alive_interval: std::time::Duration::from_secs(10),
             max_concurrent_bidi_streams: 1024,
