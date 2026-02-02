@@ -1817,12 +1817,7 @@ pub mod tests {
         (cert_pem, key_pem)
     }
 
-    #[cfg(any(
-        feature = "net-h1-server",
-        feature = "net-h2-server",
-        feature = "net-h3-server",
-        feature = "net-ws-server"
-    ))]
+    #[allow(dead_code)]
     //  create client-auth CA + one client cert (PEM)
     fn create_client_auth_ca_and_one_client_pems() -> (String, String, String) {
         use rcgen::{
