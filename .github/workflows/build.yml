@@ -8,6 +8,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  RUSTFLAGS: --cfg reqwest_unstable
 
 jobs:
   linux:
