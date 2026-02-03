@@ -1762,132 +1762,25 @@ pub mod tests {
         }
     }
 
-    #[cfg(any(
-        feature = "net-h1-server",
-        feature = "net-h2-server",
-        feature = "net-h3-server",
-        feature = "net-ws-server"
-    ))]
-    pub fn create_self_signed_tls_pems() -> (String, String) {
-        use base64::{Engine as _, engine::general_purpose::STANDARD as b64};
-        use rcgen::{
-            CertificateParams, DistinguishedName, DnType, KeyPair, SanType, date_time_ymd,
-        };
-        use sha2::{Digest, Sha256};
-
-        let mut params = CertificateParams::default();
-        params.not_before = date_time_ymd(1975, 1, 1);
-        params.not_after = date_time_ymd(4096, 1, 1);
-        params.distinguished_name = DistinguishedName::new();
-        params
-            .distinguished_name
-            .push(DnType::OrganizationName, "Sib");
-        params.distinguished_name.push(DnType::CommonName, "Sib");
-        params.subject_alt_names = vec![SanType::DnsName("localhost".try_into().unwrap())];
-
-        let key_pair = KeyPair::generate().unwrap();
-        let cert = params.self_signed(&key_pair).unwrap();
-
-        // Get PEM strings
-        let cert_pem = cert.pem();
-        let key_pem = key_pair.serialize_pem();
-
-        // Convert PEM -> DER by stripping header/footer and base64-decoding
-        let mut der_b64 = String::with_capacity(cert_pem.len());
-        for line in cert_pem.lines() {
-            if !line.starts_with("-----") {
-                der_b64.push_str(line.trim());
-            }
-        }
-        let cert_der = b64.decode(der_b64).expect("PEM base64 decode");
-
-        // SHA-256 over DER, base64 encode result
-        let hash = Sha256::digest(&cert_der);
-        let base64_hash = b64.encode(hash);
-
-        info!("BASE64_SHA256_OF_DER_CERT: {}", base64_hash);
-
-        INIT.call_once(|| {
-            rustls::crypto::CryptoProvider::install_default(
-                rustls::crypto::aws_lc_rs::default_provider(),
-            )
-            .expect("install aws-lc-rs");
-        });
-
-        (cert_pem, key_pem)
-    }
-
-    #[allow(dead_code)]
-    //  create client-auth CA + one client cert (PEM)
-    fn create_client_auth_ca_and_one_client_pems() -> (String, String, String) {
-        use rcgen::{
-            BasicConstraints, CertificateParams, DistinguishedName, DnType,
-            ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, SanType,
-        };
-
-        // CA
-        let mut ca_dn = DistinguishedName::new();
-        ca_dn.push(DnType::CountryName, "AE");
-        ca_dn.push(DnType::OrganizationName, "Sib");
-        ca_dn.push(DnType::CommonName, "Sib Client Root CA");
-
-        let mut ca_params = CertificateParams::new(vec![]).expect("create CA params");
-        ca_params.distinguished_name = ca_dn;
-        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        ca_params.key_usages = vec![
-            KeyUsagePurpose::KeyCertSign,
-            KeyUsagePurpose::CrlSign,
-            KeyUsagePurpose::DigitalSignature,
-        ];
-
-        let ca_key = KeyPair::generate().expect("generate CA keypair");
-        let ca = ca_params.self_signed(&ca_key).expect("create client CA");
-        let ca_cert_pem = ca.pem();
-
-        // Client
-        let mut client_dn = DistinguishedName::new();
-        client_dn.push(DnType::CountryName, "AE");
-        client_dn.push(DnType::OrganizationName, "Sib");
-        client_dn.push(DnType::CommonName, "client-sample");
-
-        let client_key = KeyPair::generate().expect("generate client keypair");
-
-        let mut client_params = CertificateParams::new(vec![]).expect("create client params");
-        client_params.distinguished_name = client_dn;
-        client_params.subject_alt_names =
-            vec![SanType::DnsName("client-sample".try_into().unwrap())];
-        client_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
-        client_params.key_usages = vec![
-            KeyUsagePurpose::DigitalSignature,
-            KeyUsagePurpose::KeyEncipherment,
-        ];
-        client_params.is_ca = IsCa::NoCa;
-
-        let ca_issuer = rcgen::Issuer::new(ca_params, ca_key);
-        let client_cert = client_params
-            .signed_by(&client_key, &ca_issuer)
-            .expect("create client cert");
-        let client_cert_pem = client_cert.pem();
-        let client_key_pem = client_key.serialize_pem();
-
-        (ca_cert_pem, client_cert_pem, client_key_pem)
-    }
-
     #[cfg(feature = "net-h1-server")]
     #[test]
     fn test_h1_tls_server_gracefull_shutdown() {
+        use crate::{MtlsIdentity, network::http::server::H1Config};
         use std::time::Duration;
 
-        use crate::network::http::server::H1Config;
         const NUMBER_OF_WORKERS: usize = 1;
         crate::init_global_poller(NUMBER_OF_WORKERS, 0);
 
-        let (cert_pem, key_pem) = create_self_signed_tls_pems();
+        let tls = MtlsIdentity::generate(&[], &[], false);
         let addr = "127.0.0.1:8080";
         let server_handle = EchoServer
             .start_h1_tls(
                 addr,
-                (None, cert_pem.as_bytes(), key_pem.as_bytes()),
+                (
+                    None,
+                    tls.server_cert_pem.as_bytes(),
+                    tls.server_key_pem.as_bytes(),
+                ),
                 H1Config::default(),
             )
             .expect("H1 TLS server failed to start");
@@ -1903,7 +1796,7 @@ pub mod tests {
     #[cfg(feature = "net-h1-server")]
     #[test]
     fn test_h1_tls_server_get_with_client_auth() {
-        use crate::network::http::server::H1Config;
+        use crate::{MtlsIdentity, network::http::server::H1Config};
         use std::time::Duration;
 
         const NUMBER_OF_WORKERS: usize = 1;
@@ -1911,15 +1804,17 @@ pub mod tests {
 
         // Pick a port and start the server
         const ADDR: &str = "localhost:8081";
-        let (cert_pem, key_pem) = create_self_signed_tls_pems();
-        let (client_ca_cert_pem, client_cert_pem, client_key_pem) =
-            create_client_auth_ca_and_one_client_pems();
+        let tls = MtlsIdentity::generate(&[], &[], true);
         let server_handle = EchoServer
             .start_h1_tls(
                 ADDR,
-                (None, cert_pem.as_bytes(), key_pem.as_bytes()),
+                (
+                    None,
+                    tls.server_cert_pem.as_bytes(),
+                    tls.server_key_pem.as_bytes(),
+                ),
                 H1Config {
-                    client_ca_pem: Some(client_ca_cert_pem.into_bytes()),
+                    client_ca_pem: Some(tls.ca_cert_pem.clone().into_bytes()),
                     ..Default::default()
                 },
             )
@@ -1929,15 +1824,20 @@ pub mod tests {
             // Give the server a moment to start listening
             may::coroutine::sleep(Duration::from_millis(500));
 
-            let server_ca =
-                reqwest::Certificate::from_pem(cert_pem.as_bytes()).expect("parse server cert");
+            let server_ca = reqwest::Certificate::from_pem(tls.ca_cert_pem.as_bytes())
+                .expect("parse server cert");
             // Use reqwest blocking in this coroutine.
             let client = reqwest::blocking::Client::builder()
                 .timeout(Duration::from_secs(5))
                 .add_root_certificate(server_ca)
                 .identity(
                     reqwest::Identity::from_pem(
-                        format!("{}\n{}", client_cert_pem, client_key_pem).as_bytes(),
+                        format!(
+                            "{}\n{}",
+                            tls.client_cert_pem.unwrap(),
+                            tls.client_key_pem.unwrap()
+                        )
+                        .as_bytes(),
                     )
                     .expect("build client identity"),
                 )
@@ -2103,14 +2003,19 @@ pub mod tests {
     fn test_h2_tls_server_get() {
         let addr = "127.0.0.1:8083";
         let _ = std::thread::spawn(move || {
-            let (cert, key) = create_self_signed_tls_pems();
+            use crate::MtlsIdentity;
+            let mtls = MtlsIdentity::generate(&[], &[], false);
 
             use crate::network::http::server::H2Config;
             // Pick a port and start the server
             EchoServer
                 .start_h2_tls(
                     addr,
-                    (None, cert.as_bytes(), key.as_bytes()),
+                    (
+                        None,
+                        mtls.server_cert_pem.as_bytes(),
+                        mtls.server_key_pem.as_bytes(),
+                    ),
                     H2Config::default(),
                 )
                 .expect("start_h2_tls");
@@ -2172,14 +2077,19 @@ pub mod tests {
     fn test_h2_tls_server_post() {
         let addr = "127.0.0.1:8084";
         let _ = std::thread::spawn(move || {
-            let (cert, key) = create_self_signed_tls_pems();
+            use crate::MtlsIdentity;
+            let mtls = MtlsIdentity::generate(&[], &[], false);
 
             use crate::network::http::server::H2Config;
             // Pick a port and start the server
             EchoServer
                 .start_h2_tls(
                     addr,
-                    (None, cert.as_bytes(), key.as_bytes()),
+                    (
+                        None,
+                        mtls.server_cert_pem.as_bytes(),
+                        mtls.server_key_pem.as_bytes(),
+                    ),
                     H2Config::default(),
                 )
                 .expect("start_h2_tls");
@@ -2238,16 +2148,17 @@ pub mod tests {
     #[cfg(all(feature = "net-h2-server", feature = "net-ws-server"))]
     #[test]
     fn test_h2_tls_ws_over_h1_upgrade() {
+        use crate::MtlsIdentity;
         use std::{net::TcpStream, time::Duration};
 
         let addr = "127.0.0.1:8087";
 
         //Generate ONCE and reuse on both sides
-        let (cert_pem, key_pem) = create_self_signed_tls_pems();
+        let mtls = MtlsIdentity::generate(&[], &[], false);
 
         // Clone into server thread
-        let cert_for_server = cert_pem.clone();
-        let key_for_server = key_pem.clone();
+        let cert_for_server = mtls.server_cert_pem.clone();
+        let key_for_server = mtls.server_key_pem.clone();
 
         // Start H2 TLS server (it will also accept H1 via ALPN fallback path)
         let _ = std::thread::spawn(move || {
@@ -2265,7 +2176,8 @@ pub mod tests {
         std::thread::sleep(Duration::from_millis(800));
 
         // Client trusts the SAME cert the server will present
-        let ca = native_tls::Certificate::from_pem(cert_pem.as_bytes()).expect("parse cert pem");
+        let ca = native_tls::Certificate::from_pem(mtls.server_cert_pem.as_bytes())
+            .expect("parse cert pem");
 
         let connector = native_tls::TlsConnector::builder()
             .add_root_certificate(ca)
@@ -2304,6 +2216,7 @@ pub mod tests {
     #[cfg(all(feature = "net-h2-server", feature = "net-ws-server"))]
     #[test]
     fn test_h2_tls_ws_over_h1_upgrade_with_client_auth() {
+        use crate::MtlsIdentity;
         use rustls::pki_types::pem::PemObject;
         use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
         use std::{net::TcpStream, sync::Arc, time::Duration};
@@ -2323,14 +2236,11 @@ pub mod tests {
                 .clone_key()
         }
 
-        // Server TLS (self-signed) — reused on both sides
-        let (server_cert_pem, server_key_pem) = create_self_signed_tls_pems();
-        let cert_for_server = server_cert_pem.clone();
-        let key_for_server = server_key_pem.clone();
-
-        // Client-auth PKI
-        let (client_ca_cert_pem, client_cert_pem, client_key_pem) =
-            create_client_auth_ca_and_one_client_pems();
+        // create mTLS identity for server and client
+        let mtls = MtlsIdentity::generate(&[], &[], true);
+        let cert_for_server = mtls.server_cert_pem.clone();
+        let key_for_server = mtls.server_key_pem.clone();
+        let ca = mtls.ca_cert_pem.clone();
 
         const ADDR: &str = "127.0.0.1:8088";
 
@@ -2339,7 +2249,7 @@ pub mod tests {
             use crate::network::http::server::H2Config;
 
             let cfg = H2Config {
-                client_ca_pem: Some(client_ca_cert_pem.into_bytes()),
+                client_ca_pem: Some(ca.into_bytes()),
                 ..Default::default()
             };
 
@@ -2356,14 +2266,14 @@ pub mod tests {
 
         // Trust the server cert (self-signed) by adding it as a root for the test.
         let mut roots = rustls::RootCertStore::empty();
-        for c in parse_certs(server_cert_pem.as_bytes()) {
-            roots.add(c).expect("add server cert as root");
+        for c in parse_certs(mtls.ca_cert_pem.as_bytes()) {
+            roots.add(c).expect("add CA cert as root");
         }
 
         // Provide client identity (client cert + key)
-        let client_chain = parse_certs(client_cert_pem.as_bytes());
+        let client_chain = parse_certs(mtls.client_cert_pem.unwrap().as_bytes());
         assert!(!client_chain.is_empty(), "client cert chain empty");
-        let client_key = parse_key(client_key_pem.as_bytes());
+        let client_key = parse_key(mtls.client_key_pem.unwrap().as_bytes());
 
         let tls_cfg = rustls::ClientConfig::builder()
             .with_root_certificates(roots)
