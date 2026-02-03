@@ -1770,60 +1770,14 @@ mod tests {
         }
     }
 
-    fn create_self_signed_tls_pems() -> (String, String) {
-        use base64::{Engine as _, engine::general_purpose::STANDARD as b64};
-        use rcgen::{
-            CertificateParams, DistinguishedName, DnType, KeyPair, SanType, date_time_ymd,
-        };
-        use sha2::{Digest, Sha256};
-
-        let mut params: CertificateParams = Default::default();
-        params.not_before = date_time_ymd(1975, 1, 1);
-        params.not_after = date_time_ymd(4096, 1, 1);
-        params.distinguished_name = DistinguishedName::new();
-        params
-            .distinguished_name
-            .push(DnType::OrganizationName, "Sib");
-        params.distinguished_name.push(DnType::CommonName, "Sib");
-        params.subject_alt_names = vec![SanType::DnsName("localhost".try_into().unwrap())];
-
-        let key_pair = KeyPair::generate().unwrap();
-        let cert = params.self_signed(&key_pair).unwrap();
-
-        // Get PEM strings
-        let cert_pem = cert.pem();
-        let key_pem = key_pair.serialize_pem();
-
-        // Convert PEM -> DER by stripping header/footer and base64-decoding
-        let mut der_b64 = String::with_capacity(cert_pem.len());
-        for line in cert_pem.lines() {
-            if !line.starts_with("-----") {
-                der_b64.push_str(line.trim());
-            }
-        }
-        let cert_der = b64.decode(der_b64).expect("PEM base64 decode");
-
-        // SHA-256 over DER, base64 encode result
-        let hash = Sha256::digest(&cert_der);
-        let base64_hash = b64.encode(hash);
-
-        tracing::info!("BASE64_SHA256_OF_DER_CERT: {}", base64_hash);
-
-        rustls::crypto::CryptoProvider::install_default(
-            rustls::crypto::aws_lc_rs::default_provider(),
-        )
-        .expect("install aws-lc-rs");
-
-        (cert_pem, key_pem)
-    }
-
     #[test]
     fn file_server() {
         // Pick a port and start the server
         let mut threads = Vec::new();
 
         // create self-signed TLS certificates
-        let certs = create_self_signed_tls_pems();
+        use crate::network::http::server::tests::create_self_signed_tls_pems;
+        let (cert, key) = create_self_signed_tls_pems();
 
         cfg_if::cfg_if! {
             if #[cfg(feature = "net-h1-server")] {
@@ -1833,8 +1787,8 @@ mod tests {
 
                 for _ in 0..NUMBER_OF_WORKERS {
                     let addr = "0.0.0.0:8080";
-                    let cert_pem = certs.0.clone();
-                    let key_pem = certs.1.clone();
+                    let cert_pem = cert.clone();
+                    let key_pem = key.clone();
                     let h1_handle = std::thread::spawn(move || {
                         let id = std::thread::current().id();
                         tracing::info!("Starting H1 server on {addr} with thread: {id:?}");
@@ -1855,8 +1809,8 @@ mod tests {
 
         cfg_if::cfg_if! {
             if #[cfg(feature = "net-h2-server")] {
-                let cert_h2_pem = certs.0.clone();
-                let key_h2_pem = certs.1.clone();
+                let cert_h2_pem = cert.clone();
+                let key_h2_pem = key.clone();
                 let h2_handle = std::thread::spawn(move || {
                     use crate::network::http::server::H2Config;
                     let addr = "0.0.0.0:8081";
@@ -1874,8 +1828,8 @@ mod tests {
 
         cfg_if::cfg_if! {
             if #[cfg(feature = "net-h3-server")] {
-                let cert_h3_pem = certs.0.clone();
-                let key_h3_pem = certs.1.clone();
+                let cert_h3_pem = cert.clone();
+                let key_h3_pem = key.clone();
                 let h3_handle = std::thread::spawn(move || {
                     use crate::network::http::server::H3Config;
                     let addr = "0.0.0.0:8082";
