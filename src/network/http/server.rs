@@ -2027,7 +2027,7 @@ pub mod tests {
 
     #[cfg(feature = "net-h2-server")]
     #[test]
-    fn test_h1_tls_server_gracefull_shutdown() {
+    fn test_h2_tls_server_gracefull_shutdown() {
         use crate::{MtlsIdentity, network::http::server::H2Config};
         use std::time::Duration;
 
