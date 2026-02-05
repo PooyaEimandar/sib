@@ -18,10 +18,10 @@ pub fn init_global_poller(num_of_workers: usize, stack_size: usize) {
         .set_stack_size(stack_size);
 }
 
-#[cfg(any(feature = "mtls"))]
+#[cfg(feature = "mtls")]
 static INIT: std::sync::Once = std::sync::Once::new();
 
-#[cfg(any(feature = "mtls"))]
+#[cfg(feature = "mtls")]
 #[derive(Debug, Clone)]
 pub struct MtlsIdentity {
     /// Root CA cert (PEM). Clients should trust this to validate the server cert.
@@ -36,7 +36,7 @@ pub struct MtlsIdentity {
     pub client_key_pem: Option<String>,
 }
 
-#[cfg(any(feature = "mtls"))]
+#[cfg(feature = "mtls")]
 /// Create a local CA, then issue a server cert, and optionally a client cert.
 ///
 /// - `extra_dns_sans`: e.g. ["domain.local", "dev.myapp"] (in addition to "localhost")
