@@ -227,6 +227,7 @@ cfg_if::cfg_if! {
             mut service: T,
             config: &H2Config,
             peer_addr: std::net::IpAddr,
+            shutdown: tokio_util::sync::CancellationToken,
         ) -> std::io::Result<()>
         where
             S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + 'static,
@@ -240,10 +241,18 @@ cfg_if::cfg_if! {
             let mut buf: Vec<u8> = vec![0u8; 8192];
 
             loop {
+                // Check for shutdown before each new request
+                if shutdown.is_cancelled() {
+                    return Ok(());
+                }
+
                 // read headers
                 let mut read: usize = 0;
                 loop {
-                    let n = stream.read(&mut buf[read..]).await?;
+                    let n = tokio::select! {
+                        _ = shutdown.cancelled() => return Ok(()),
+                        r = stream.read(&mut buf[read..]) => r?
+                    };
                     if n == 0 {
                         return Ok(());
                     }
@@ -402,6 +411,7 @@ cfg_if::cfg_if! {
             service: T,
             config: &H2Config,
             peer_addr: std::net::IpAddr,
+            shutdown: tokio_util::sync::CancellationToken,
         ) -> std::io::Result<()>
         where
             S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + 'static,
@@ -413,17 +423,28 @@ cfg_if::cfg_if! {
             let builder = make_h2_server_builder(config);
 
             // Handshake H2 connection
-            let mut conn = builder.handshake(stream).await.map_err(|e| {
-                std::io::Error::other(format!("h2 handshake error: {e}"))
-            })?;
+            let mut conn = tokio::select! {
+                _ = shutdown.cancelled() => return Ok(()),
+                r = builder.handshake(stream) => r
+            }
+            .map_err(|e| std::io::Error::other(format!("h2 handshake error: {e}")))?;
 
             // One service instance per connection, shared across streams on this conn
             let svc = std::rc::Rc::new(std::cell::RefCell::new(Some(service)));
 
             // Serve multiplexed requests
             loop {
+                if shutdown.is_cancelled() {
+                    return Ok(());
+                }
                 let svc_rc = std::rc::Rc::clone(&svc);
-                match conn.accept().await {
+
+                let next = tokio::select! {
+                    _ = shutdown.cancelled() => return Ok(()),
+                    r = conn.accept() => r
+                };
+
+                match next {
                     Some(Ok((request, respond))) => {
                         // Each H2 stream runs on the same LocalSet thread
                         tokio::task::spawn_local(async move {

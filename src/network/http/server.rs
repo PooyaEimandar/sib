@@ -735,6 +735,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         addr: L,
         chain_cert_key: (Option<&[u8]>, &[u8], &[u8]),
         h2_cfg: H2Config,
+        shutdown: tokio_util::sync::CancellationToken,
     ) -> std::io::Result<()> {
         use std::sync::Arc;
         use tokio::{io::AsyncWriteExt, net::TcpListener, sync::Semaphore};
@@ -796,6 +797,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
             let factory = factory.clone();
             let h2_cfg = h2_cfg_arc.clone();
             let is_tls_eof_no_close_notify = is_tls_eof_no_close_notify.clone();
+            let shutdown_shard = shutdown.clone();
 
             handles.push(
             std::thread::Builder::new()
@@ -822,7 +824,15 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                         local
                             .run_until(async move {
                                 loop {
-                                    let (mut stream, peer_addr) = match listener.accept().await {
+                                    let accept_res = tokio::select! {
+                                        _ = shutdown_shard.cancelled() => {
+                                            tracing::info!("h2 shard {shard_id} shutdown requested");
+                                            return Ok::<(), std::io::Error>(());
+                                        }
+                                        r = listener.accept() => r
+                                    };
+                                    
+                                    let (mut stream, peer_addr) = match accept_res {
                                         Ok(x) => x,
                                         Err(e) => {
                                             error!("accept error (shard {shard_id}): {e}");
@@ -846,12 +856,29 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                                     let factory = factory.clone();
                                     let h2_cfg_cloned = h2_cfg.clone();
                                     let is_tls_eof_no_close_notify = is_tls_eof_no_close_notify.clone();
+                                    let shutdown_shard_cloned = shutdown_shard.clone();
 
                                     tokio::task::spawn_local(async move {
                                         let _permit = permit;
 
+                                        // check for cancellation before starting TLS handshake
+                                        let mut stream_opt = Some(stream);
+                                        let tls_result = tokio::select! {
+                                            _ = shutdown_shard_cloned.cancelled() => {
+                                                if let Some(mut s) = stream_opt.take() {
+                                                    let _ = s.shutdown().await;
+                                                }
+                                                return;
+                                            }
+
+                                            r = async {
+                                                let s = stream_opt.take().expect("stream already taken");
+                                                tls_acceptor.accept(s).await
+                                            } => r
+                                        };
+
                                         // TLS handshake
-                                        let tls_stream = match tls_acceptor.accept(stream).await {
+                                        let tls_stream = match tls_result {
                                             Ok(s) => s,
                                             Err(e) => {
                                                 error!(
@@ -873,7 +900,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                                                 use crate::network::http::h2_server::serve_h2;
 
                                                 let service = factory.async_service(shard_id);
-                                                match serve_h2(tls_stream, service, &h2_cfg_cloned, peer_ip).await {
+                                                match serve_h2(tls_stream, service, &h2_cfg_cloned, peer_ip, shutdown_shard_cloned).await {
                                                     Ok(()) => {}
                                                     Err(e) if (*is_tls_eof_no_close_notify)(&e) => {}
                                                     Err(e) => {
@@ -885,7 +912,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                                                 use crate::network::http::h2_server::serve_h1;
 
                                                 let service = factory.async_service(shard_id);
-                                                match serve_h1(tls_stream, service, &h2_cfg_cloned, peer_ip).await {
+                                                match serve_h1(tls_stream, service, &h2_cfg_cloned, peer_ip, shutdown_shard_cloned).await {
                                                     Ok(()) => {}
                                                     Err(e) if (*is_tls_eof_no_close_notify)(&e) => {}
                                                     Err(e) => {
@@ -2000,11 +2027,44 @@ pub mod tests {
 
     #[cfg(feature = "net-h2-server")]
     #[test]
+    fn test_h1_tls_server_gracefull_shutdown() {
+        use crate::{MtlsIdentity, network::http::server::H2Config};
+        use std::time::Duration;
+
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+
+        let ct_cloned = cancel_token.clone();
+        let handler = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            ct_cloned.cancel();
+        });
+
+        let tls = MtlsIdentity::generate(&[], &[], false);
+        let addr = "127.0.0.1:8080";
+        EchoServer
+            .start_h2_tls(
+                addr,
+                (
+                    None,
+                    tls.server_cert_pem.as_bytes(),
+                    tls.server_key_pem.as_bytes(),
+                ),
+                H2Config::default(),
+                cancel_token,
+            )
+            .expect("H2 TLS server failed to start");
+
+        handler.join().expect("shutdown signaler failed");
+    }
+
+    #[cfg(feature = "net-h2-server")]
+    #[test]
     fn test_h2_tls_server_get() {
         let addr = "127.0.0.1:8083";
         let _ = std::thread::spawn(move || {
-            use crate::MtlsIdentity;
-            let mtls = MtlsIdentity::generate(&[], &[], false);
+ 
+            let cancel_token = tokio_util::sync::CancellationToken::new();
+            let mtls = crate::MtlsIdentity::generate(&[], &[], false);
 
             use crate::network::http::server::H2Config;
             // Pick a port and start the server
@@ -2017,6 +2077,7 @@ pub mod tests {
                         mtls.server_key_pem.as_bytes(),
                     ),
                     H2Config::default(),
+                    cancel_token.clone(),
                 )
                 .expect("start_h2_tls");
         });
@@ -2077,10 +2138,10 @@ pub mod tests {
     fn test_h2_tls_server_post() {
         let addr = "127.0.0.1:8084";
         let _ = std::thread::spawn(move || {
-            use crate::MtlsIdentity;
-            let mtls = MtlsIdentity::generate(&[], &[], false);
-
             use crate::network::http::server::H2Config;
+
+            let cancel_token = tokio_util::sync::CancellationToken::new();
+            let mtls = crate::MtlsIdentity::generate(&[], &[], false);
             // Pick a port and start the server
             EchoServer
                 .start_h2_tls(
@@ -2091,6 +2152,7 @@ pub mod tests {
                         mtls.server_key_pem.as_bytes(),
                     ),
                     H2Config::default(),
+                    cancel_token.clone(),
                 )
                 .expect("start_h2_tls");
         });
@@ -2153,6 +2215,9 @@ pub mod tests {
 
         let addr = "127.0.0.1:8087";
 
+        // Cancellation token
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        
         //Generate ONCE and reuse on both sides
         let mtls = MtlsIdentity::generate(&[], &[], false);
 
@@ -2169,6 +2234,7 @@ pub mod tests {
                     addr,
                     (None, cert_for_server.as_bytes(), key_for_server.as_bytes()),
                     H2Config::default(),
+                    cancel_token.clone(),
                 )
                 .expect("start_h2_tls");
         });
@@ -2216,11 +2282,12 @@ pub mod tests {
     #[cfg(all(feature = "net-h2-server", feature = "net-ws-server"))]
     #[test]
     fn test_h2_tls_ws_over_h1_upgrade_with_client_auth() {
-        use crate::MtlsIdentity;
         use rustls::pki_types::pem::PemObject;
         use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
         use std::{net::TcpStream, sync::Arc, time::Duration};
         use tungstenite::Message;
+
+        let cancel_token = tokio_util::sync::CancellationToken::new();
 
         // helper: parse PEM cert list
         fn parse_certs(pem: &[u8]) -> Vec<CertificateDer<'static>> {
@@ -2237,7 +2304,7 @@ pub mod tests {
         }
 
         // create mTLS identity for server and client
-        let mtls = MtlsIdentity::generate(&[], &[], true);
+        let mtls = crate::MtlsIdentity::generate(&[], &[], true);
         let cert_for_server = mtls.server_cert_pem.clone();
         let key_for_server = mtls.server_key_pem.clone();
         let ca = mtls.ca_cert_pem.clone();
@@ -2258,6 +2325,7 @@ pub mod tests {
                     ADDR,
                     (None, cert_for_server.as_bytes(), key_for_server.as_bytes()),
                     cfg,
+                    cancel_token.clone(),
                 )
                 .expect("start_h2_tls (mtls)");
         });

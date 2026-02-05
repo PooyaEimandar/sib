@@ -183,6 +183,7 @@ net-h2-server = [
     "mtls",
     "rustls-pki-types",
     "socket2",
+    "tokio-util",
 ]
 net-h3-server = [
     "async-trait",
