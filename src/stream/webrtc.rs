@@ -120,17 +120,23 @@ pub struct ServerStats {
 
 struct GstStream {
     pipeline: gst::Pipeline,
-    capsfilter: gst::Element,
-    encoder: gst::Element,
+    // video-only controls
+    capsfilter: Option<gst::Element>,
+    encoder: Option<gst::Element>,
     frame_counter: Arc<AtomicU64>,
     dropped_counter: Arc<AtomicU64>,
 }
 
 struct StreamRuntime {
+    // video
     stream: GstStream,
-
     pump_stop: CancellationToken,
     pump_handle: tokio::task::JoinHandle<()>,
+
+    // audio
+    audio_stream: Option<GstStream>,
+    audio_pump_stop: Option<CancellationToken>,
+    audio_pump_handle: Option<tokio::task::JoinHandle<()>>,
 
     fps_stop: CancellationToken,
     fps_handle: tokio::task::JoinHandle<()>,
@@ -142,26 +148,35 @@ struct StreamRuntime {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Codec {
     H264,
+    Opus,
 }
 
 impl Codec {
     fn mime(self) -> &'static str {
         match self {
             Codec::H264 => "video/H264",
+            Codec::Opus => "audio/opus",
         }
     }
     fn offer_rtpmap_token(self) -> &'static str {
         match self {
             Codec::H264 => "H264/90000",
+            Codec::Opus => "opus/48000/2",
         }
     }
     fn default_pt(self) -> u8 {
-        96
+        match self {
+            Codec::H264 => 96,
+            Codec::Opus => 111,
+        }
     }
 }
 
-fn choose_codec_from_offer(_offer_sdp: &str) -> Codec {
+fn choose_video_codec_from_offer(_offer_sdp: &str) -> Codec {
     Codec::H264
+}
+fn choose_audio_codec_from_offer(_offer_sdp: &str) -> Codec {
+    Codec::Opus
 }
 
 fn find_pt_in_offer(offer_sdp: &str, rtpmap_token: &str) -> Option<u8> {
@@ -194,10 +209,16 @@ fn codec_cap(codec: Codec, fmtp_from_offer: Option<&str>) -> RTCRtpCodecCapabili
             mime_type: codec.mime().to_string(),
             clock_rate: 90000,
             channels: 0,
-            // try to match browser fmtp exactly
             sdp_fmtp_line: fmtp_from_offer
                 .unwrap_or("level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f")
                 .to_string(),
+            rtcp_feedback: vec![],
+        },
+        Codec::Opus => RTCRtpCodecCapability {
+            mime_type: codec.mime().to_string(),
+            clock_rate: 48000,
+            channels: 2,
+            sdp_fmtp_line: fmtp_from_offer.unwrap_or("").to_string(),
             rtcp_feedback: vec![],
         },
     }
@@ -361,9 +382,78 @@ fn build_pipeline_h264(
     Ok((
         GstStream {
             pipeline,
-            capsfilter,
-            encoder,
+            capsfilter: Some(capsfilter),
+            encoder: Some(encoder),
             frame_counter,
+            dropped_counter,
+        },
+        sample_rx,
+    ))
+}
+
+fn build_pipeline_opus() -> std::io::Result<(GstStream, mpsc::Receiver<gst::Sample>)> {
+    if !gst_has_element("autoaudiosrc") {
+        return Err(std::io::Error::other(
+            "Missing autoaudiosrc. Install GStreamer audio plugins.",
+        ));
+    }
+    if !gst_has_element("opusenc") {
+        return Err(std::io::Error::other(
+            "Missing opusenc. Install gst-plugins-bad (or your Opus plugin set).",
+        ));
+    }
+    if !gst_has_element("opusparse") {
+        return Err(std::io::Error::other(
+            "Missing opusparse. Install GStreamer plugins.",
+        ));
+    }
+
+    // default audio input on each OS:
+    // - macOS: auto picks system default input
+    // - Windows: auto picks WASAPI default input
+    // - Linux: auto picks Pulse/ALSA default input
+    let pipeline_desc = "autoaudiosrc !
+         audioconvert !
+         audioresample !
+         audio/x-raw,rate=48000,channels=2 !
+         opusenc bitrate=64000 frame-size=20 !
+         opusparse !
+         appsink name=asink emit-signals=true sync=false max-buffers=8 drop=true";
+
+    let pipeline = gst::parse::launch(pipeline_desc)
+        .map_err(|e| std::io::Error::other(format!("parse_launch failed: {e:?}")))?
+        .downcast::<gst::Pipeline>()
+        .map_err(|e| std::io::Error::other(format!("not a pipeline: {e:?}")))?;
+
+    let (sample_tx, sample_rx) = mpsc::channel::<gst::Sample>(32);
+
+    let dropped_counter = Arc::new(AtomicU64::new(0));
+    let dropped_counter_cb = dropped_counter.clone();
+
+    let appsink = pipeline
+        .by_name("asink")
+        .ok_or_else(|| std::io::Error::other("appsink asink not found"))?
+        .downcast::<gst_app::AppSink>()
+        .map_err(|e| std::io::Error::other(format!("asink not AppSink: {e:?}")))?;
+
+    appsink.set_callbacks(
+        gst_app::AppSinkCallbacks::builder()
+            .new_sample(move |sink| {
+                let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
+                if sample_tx.try_send(sample).is_err() {
+                    dropped_counter_cb.fetch_add(1, Ordering::Relaxed);
+                }
+                Ok(gst::FlowSuccess::Ok)
+            })
+            .build(),
+    );
+
+    Ok((
+        GstStream {
+            pipeline,
+            capsfilter: None,
+            encoder: None,
+            frame_counter: Arc::new(AtomicU64::new(0)),
             dropped_counter,
         },
         sample_rx,
@@ -388,14 +478,21 @@ fn request_keyframe(pipeline: &gst::Pipeline) {
 }
 
 fn apply_ctrl(stream: &GstStream, ctrl: &StreamCtrl) -> std::io::Result<()> {
+    let Some(capsfilter) = stream.capsfilter.as_ref() else {
+        return Ok(());
+    };
+    let Some(encoder) = stream.encoder.as_ref() else {
+        return Ok(());
+    };
+
     let caps = gst::Caps::builder("video/x-raw")
         .field("width", ctrl.width)
         .field("height", ctrl.height)
         .field("framerate", gst::Fraction::new(ctrl.fps, 1))
         .build();
 
-    stream.capsfilter.set_property("caps", &caps);
-    set_prop_best_u32(&stream.encoder, "bitrate", ctrl.bitrate_kbps as u32);
+    capsfilter.set_property("caps", &caps);
+    set_prop_best_u32(encoder, "bitrate", ctrl.bitrate_kbps as u32);
     Ok(())
 }
 
@@ -441,6 +538,48 @@ async fn pump_h264_samples(
             }
         }
     }
+    Ok(())
+}
+
+async fn pump_opus_samples(
+    mut sample_rx: mpsc::Receiver<gst::Sample>,
+    track: Arc<TrackLocalStaticSample>,
+    stop: CancellationToken,
+) -> std::io::Result<()> {
+    // opusenc frame-size=20ms
+    let dur = std::time::Duration::from_millis(20);
+
+    loop {
+        tokio::select! {
+            _ = stop.cancelled() => {
+                info!("pump_opus_samples cancelled");
+                break;
+            }
+            opt = sample_rx.recv() => {
+                let Some(sample) = opt else {
+                    info!("audio sample_rx closed");
+                    break;
+                };
+
+                let buffer = sample.buffer().ok_or_else(|| std::io::Error::other("audio: no buffer"))?;
+                let map = buffer.map_readable()
+                    .map_err(|e| std::io::Error::other(format!("audio map buffer: {e}")))?;
+                let data = map.as_slice();
+
+                let s = webrtc::media::Sample {
+                    data: Bytes::copy_from_slice(data),
+                    duration: dur,
+                    ..Default::default()
+                };
+
+                if let Err(e) = track.write_sample(&s).await {
+                    warn!("audio track.write_sample failed: {e}");
+                    break;
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -493,9 +632,11 @@ fn spawn_gst_bus_logger(
 async fn start_stream_runtime(
     ctrl: StreamCtrl,
     ctrl_state: Arc<RwLock<StreamCtrl>>,
-    track: Arc<TrackLocalStaticSample>,
+    video_track: Arc<TrackLocalStaticSample>,
+    audio_track: Arc<TrackLocalStaticSample>,
     out_tx: mpsc::Sender<WsMsg>,
 ) -> std::io::Result<StreamRuntime> {
+    // video pipeline
     let (stream, sample_rx) = build_pipeline_h264(&ctrl)?;
 
     stream
@@ -503,9 +644,18 @@ async fn start_stream_runtime(
         .set_state(gst::State::Playing)
         .map_err(|e| std::io::Error::other(format!("gst set_state(Playing) failed: {e:?}")))?;
 
+    // audio pipeline
+    let (audio_stream, audio_rx) = build_pipeline_opus()?;
+    audio_stream
+        .pipeline
+        .set_state(gst::State::Playing)
+        .map_err(|e| {
+            std::io::Error::other(format!("audio gst set_state(Playing) failed: {e:?}"))
+        })?;
+
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     request_keyframe(&stream.pipeline);
-    info!("gstreamer pipeline -> PLAYING");
+    info!("gstreamer pipelines -> PLAYING (video+audio)");
 
     // bus logger
     let bus_stop = CancellationToken::new();
@@ -535,20 +685,36 @@ async fn start_stream_runtime(
         info!("fps reporter stopped");
     });
 
-    // Pump
+    // video pump
     let pump_stop = CancellationToken::new();
     let pump_stop_child = pump_stop.child_token();
     let pump_handle = tokio::spawn(async move {
-        if let Err(e) = pump_h264_samples(sample_rx, track, ctrl_state, pump_stop_child).await {
+        if let Err(e) = pump_h264_samples(sample_rx, video_track, ctrl_state, pump_stop_child).await
+        {
             warn!("pump_h264_samples error: {e}");
         }
-        info!("pump task ended");
+        info!("video pump task ended");
+    });
+
+    // audio pump
+    let audio_pump_stop = CancellationToken::new();
+    let audio_pump_child = audio_pump_stop.child_token();
+    let audio_pump_handle = tokio::spawn(async move {
+        if let Err(e) = pump_opus_samples(audio_rx, audio_track, audio_pump_child).await {
+            warn!("pump_opus_samples error: {e}");
+        }
+        info!("audio pump task ended");
     });
 
     Ok(StreamRuntime {
         stream,
         pump_stop,
         pump_handle,
+
+        audio_stream: Some(audio_stream),
+        audio_pump_stop: Some(audio_pump_stop),
+        audio_pump_handle: Some(audio_pump_handle),
+
         fps_stop,
         fps_handle,
         bus_stop,
@@ -558,12 +724,21 @@ async fn start_stream_runtime(
 
 async fn stop_stream_runtime(rt: StreamRuntime) {
     rt.pump_stop.cancel();
+    if let Some(s) = rt.audio_pump_stop.as_ref() {
+        s.cancel();
+    }
     rt.fps_stop.cancel();
     rt.bus_stop.cancel();
 
     gst_stop_pipeline(&rt.stream.pipeline);
+    if let Some(a) = rt.audio_stream.as_ref() {
+        gst_stop_pipeline(&a.pipeline);
+    }
 
     let _ = rt.pump_handle.await;
+    if let Some(h) = rt.audio_pump_handle {
+        let _ = h.await;
+    }
     let _ = rt.fps_handle.await;
     let _ = rt.bus_handle.await;
 
@@ -652,6 +827,7 @@ struct WsCtx {
     pc: Arc<RwLock<Option<Arc<RTCPeerConnection>>>>,
     runtime: Arc<RwLock<Option<StreamRuntime>>>,
     track_slot: Arc<RwLock<Option<Arc<TrackLocalStaticSample>>>>,
+    audio_track_slot: Arc<RwLock<Option<Arc<TrackLocalStaticSample>>>>,
     pc_id_slot: Arc<RwLock<Option<u64>>>,
 
     pc_next_id: Arc<AtomicU64>,
@@ -688,32 +864,64 @@ async fn handle_ws_json(ctx: WsCtx, text: &str) -> std::io::Result<()> {
             }
             *ctx.pc_id_slot.write().await = None;
             *ctx.track_slot.write().await = None;
+            *ctx.audio_track_slot.write().await = None;
 
-            let codec = choose_codec_from_offer(&offer_sdp);
-            let negotiated_pt = find_pt_in_offer(&offer_sdp, codec.offer_rtpmap_token())
-                .unwrap_or(codec.default_pt());
-            let fmtp = find_fmtp_in_offer(&offer_sdp, negotiated_pt);
+            let video_codec = choose_video_codec_from_offer(&offer_sdp);
+            let audio_codec = choose_audio_codec_from_offer(&offer_sdp);
+
+            let video_pt = find_pt_in_offer(&offer_sdp, video_codec.offer_rtpmap_token())
+                .unwrap_or(video_codec.default_pt());
+            let audio_pt = find_pt_in_offer(&offer_sdp, audio_codec.offer_rtpmap_token())
+                .unwrap_or(audio_codec.default_pt());
+
+            let video_fmtp = find_fmtp_in_offer(&offer_sdp, video_pt);
+            let audio_fmtp = find_fmtp_in_offer(&offer_sdp, audio_pt);
 
             let _ = ctx
                 .out_tx
-                .send(WsMsg::Info(format!("Selected codec: {codec:?}")))
+                .send(WsMsg::Info(format!(
+                    "Selected video codec: {video_codec:?}"
+                )))
                 .await;
             let _ = ctx
                 .out_tx
-                .send(WsMsg::Info(format!("Negotiated PT: {negotiated_pt}")))
+                .send(WsMsg::Info(format!(
+                    "Selected audio codec: {audio_codec:?}"
+                )))
+                .await;
+            let _ = ctx
+                .out_tx
+                .send(WsMsg::Info(format!("Negotiated video PT: {video_pt}")))
+                .await;
+            let _ = ctx
+                .out_tx
+                .send(WsMsg::Info(format!("Negotiated audio PT: {audio_pt}")))
                 .await;
 
             // MediaEngine / Interceptors
             let mut me = MediaEngine::default();
+
+            // video
             me.register_codec(
                 webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecParameters {
-                    capability: codec_cap(codec, fmtp.as_deref()),
-                    payload_type: negotiated_pt,
+                    capability: codec_cap(video_codec, video_fmtp.as_deref()),
+                    payload_type: video_pt,
                     ..Default::default()
                 },
                 RTPCodecType::Video,
             )
-            .map_err(|e| std::io::Error::other(format!("register_codec: {e}")))?;
+            .map_err(|e| std::io::Error::other(format!("register video codec: {e}")))?;
+
+            // audio
+            me.register_codec(
+                webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecParameters {
+                    capability: codec_cap(audio_codec, audio_fmtp.as_deref()),
+                    payload_type: audio_pt,
+                    ..Default::default()
+                },
+                RTPCodecType::Audio,
+            )
+            .map_err(|e| std::io::Error::other(format!("register audio codec: {e}")))?;
 
             let mut registry = Registry::new();
             registry =
@@ -857,7 +1065,7 @@ async fn handle_ws_json(ctx: WsCtx, text: &str) -> std::io::Result<()> {
                 }));
             }
 
-            // DataChannel
+            // DataChannel (optional)
             {
                 let dc_next_id = ctx.dc_next_id.clone();
                 let on_dc_message = ctx.on_dc_message.clone();
@@ -914,15 +1122,24 @@ async fn handle_ws_json(ctx: WsCtx, text: &str) -> std::io::Result<()> {
                 }));
             }
 
-            // Track
-            let track = Arc::new(TrackLocalStaticSample::new(
-                codec_cap(codec, fmtp.as_deref()),
+            // Tracks (video + audio)
+            let video_track = Arc::new(TrackLocalStaticSample::new(
+                codec_cap(video_codec, video_fmtp.as_deref()),
                 "video".to_string(),
                 "desktop".to_string(),
             ));
-            peer.add_track(track.clone())
+            peer.add_track(video_track.clone())
                 .await
-                .map_err(|e| std::io::Error::other(format!("add_track: {e}")))?;
+                .map_err(|e| std::io::Error::other(format!("add video track: {e}")))?;
+
+            let audio_track = Arc::new(TrackLocalStaticSample::new(
+                codec_cap(audio_codec, audio_fmtp.as_deref()),
+                "audio".to_string(),
+                "default".to_string(),
+            ));
+            peer.add_track(audio_track.clone())
+                .await
+                .map_err(|e| std::io::Error::other(format!("add audio track: {e}")))?;
 
             // SDP
             peer.set_remote_description(
@@ -946,17 +1163,19 @@ async fn handle_ws_json(ctx: WsCtx, text: &str) -> std::io::Result<()> {
                 let _ = ctx.out_tx.send(WsMsg::Answer(local.sdp)).await;
             }
 
-            // Start runtime
+            // Start runtime (video+audio)
             let ctrl = ctx.ctrl_state.read().await.clone();
             let rt = start_stream_runtime(
                 ctrl,
                 ctx.ctrl_state.clone(),
-                track.clone(),
+                video_track.clone(),
+                audio_track.clone(),
                 ctx.out_tx.clone(),
             )
             .await?;
 
-            *ctx.track_slot.write().await = Some(track);
+            *ctx.track_slot.write().await = Some(video_track);
+            *ctx.audio_track_slot.write().await = Some(audio_track);
             *ctx.runtime.write().await = Some(rt);
             *ctx.pc.write().await = Some(peer);
 
@@ -1014,7 +1233,6 @@ async fn handle_ws_json(ctx: WsCtx, text: &str) -> std::io::Result<()> {
             let next = ctx.ctrl_state.read().await.clone();
             let need_restart = ctrl_needs_restart(&prev, &next);
 
-            // Emit StreamCtrlApplied
             if let Some(cb) = ctx.on_event.as_ref() {
                 cb(SessionEvent::StreamCtrlApplied {
                     ws_id: ctx.ws_id,
@@ -1037,7 +1255,7 @@ async fn handle_ws_json(ctx: WsCtx, text: &str) -> std::io::Result<()> {
                     stop_stream_runtime(old).await;
                 }
 
-                let Some(track) = ctx.track_slot.read().await.clone() else {
+                let Some(video_track) = ctx.track_slot.read().await.clone() else {
                     let _ = ctx
                         .out_tx
                         .send(WsMsg::Error(
@@ -1046,11 +1264,21 @@ async fn handle_ws_json(ctx: WsCtx, text: &str) -> std::io::Result<()> {
                         .await;
                     return Ok(());
                 };
+                let Some(audio_track) = ctx.audio_track_slot.read().await.clone() else {
+                    let _ = ctx
+                        .out_tx
+                        .send(WsMsg::Error(
+                            "Cannot restart: audio track not initialized. Send Offer first.".into(),
+                        ))
+                        .await;
+                    return Ok(());
+                };
 
                 let rt = start_stream_runtime(
                     next.clone(),
                     ctx.ctrl_state.clone(),
-                    track,
+                    video_track,
+                    audio_track,
                     ctx.out_tx.clone(),
                 )
                 .await?;
@@ -1183,6 +1411,8 @@ impl HAsyncService for Server {
         let runtime: Arc<RwLock<Option<StreamRuntime>>> = Arc::new(RwLock::new(None));
         let track_slot: Arc<RwLock<Option<Arc<TrackLocalStaticSample>>>> =
             Arc::new(RwLock::new(None));
+        let audio_track_slot: Arc<RwLock<Option<Arc<TrackLocalStaticSample>>>> =
+            Arc::new(RwLock::new(None));
         let ctrl_state: Arc<RwLock<StreamCtrl>> = Arc::new(RwLock::new(self.initial_ctrl.clone()));
         let pc_id_slot: Arc<RwLock<Option<u64>>> = Arc::new(RwLock::new(None));
 
@@ -1199,6 +1429,7 @@ impl HAsyncService for Server {
             pc: pc.clone(),
             runtime: runtime.clone(),
             track_slot: track_slot.clone(),
+            audio_track_slot: audio_track_slot.clone(),
             pc_id_slot: pc_id_slot.clone(),
 
             pc_next_id: self.pc_next_id.clone(),
@@ -1398,8 +1629,8 @@ pub mod tests {
 
     #[test]
     fn test_webrtc() {
-        use crate::network::http::server::tests::create_self_signed_tls_pems;
-        let (cert, key) = create_self_signed_tls_pems();
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let mtls = crate::MtlsIdentity::generate(&[], &[], false);
 
         let html_file = std::path::Path::new(file!())
             .parent()
@@ -1427,8 +1658,13 @@ pub mod tests {
         webrtc_server
             .start_h2_tls(
                 ADDRESS_PORT,
-                (None, cert.as_bytes(), key.as_bytes()),
+                (
+                    Some(mtls.ca_cert_pem.as_bytes()),
+                    mtls.server_cert_pem.as_bytes(),
+                    mtls.server_key_pem.as_bytes(),
+                ),
                 H2Config::default(),
+                cancel_token,
             )
             .expect("start_webrtc_server failed");
     }

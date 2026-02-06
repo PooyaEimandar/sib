@@ -1,560 +1,437 @@
+<!-- webrtc.html -->
 <!doctype html>
-<html lang="fa">
+<html lang="en">
 
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>Sib WebRTC Sample</title>
     <style>
-        body {
-            font-family: system-ui, sans-serif;
-            margin: 16px;
+        :root {
+            color-scheme: dark;
         }
 
-        video {
-            width: 100%;
-            max-height: 78vh;
-            background: #000;
-            border-radius: 12px;
+        body {
+            margin: 0;
+            font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;
+            background: #0b0e14;
+            color: #e6e6e6;
+        }
+
+        header {
+            padding: 12px 14px;
+            border-bottom: 1px solid #222a3a;
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        button {
+            padding: 10px 12px;
+            border-radius: 10px;
+            border: 1px solid #2a3550;
+            background: #121a2a;
+            color: #e6e6e6;
+            cursor: pointer;
+        }
+
+        button:disabled {
+            opacity: .5;
+            cursor: not-allowed;
         }
 
         .row {
             display: flex;
             gap: 12px;
+            align-items: center;
             flex-wrap: wrap;
-            margin-top: 12px;
+        }
+
+        .pill {
+            padding: 6px 10px;
+            border: 1px solid #2a3550;
+            border-radius: 999px;
+            background: #0f1524;
+            font-size: 12px;
+        }
+
+        main {
+            display: grid;
+            grid-template-columns: 1fr 360px;
+            gap: 12px;
+            padding: 12px;
+        }
+
+        @media (max-width: 980px) {
+            main {
+                grid-template-columns: 1fr;
+            }
         }
 
         .card {
+            border: 1px solid #222a3a;
+            background: #0f1524;
+            border-radius: 16px;
+            overflow: hidden;
+        }
+
+        .card h3 {
+            margin: 0;
+            padding: 10px 12px;
+            border-bottom: 1px solid #222a3a;
+            font-size: 14px;
+            color: #cbd5ff;
+        }
+
+        .card .content {
             padding: 12px;
-            border: 1px solid #ddd;
+        }
+
+        video {
+            width: 100%;
+            height: auto;
+            background: #000;
+            display: block;
+        }
+
+        input {
+            width: 100%;
+            padding: 10px 10px;
+            border-radius: 10px;
+            border: 1px solid #2a3550;
+            background: #0b1222;
+            color: #e6e6e6;
+        }
+
+        label {
+            font-size: 12px;
+            opacity: .9;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }
+
+        .log {
+            height: 220px;
+            overflow: auto;
+            background: #0b1222;
+            border: 1px solid #2a3550;
             border-radius: 12px;
-            min-width: 280px;
+            padding: 10px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono";
+            font-size: 12px;
+            line-height: 1.35;
         }
 
-        .mono {
-            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-        }
-
-        button {
-            padding: 8px 12px;
-        }
-
-        #pad {
-            user-select: none;
-            cursor: crosshair;
+        .muted {
+            opacity: .75;
+            font-size: 12px;
         }
     </style>
 </head>
 
 <body>
-    <h2>Desktop Stream</h2>
-    <video id="v" autoplay playsinline muted></video>
-
-    <div class="row">
-        <div class="card">
-            <div><b>Status</b></div>
-            <div id="status" class="mono">init...</div>
-            <div id="pcstate" class="mono">pc: -</div>
-            <div id="stats" class="mono">client: -</div>
-            <div id="serverStats" class="mono">server: -</div>
-            <div id="ctrl" class="mono">CTRL: -</div>
+    <header>
+        <div class="row">
+            <button id="btnStart">Start</button>
+            <button id="btnStop" disabled>Stop</button>
+            <span class="pill" id="wsState">WS: closed</span>
+            <span class="pill" id="pcState">PC: idle</span>
+            <span class="pill" id="iceState">ICE: idle</span>
         </div>
-
-        <div class="card" id="pad">
-            <div><b>Input</b></div>
-            <div class="mono">Click here to lock mouse (Pointer Lock)</div>
-            <div class="mono">WASD + mouse move (delta) + click</div>
-            <div class="mono" id="inps">dc: -</div>
+        <div class="row muted">
+            Tip: browsers often require a click to autoplay audio. Click <b>Start</b>.
         </div>
+    </header>
 
+    <main>
         <div class="card">
-            <div><b>Manual CTRL</b></div>
-            <div class="row">
-                <button onclick="setCtrl(1920, 1080, 60, 9000, true)">
-                    1080p60 ~9Mbps
-                </button>
-                <button onclick="setCtrl(1280, 720, 60, 6000, true)">
-                    720p60 ~6Mbps
-                </button>
-                <button onclick="setCtrl(854, 480, 60, 2500, true)">
-                    480p60 ~2.5Mbps
-                </button>
-                <button onclick="setCtrl(640, 360, 60, 1500, true)">
-                    360p60 ~1.5Mbps
-                </button>
+            <h3>Stream</h3>
+            <div class="content">
+                <video id="video" playsinline autoplay controls></video>
+                <div class="muted" style="margin-top:10px;">
+                    If you see video but no sound: ensure the server is capturing audio correctly, and your browser
+                    allows audio playback.
+                </div>
             </div>
         </div>
-    </div>
+
+        <div class="card">
+            <h3>Controls & Logs</h3>
+            <div class="content">
+                <div class="grid">
+                    <div>
+                        <label>Width</label>
+                        <input id="w" type="number" min="320" step="10" value="1280" />
+                    </div>
+                    <div>
+                        <label>Height</label>
+                        <input id="h" type="number" min="240" step="10" value="720" />
+                    </div>
+                    <div>
+                        <label>FPS</label>
+                        <input id="fps" type="number" min="5" step="1" value="60" />
+                    </div>
+                    <div>
+                        <label>Bitrate (kbps)</label>
+                        <input id="br" type="number" min="200" step="100" value="6000" />
+                    </div>
+                </div>
+
+                <div class="row" style="margin-top:10px;">
+                    <button id="btnApply" disabled>Apply CTRL</button>
+                    <span class="pill" id="stats">stats: -</span>
+                </div>
+
+                <div style="margin-top:10px;">
+                    <div class="log" id="log"></div>
+                </div>
+            </div>
+        </div>
+    </main>
 
     <script>
-        const statusEl = document.getElementById("status");
-        const pcStateEl = document.getElementById("pcstate");
-        const statsEl = document.getElementById("stats");
-        const serverStatsEl = document.getElementById("serverStats");
-        const ctrlEl = document.getElementById("ctrl");
-        const inpEl = document.getElementById("inps");
-        const pad = document.getElementById("pad");
-        const videoEl = document.getElementById("v");
+        (() => {
+            const $ = (id) => document.getElementById(id);
 
-        function logStatus(s) {
-            statusEl.textContent = s;
-            console.log(s);
-        }
-        function setPcLine() {
-            pcStateEl.textContent = `pc=${pc.connectionState} | ice=${pc.iceConnectionState} | sig=${pc.signalingState}`;
-        }
+            const btnStart = $("btnStart");
+            const btnStop = $("btnStop");
+            const btnApply = $("btnApply");
+            const elWsState = $("wsState");
+            const elPcState = $("pcState");
+            const elIceState = $("iceState");
+            const elStats = $("stats");
+            const elLog = $("log");
+            const videoEl = $("video");
 
-        const ws = new WebSocket(`wss://${location.host}`);
-        ws.onclose = (e) =>
-            logStatus(`WS closed: code=${e.code} reason=${e.reason || "-"}`);
-        ws.onerror = () => logStatus(`WS error (see console)`);
+            const inpW = $("w");
+            const inpH = $("h");
+            const inpFps = $("fps");
+            const inpBr = $("br");
 
-        const pc = new RTCPeerConnection({
-            iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
-        });
+            let ws = null;
+            let pc = null;
+            let statsTimer = null;
 
-        pc.oniceconnectionstatechange = () => {
-            setPcLine();
-            logStatus("ice=" + pc.iceConnectionState);
-        };
-        pc.onconnectionstatechange = () => {
-            setPcLine();
-            logStatus("pc=" + pc.connectionState);
-        };
-        pc.onsignalingstatechange = () => {
-            setPcLine();
-            logStatus("sig=" + pc.signalingState);
-        };
-
-        let dcInput = null;
-
-        pc.ontrack = (ev) => {
-            logStatus("ontrack: got remote stream");
-            videoEl.srcObject = ev.streams[0];
-        };
-
-        pc.onicecandidate = (ev) => {
-            if (ev.candidate) {
-                ws.send(JSON.stringify({ type: "Ice", data: ev.candidate }));
+            function log(...args) {
+                const s = args.map(a => typeof a === "string" ? a : JSON.stringify(a)).join(" ");
+                const line = `[${new Date().toLocaleTimeString()}] ${s}`;
+                elLog.textContent += line + "\n";
+                elLog.scrollTop = elLog.scrollHeight;
             }
-        };
 
-        ws.onmessage = async (msg) => {
-            const m = JSON.parse(msg.data);
-            if (m.type === "Answer") {
-                await pc.setRemoteDescription({ type: "answer", sdp: m.data });
-                logStatus("Answer set.");
-                setPcLine();
-            } else if (m.type === "Ice") {
-                await pc.addIceCandidate(m.data);
-            } else if (m.type === "ServerStats") {
-                const fps = m.data.fps;
-                serverStatsEl.textContent = `server fps: ${fps.toFixed(1)}`;
-            } else if (m.type === "Info") {
-                logStatus("server: " + m.data);
-            } else if (m.type === "Error") {
-                logStatus("ERROR: " + m.data);
+            function wsUrl() {
+                const proto = (location.protocol === "https:") ? "wss" : "ws";
+                // your server serves this html on same host/port; WS upgrade is same URL
+                return `${proto}://${location.host}${location.pathname}`;
             }
-        };
 
-        ws.onopen = async () => {
-            pc.addTransceiver("video", { direction: "recvonly" });
+            function setUiConnected(connected) {
+                btnStart.disabled = connected;
+                btnStop.disabled = !connected;
+                btnApply.disabled = !connected;
+            }
 
-            // INPUT DC
-            dcInput = pc.createDataChannel("input", {
-                ordered: false,
-                maxRetransmits: 0,
-            });
-            dcInput.onopen = () => (inpEl.textContent = "dc: open");
-            dcInput.onclose = () => (inpEl.textContent = "dc: closed");
-            dcInput.onerror = () => (inpEl.textContent = "dc: error");
+            function send(msg) {
+                if (!ws || ws.readyState !== WebSocket.OPEN) return;
+                ws.send(JSON.stringify(msg));
+            }
 
-            const offer = await pc.createOffer();
-            await pc.setLocalDescription(offer);
-
-            ws.send(JSON.stringify({ type: "Offer", data: offer.sdp }));
-            logStatus("Offer sent.");
-            setPcLine();
-
-            startStatsLoop();
-        };
-
-        // -------------------------
-        // WebRTC Stats (fixed)
-        // -------------------------
-
-        let lastCtrl = { width: 1280, height: 720, fps: 60, bitrate_kbps: 6000 };
-        let smoothRtt = null,
-            smoothLoss = null,
-            smoothJitter = null;
-
-        // last sample snapshot for UI + AutoCtrl
-        let lastAvailInBps = null;
-        let lastClientFps = null;
-
-        function ema(prev, x, a = 0.2) {
-            return prev == null ? x : prev * (1 - a) + x * a;
-        }
-
-        async function readWebRTCStats() {
-            const stats = await pc.getStats();
-
-            let rttMs = null,
-                availInBps = null;
-            let jitterMs = null,
-                fps = null,
-                loss = null;
-            let framesDecoded = null;
-
-            // 1) Find the "selectedCandidatePairId" from transport (best signal)
-            let selectedPairId = null;
-            stats.forEach((r) => {
-                if (r.type === "transport" && r.selectedCandidatePairId) {
-                    selectedPairId = r.selectedCandidatePairId;
+            function closeAll() {
+                if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
+                if (pc) {
+                    try { pc.ontrack = null; pc.onicecandidate = null; pc.onconnectionstatechange = null; pc.oniceconnectionstatechange = null; pc.close(); } catch { }
+                    pc = null;
                 }
-            });
+                if (ws) {
+                    try { ws.close(); } catch { }
+                    ws = null;
+                }
+                try { videoEl.srcObject = null; } catch { }
+                elWsState.textContent = "WS: closed";
+                elPcState.textContent = "PC: idle";
+                elIceState.textContent = "ICE: idle";
+                elStats.textContent = "stats: -";
+                setUiConnected(false);
+            }
 
-            // 2) Resolve candidate-pair by selectedPairId, fallback to heuristics
-            let bestPair = null;
+            async function start() {
+                closeAll();
 
-            stats.forEach((r) => {
-                if (r.type === "candidate-pair" && r.state === "succeeded") {
-                    if (selectedPairId && r.id === selectedPairId) {
-                        bestPair = r;
+                log("connecting WS:", wsUrl());
+                ws = new WebSocket(wsUrl());
+
+                ws.onopen = async () => {
+                    elWsState.textContent = "WS: open";
+                    setUiConnected(true);
+                    log("WS open");
+
+                    // Create PC
+                    pc = new RTCPeerConnection({
+                        iceServers: [{ urls: ["stun:stun.l.google.com:19302"] }],
+                    });
+
+                    // Prefer receiving both video+audio
+                    pc.addTransceiver("video", { direction: "recvonly" });
+                    pc.addTransceiver("audio", { direction: "recvonly" });
+
+                    pc.onconnectionstatechange = () => {
+                        elPcState.textContent = "PC: " + pc.connectionState;
+                        log("PC state:", pc.connectionState);
+                    };
+                    pc.oniceconnectionstatechange = () => {
+                        elIceState.textContent = "ICE: " + pc.iceConnectionState;
+                        log("ICE state:", pc.iceConnectionState);
+                    };
+
+                    pc.onicecandidate = (ev) => {
+                        if (!ev.candidate) return;
+                        send({
+                            type: "Ice", data: {
+                                candidate: ev.candidate.candidate,
+                                sdpMid: ev.candidate.sdpMid,
+                                sdpMLineIndex: ev.candidate.sdpMLineIndex,
+                                usernameFragment: ev.candidate.usernameFragment,
+                            }
+                        });
+                    };
+
+                    // Remote track(s)
+                    const ms = new MediaStream();
+                    pc.ontrack = (ev) => {
+                        log("ontrack:", ev.track.kind, ev.track.id);
+                        ms.addTrack(ev.track);
+                        videoEl.srcObject = ms;
+                        // try to autoplay (needs user gesture => Start click)
+                        videoEl.play().catch(() => { });
+                    };
+
+                    // Create offer
+                    const offer = await pc.createOffer();
+                    await pc.setLocalDescription(offer);
+
+                    send({ type: "Offer", data: offer.sdp });
+                    log("sent Offer");
+
+                    // Client stats reporter
+                    statsTimer = setInterval(async () => {
+                        if (!pc) return;
+                        try {
+                            const report = await pc.getStats();
+                            let rtt = null, jitter = null, loss = null, fps = null, inBps = null;
+
+                            report.forEach((s) => {
+                                // inbound-rtp for video/audio
+                                if (s.type === "inbound-rtp") {
+                                    if (typeof s.jitter === "number") jitter = s.jitter * 1000.0;
+                                    if (typeof s.packetsLost === "number" && typeof s.packetsReceived === "number") {
+                                        const total = s.packetsLost + s.packetsReceived;
+                                        if (total > 0) loss = (s.packetsLost / total) * 100.0;
+                                    }
+                                    if (s.kind === "video") {
+                                        if (typeof s.framesPerSecond === "number") fps = s.framesPerSecond;
+                                        if (typeof s.bytesReceived === "number") {
+                                            // rough, but better: use s.bitrateMean if available; otherwise skip
+                                        }
+                                    }
+                                }
+                                // candidate-pair has RTT
+                                if (s.type === "candidate-pair" && s.state === "succeeded") {
+                                    if (typeof s.currentRoundTripTime === "number") rtt = s.currentRoundTripTime * 1000.0;
+                                    if (typeof s.availableIncomingBitrate === "number") inBps = s.availableIncomingBitrate;
+                                }
+                            });
+
+                            elStats.textContent = `stats: rtt=${rtt?.toFixed?.(1) ?? "-"}ms jitter=${jitter?.toFixed?.(1) ?? "-"}ms loss=${loss?.toFixed?.(2) ?? "-"}% fps=${fps?.toFixed?.(1) ?? "-"}`;
+
+                            send({
+                                type: "ClientStats", data: {
+                                    rtt_ms: rtt,
+                                    jitter_ms: jitter,
+                                    loss: loss,
+                                    fps: fps,
+                                    available_in_bps: inBps,
+                                }
+                            });
+                        } catch (e) {
+                            // ignore
+                        }
+                    }, 1000);
+                };
+
+                ws.onmessage = async (ev) => {
+                    let msg;
+                    try { msg = JSON.parse(ev.data); } catch { return; }
+
+                    if (!msg || !msg.type) return;
+
+                    if (msg.type === "Info") {
+                        log("INFO:", msg.data);
+                        return;
                     }
-                }
-            });
-
-            if (!bestPair) {
-                // Fallback: choose something "selected/nominated/writable"
-                stats.forEach((r) => {
-                    if (r.type === "candidate-pair" && r.state === "succeeded") {
-                        const isSelected =
-                            r.nominated ||
-                            r.selected ||
-                            r.writable ||
-                            (typeof r.requestsReceived === "number" &&
-                                r.requestsReceived > 0) ||
-                            (typeof r.responsesReceived === "number" &&
-                                r.responsesReceived > 0);
-
-                        if (isSelected) bestPair = r;
+                    if (msg.type === "Error") {
+                        log("ERROR:", msg.data);
+                        return;
                     }
-                });
-            }
 
-            if (bestPair) {
-                if (typeof bestPair.currentRoundTripTime === "number")
-                    rttMs = bestPair.currentRoundTripTime * 1000;
-
-                // sometimes Chrome exposes only one side; we care about incoming
-                if (typeof bestPair.availableIncomingBitrate === "number")
-                    availInBps = bestPair.availableIncomingBitrate;
-            }
-
-            // 3) Inbound video stats
-            stats.forEach((r) => {
-                if (
-                    r.type === "inbound-rtp" &&
-                    (r.kind === "video" || r.mediaType === "video")
-                ) {
-                    if (typeof r.jitter === "number") jitterMs = r.jitter * 1000;
-                    if (typeof r.framesPerSecond === "number") fps = r.framesPerSecond;
-                    if (typeof r.framesDecoded === "number")
-                        framesDecoded = r.framesDecoded;
-
-                    if (
-                        typeof r.packetsLost === "number" &&
-                        typeof r.packetsReceived === "number"
-                    ) {
-                        const total = r.packetsLost + r.packetsReceived;
-                        loss = total > 0 ? r.packetsLost / total : 0;
+                    if (msg.type === "Answer") {
+                        log("got Answer");
+                        if (!pc) return;
+                        await pc.setRemoteDescription({ type: "answer", sdp: msg.data });
+                        return;
                     }
-                }
-            });
 
-            return { rttMs, jitterMs, loss, fps, availInBps, framesDecoded };
-        }
+                    if (msg.type === "Ice") {
+                        if (!pc) return;
+                        try {
+                            await pc.addIceCandidate({
+                                candidate: msg.data.candidate,
+                                sdpMid: msg.data.sdpMid ?? null,
+                                sdpMLineIndex: (msg.data.sdpMLineIndex ?? null),
+                                usernameFragment: msg.data.usernameFragment ?? null,
+                            });
+                        } catch (e) {
+                            log("addIceCandidate failed:", String(e));
+                        }
+                        return;
+                    }
 
-        function startStatsLoop() {
-            setInterval(async () => {
-                setPcLine();
+                    if (msg.type === "ServerStats") {
+                        log("server stats:", msg.data);
+                        return;
+                    }
+                };
 
-                if (pc.connectionState !== "connected") {
-                    statsEl.textContent = `waiting... pc=${pc.connectionState} ice=${pc.iceConnectionState}`;
-                    return;
-                }
-
-                const s = await readWebRTCStats();
-
-                // keep for AutoCtrl
-                lastAvailInBps = s.availInBps ?? lastAvailInBps;
-                lastClientFps = s.fps ?? lastClientFps;
-
-                smoothRtt =
-                    s.rttMs == null ? smoothRtt : ema(smoothRtt, s.rttMs, 0.2);
-                smoothJitter =
-                    s.jitterMs == null
-                        ? smoothJitter
-                        : ema(smoothJitter, s.jitterMs, 0.2);
-                smoothLoss =
-                    s.loss == null ? smoothLoss : ema(smoothLoss, s.loss, 0.15);
-
-                const txt = [
-                    `rtt=${smoothRtt?.toFixed(1) ?? "-"}ms`,
-                    `jitter=${smoothJitter?.toFixed(1) ?? "-"}ms`,
-                    `loss=${smoothLoss != null ? (smoothLoss * 100).toFixed(2) + "%" : "-"
-                    }`,
-                    `fps=${s.fps?.toFixed(1) ?? "-"}`,
-                    `frames=${s.framesDecoded ?? "-"}`,
-                    `in=${s.availInBps != null
-                        ? Math.round(s.availInBps / 1000) + "kbps"
-                        : "-"
-                    }`,
-                ].join(" | ");
-                statsEl.textContent = txt;
-
-                ws.send(
-                    JSON.stringify({
-                        type: "ClientStats",
-                        data: {
-                            rtt_ms: s.rttMs,
-                            jitter_ms: s.jitterMs,
-                            loss: s.loss,
-                            fps: s.fps,
-                            available_in_bps: s.availInBps,
-                        },
-                    }),
-                );
-
-                maybeAutoCtrl();
-            }, 1000);
-        }
-
-        // -------------------------
-        // Auto CTRL (stable + bitrate-aware)
-        // -------------------------
-
-        const PROFILES = [
-            { width: 640, height: 360, fps: 60, bitrate_kbps: 1500 },
-            { width: 854, height: 480, fps: 60, bitrate_kbps: 2500 },
-            { width: 1280, height: 720, fps: 60, bitrate_kbps: 6000 },
-            { width: 1920, height: 1080, fps: 60, bitrate_kbps: 9000 },
-        ];
-
-        function sameCtrl(a, b) {
-            return (
-                a.width === b.width &&
-                a.height === b.height &&
-                a.fps === b.fps &&
-                a.bitrate_kbps === b.bitrate_kbps
-            );
-        }
-
-        function idxOf(ctrl) {
-            const i = PROFILES.findIndex((p) => sameCtrl(p, ctrl));
-            return i >= 0 ? i : 0;
-        }
-
-        function linkOkFor(profile, availInBps) {
-            // برای UP باید avail داشته باشیم و headroom هم داشته باشیم
-            if (availInBps == null) return false;
-            const need = profile.bitrate_kbps * 1000;
-            return availInBps > need * 1.3; // 30% headroom
-        }
-
-        function pickByNetwork(availInBps) {
-            // بالاترین پروفایلی که لینک می‌کشه
-            if (availInBps == null) return PROFILES[0];
-            for (let i = PROFILES.length - 1; i >= 0; i--) {
-                if (linkOkFor(PROFILES[i], availInBps)) return PROFILES[i];
-            }
-            return PROFILES[0];
-        }
-
-        let lastSentAt = 0;
-        let ctrlCooldownUntil = 0;
-
-        let badStreak = 0;
-        let goodStreak = 0;
-
-        function maybeAutoCtrl() {
-            const now = performance.now();
-
-            // cooldown after any ctrl (manual or auto)
-            if (now < ctrlCooldownUntil) return;
-
-            // throttle
-            if (now - lastSentAt < 1000) return;
-
-            const rtt = smoothRtt ?? 999;
-            const loss = smoothLoss ?? 0;
-            const jitter = smoothJitter ?? 0;
-
-            const avail = lastAvailInBps; // might be null
-            const clientFps = lastClientFps; // might be null
-
-            const curIdx = idxOf(lastCtrl);
-
-            // bad if network/quality is bad OR link doesn't sustain current profile
-            const bad =
-                loss > 0.02 ||
-                jitter > 18 ||
-                rtt > 180 ||
-                (clientFps != null && clientFps < 45) ||
-                (avail != null && !linkOkFor(lastCtrl, avail));
-
-            // good only if very stable AND link has headroom for current (and later up)
-            const good =
-                loss < 0.005 &&
-                jitter < 10 &&
-                rtt < 120 &&
-                (clientFps == null || clientFps > 55) &&
-                avail != null &&
-                linkOkFor(lastCtrl, avail);
-
-            if (bad) {
-                badStreak++;
-                goodStreak = 0;
-            } else if (good) {
-                goodStreak++;
-                badStreak = 0;
-            } else {
-                // neutral -> reset streaks (prevents flip-flop)
-                badStreak = 0;
-                goodStreak = 0;
-                return;
+                ws.onclose = () => {
+                    log("WS closed");
+                    closeAll();
+                };
+                ws.onerror = () => {
+                    log("WS error");
+                };
             }
 
-            let nextIdx = curIdx;
+            function applyCtrl() {
+                const width = parseInt(inpW.value || "1280", 10);
+                const height = parseInt(inpH.value || "720", 10);
+                const fps = parseInt(inpFps.value || "60", 10);
+                const bitrate_kbps = parseInt(inpBr.value || "6000", 10);
 
-            // Down: faster, and can jump based on avail
-            if (badStreak >= 2) {
-                if (avail != null) {
-                    const target = pickByNetwork(avail);
-                    nextIdx = Math.min(curIdx, idxOf(target));
-                } else {
-                    nextIdx = Math.max(0, curIdx - 1);
-                }
+                send({ type: "Ctrl", data: { width, height, fps, bitrate_kbps } });
+                log("sent Ctrl:", { width, height, fps, bitrate_kbps });
             }
 
-            // Up: slower and only if next profile is allowed by avail
-            if (goodStreak >= 6) {
-                const candidate = Math.min(PROFILES.length - 1, curIdx + 1);
-                if (avail != null && linkOkFor(PROFILES[candidate], avail)) {
-                    nextIdx = candidate;
-                } else {
-                    nextIdx = curIdx; // no headroom => no up
-                }
-            }
+            btnStart.addEventListener("click", () => start().catch(e => log("start failed:", String(e))));
+            btnStop.addEventListener("click", () => closeAll());
+            btnApply.addEventListener("click", () => applyCtrl());
 
-            if (nextIdx === curIdx) return;
-
-            setCtrl(
-                PROFILES[nextIdx].width,
-                PROFILES[nextIdx].height,
-                PROFILES[nextIdx].fps,
-                PROFILES[nextIdx].bitrate_kbps,
-                false,
-            );
-
-            lastSentAt = now;
-            ctrlCooldownUntil = now + 5000; // 5s cooldown after auto ctrl
-            badStreak = 0;
-            goodStreak = 0;
-        }
-
-        function setCtrl(width, height, fps, bitrate_kbps, isManual = false) {
-            lastCtrl = { width, height, fps, bitrate_kbps };
-            ctrlEl.textContent = `CTRL: ${width}x${height}@${fps} bitrate=${bitrate_kbps}kbps`;
-
-            // manual should not be instantly overridden
-            const now = performance.now();
-            lastSentAt = now;
-            ctrlCooldownUntil = now + (isManual ? 8000 : 5000);
-            badStreak = 0;
-            goodStreak = 0;
-
-            ws.send(
-                JSON.stringify({
-                    type: "Ctrl",
-                    data: { width, height, fps, bitrate_kbps },
-                }),
-            );
-        }
-
-        // -------------------------
-        // Input DC
-        // -------------------------
-
-        let mouseDx = 0,
-            mouseDy = 0,
-            mouseButtons = 0;
-
-        function sendInput(obj) {
-            if (!dcInput || dcInput.readyState !== "open") return;
-            dcInput.send(JSON.stringify(obj));
-        }
-
-        setInterval(() => {
-            if (mouseDx !== 0 || mouseDy !== 0) {
-                sendInput({
-                    t: "m",
-                    dx: mouseDx,
-                    dy: mouseDy,
-                    b: mouseButtons,
-                    ts: performance.now(),
-                });
-                mouseDx = 0;
-                mouseDy = 0;
-            }
-        }, 16);
-
-        pad.addEventListener("click", async () => {
-            try {
-                await pad.requestPointerLock();
-            } catch { }
-        });
-
-        document.addEventListener("mousemove", (e) => {
-            if (document.pointerLockElement !== pad) return;
-            mouseDx += e.movementX;
-            mouseDy += e.movementY;
-        });
-
-        document.addEventListener("mousedown", (e) => {
-            mouseButtons |= 1 << e.button;
-            sendInput({
-                t: "mb",
-                b: mouseButtons,
-                d: 1,
-                btn: e.button,
-                ts: performance.now(),
-            });
-        });
-        document.addEventListener("mouseup", (e) => {
-            mouseButtons &= ~(1 << e.button);
-            sendInput({
-                t: "mb",
-                b: mouseButtons,
-                d: 0,
-                btn: e.button,
-                ts: performance.now(),
-            });
-        });
-
-        const down = new Set();
-        document.addEventListener("keydown", (e) => {
-            if (e.repeat) return;
-            if (down.has(e.code)) return;
-            down.add(e.code);
-            sendInput({ t: "k", c: e.code, d: 1, ts: performance.now() });
-        });
-        document.addEventListener("keyup", (e) => {
-            down.delete(e.code);
-            sendInput({ t: "k", c: e.code, d: 0, ts: performance.now() });
-        });
+            // clean up on unload
+            window.addEventListener("beforeunload", () => closeAll());
+        })();
     </script>
 </body>
 
