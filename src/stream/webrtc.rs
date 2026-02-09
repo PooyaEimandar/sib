@@ -412,13 +412,21 @@ fn build_pipeline_opus() -> std::io::Result<(GstStream, mpsc::Receiver<gst::Samp
     // - macOS: auto picks system default input
     // - Windows: auto picks WASAPI default input
     // - Linux: auto picks Pulse/ALSA default input
-    let pipeline_desc = "autoaudiosrc !
-         audioconvert !
-         audioresample !
-         audio/x-raw,rate=48000,channels=2 !
-         opusenc bitrate=64000 frame-size=20 !
-         opusparse !
-         appsink name=asink emit-signals=true sync=false max-buffers=8 drop=true";
+    let audio_src = if cfg!(target_os = "windows") {
+        "wasapi2src loopback=true"
+    } else {
+        "autoaudiosrc"
+    };
+
+    let pipeline_desc = format!(
+        "{audio_src} !
+        audioconvert !
+        audioresample !
+        audio/x-raw,rate=48000,channels=2 !
+        opusenc bitrate=64000 frame-size=20 !
+        opusparse !
+        appsink name=asink emit-signals=true sync=false max-buffers=8 drop=true"
+    );
 
     let pipeline = gst::parse::launch(pipeline_desc)
         .map_err(|e| std::io::Error::other(format!("parse_launch failed: {e:?}")))?
