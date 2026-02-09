@@ -60,9 +60,7 @@ impl MtlsIdentity {
             .expect("install aws-lc-rs");
         });
 
-        // --------------------------
-        // 1) Create a local Root CA
-        // --------------------------
+        // Create a local Root CA
         let mut ca_dn = DistinguishedName::new();
         ca_dn.push(DnType::CountryName, "AE");
         ca_dn.push(DnType::OrganizationName, "Sib");
@@ -84,9 +82,7 @@ impl MtlsIdentity {
         // Create an issuer so we can sign leaf certs.
         let ca_issuer = Issuer::new(ca_params, ca_key);
 
-        // --------------------------
-        // 2) Issue a Server cert
-        // --------------------------
+        // Issue a Server cert
         let mut server_dn = DistinguishedName::new();
         server_dn.push(DnType::CountryName, "AE");
         server_dn.push(DnType::OrganizationName, "Sib");
@@ -137,9 +133,7 @@ impl MtlsIdentity {
         let server_cert_pem = server_cert.pem();
         let server_key_pem = server_key.serialize_pem();
 
-        // --------------------------
-        // 3) Optionally issue Client cert
-        // --------------------------
+        // Optionally issue Client cert
         let (client_cert_pem, client_key_pem) = if issue_client_cert {
             let mut client_dn = DistinguishedName::new();
             client_dn.push(DnType::CountryName, "AE");

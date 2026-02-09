@@ -428,7 +428,7 @@ fn build_pipeline_opus() -> std::io::Result<(GstStream, mpsc::Receiver<gst::Samp
         appsink name=asink emit-signals=true sync=false max-buffers=8 drop=true"
     );
 
-    let pipeline = gst::parse::launch(pipeline_desc)
+    let pipeline = gst::parse::launch(&pipeline_desc)
         .map_err(|e| std::io::Error::other(format!("parse_launch failed: {e:?}")))?
         .downcast::<gst::Pipeline>()
         .map_err(|e| std::io::Error::other(format!("not a pipeline: {e:?}")))?;
