@@ -145,6 +145,35 @@ struct StreamRuntime {
     bus_handle: tokio::task::JoinHandle<()>,
 }
 
+impl Drop for StreamRuntime {
+    fn drop(&mut self) {
+        // If the runtime is dropped due to shutdown/abort, we still must stop pipelines,
+        // otherwise GStreamer elements can be disposed while PLAYING (crash/AV).
+
+        self.pump_stop.cancel();
+        if let Some(s) = self.audio_pump_stop.as_ref() {
+            s.cancel();
+        }
+        self.fps_stop.cancel();
+        self.bus_stop.cancel();
+
+        // Abort tasks
+        self.pump_handle.abort();
+        if let Some(h) = self.audio_pump_handle.as_ref() {
+            h.abort();
+        }
+        self.fps_handle.abort();
+        self.bus_handle.abort();
+
+        // Stop pipelines (EOS -> NULL) with timeout
+        gst_stop_pipeline_graceful(&self.stream.pipeline, 500);
+
+        if let Some(a) = self.audio_stream.as_ref() {
+            gst_stop_pipeline_graceful(&a.pipeline, 500);
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Codec {
     H264,
@@ -250,10 +279,44 @@ fn set_prop_from_str(elem: &gst::Element, prop: &str, value: &str) {
     }
 }
 
-fn gst_stop_pipeline(p: &gst::Pipeline) {
+fn gst_stop_pipeline_graceful(p: &gst::Pipeline, timeout_ms: u64) {
+    use gst::MessageView;
+    use gst::prelude::*;
+
+    // Ask nicely: EOS
+    let _ = p.send_event(gst::event::Eos::new());
+
+    // Wait for EOS/ERROR a bit (important!)
+    if let Some(bus) = p.bus() {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        while std::time::Instant::now() < deadline {
+            // small polling window
+            match bus.timed_pop(gst::ClockTime::from_mseconds(50)) {
+                None => {}
+                Some(msg) => match msg.view() {
+                    MessageView::Eos(..) => break,
+                    MessageView::Error(e) => {
+                        warn!(
+                            "gst error while stopping from {:?}: {} (debug={:?})",
+                            e.src().map(|s| s.path_string()),
+                            e.error(),
+                            e.debug()
+                        );
+                        break;
+                    }
+                    _ => {}
+                },
+            }
+        }
+    }
+
+    // Force stop: NULL
     if let Err(e) = p.set_state(gst::State::Null) {
         warn!("gst set_state(NULL) failed: {e:?}");
     }
+
+    // Wait for state settle (avoids drop-races)
+    let _ = p.state(gst::ClockTime::from_mseconds(timeout_ms));
 }
 
 fn gst_has_element(name: &str) -> bool {
@@ -730,7 +793,7 @@ async fn start_stream_runtime(
     })
 }
 
-async fn stop_stream_runtime(rt: StreamRuntime) {
+async fn stop_stream_runtime(mut rt: StreamRuntime) {
     rt.pump_stop.cancel();
     if let Some(s) = rt.audio_pump_stop.as_ref() {
         s.cancel();
@@ -738,17 +801,23 @@ async fn stop_stream_runtime(rt: StreamRuntime) {
     rt.fps_stop.cancel();
     rt.bus_stop.cancel();
 
-    gst_stop_pipeline(&rt.stream.pipeline);
+    gst_stop_pipeline_graceful(&rt.stream.pipeline, 1500);
     if let Some(a) = rt.audio_stream.as_ref() {
-        gst_stop_pipeline(&a.pipeline);
+        gst_stop_pipeline_graceful(&a.pipeline, 1500);
     }
 
-    let _ = rt.pump_handle.await;
-    if let Some(h) = rt.audio_pump_handle {
+    // Manually take ownership of handles to avoid Drop conflicts
+    let pump_handle = std::mem::replace(&mut rt.pump_handle, tokio::spawn(async {}));
+    let audio_pump_handle = rt.audio_pump_handle.take();
+    let fps_handle = std::mem::replace(&mut rt.fps_handle, tokio::spawn(async {}));
+    let bus_handle = std::mem::replace(&mut rt.bus_handle, tokio::spawn(async {}));
+
+    let _ = pump_handle.await;
+    if let Some(h) = audio_pump_handle {
         let _ = h.await;
     }
-    let _ = rt.fps_handle.await;
-    let _ = rt.bus_handle.await;
+    let _ = fps_handle.await;
+    let _ = bus_handle.await;
 
     info!("stream runtime fully stopped");
 }
