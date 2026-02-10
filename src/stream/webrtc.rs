@@ -346,55 +346,37 @@ fn build_pipeline_h264(
         )));
     }
 
-    let (enc, enc_is_amf, enc_is_nv) = if gst_has_element("nvh264enc") {
-        ("nvh264enc", false, true)
+    let (enc, enc_is_amf, enc_is_nv, enc_is_x264) = if gst_has_element("nvh264enc") {
+        ("nvh264enc", false, true, false)
     } else if gst_has_element("amfh264enc") {
-        ("amfh264enc", true, false)
+        ("amfh264enc", true, false, false)
     } else if gst_has_element("x264enc") {
-        ("x264enc", false, false)
+        ("x264enc", false, false, true)
     } else {
         return Err(std::io::Error::other(
             "No H264 encoder found (nvh264enc/amfh264enc/x264enc).",
         ));
     };
 
-    let enc_props = if enc_is_nv {
-        format!(
-            "preset=low-latency-hq tune=ultra-low-latency rc-mode=cbr zerolatency=true \
-         repeat-sequence-header=true bitrate={} gop-size={} bframes=0",
-            ctrl.bitrate_kbps, ctrl.fps
-        )
-    } else if enc_is_amf {
-        format!(
-            "usage=ultralowlatency quality-preset=speed bitrate={}",
-            ctrl.bitrate_kbps
-        )
-    } else {
-        format!(
-            "tune=zerolatency speed-preset=veryfast bitrate={} key-int-max={} bframes=0",
-            ctrl.bitrate_kbps, ctrl.fps
-        )
-    };
-
+    // keep pipeline
     let pipeline_desc = format!(
         "{src} !
-     videoconvert !
-     videorate !
-     video/x-raw,framerate={fps}/1 !
-     videoscale !
-     video/x-raw,format=NV12 !
-     capsfilter name=vcaps caps=video/x-raw,width={w},height={h},framerate={fps}/1 !
-     identity name=ftap signal-handoffs=true silent=true !
-     {enc} {enc_props} name=venc !
-     h264parse config-interval=1 !
-     video/x-h264,stream-format=byte-stream,alignment=au !
-     identity name=keyreq silent=true !
-     appsink name=hsink emit-signals=true sync=false max-buffers=2 drop=true",
+         videoconvert !
+         videorate !
+         video/x-raw,framerate={fps}/1 !
+         videoscale !
+         video/x-raw,format=NV12 !
+         capsfilter name=vcaps caps=video/x-raw,width={w},height={h},framerate={fps}/1 !
+         identity name=ftap signal-handoffs=true silent=true !
+         {enc} name=venc !
+         h264parse config-interval=1 !
+         video/x-h264,stream-format=byte-stream,alignment=au !
+         identity name=keyreq silent=true !
+         appsink name=hsink emit-signals=true sync=false max-buffers=2 drop=true",
         fps = ctrl.fps,
         w = ctrl.width,
         h = ctrl.height,
         enc = enc,
-        enc_props = enc_props
     );
 
     let pipeline = gst::parse::launch(&pipeline_desc)
@@ -433,20 +415,51 @@ fn build_pipeline_h264(
         .by_name("venc")
         .ok_or_else(|| std::io::Error::other("encoder venc not found"))?;
 
-    // Low latency settings
-    if enc_is_amf {
-        set_prop_from_str(&encoder, "usage", "lowlatency");
-        set_prop_from_str(&encoder, "rate-control", "cbr");
-        set_prop_best_u32(&encoder, "bitrate", ctrl.bitrate_kbps as u32);
-        set_prop_best_u32(&encoder, "b-frames", 0);
-        set_prop_best_u32(&encoder, "gop-size", ctrl.fps as u32);
-    } else {
-        set_prop_best_u32(&encoder, "bitrate", ctrl.bitrate_kbps as u32);
-        set_prop_from_str(&encoder, "tune", "zerolatency");
-        set_prop_from_str(&encoder, "speed-preset", "ultrafast");
-        set_prop_best_u32(&encoder, "key-int-max", ctrl.fps as u32);
-        set_prop_best_u32(&encoder, "bframes", 0);
-        set_prop_best_u32(&encoder, "byte-stream", 1);
+    // Safe setters
+    let set_str = |el: &gst::Element, k: &str, v: &str| {
+        if el.find_property(k).is_some() {
+            let _ = std::panic::catch_unwind(|| set_prop_from_str(el, k, v));
+        }
+    };
+    let set_u32 = |el: &gst::Element, k: &str, v: u32| {
+        if el.find_property(k).is_some() {
+            let _ = std::panic::catch_unwind(|| set_prop_best_u32(el, k, v));
+        }
+    };
+    let set_bool = |el: &gst::Element, k: &str, v: bool| {
+        if el.find_property(k).is_some() {
+            let _ = std::panic::catch_unwind(|| {
+                set_prop_from_str(el, k, if v { "true" } else { "false" })
+            });
+        }
+    };
+
+    // Encoder tuning
+    if enc_is_nv {
+        // nvh264enc
+        set_str(&encoder, "preset", "low-latency-hq");
+        set_str(&encoder, "tune", "ultra-low-latency"); // enum nick (valid)
+        set_str(&encoder, "rc-mode", "cbr");
+        set_bool(&encoder, "zerolatency", true);
+        set_bool(&encoder, "repeat-sequence-header", true);
+        set_u32(&encoder, "bitrate", ctrl.bitrate_kbps as u32);
+        set_u32(&encoder, "gop-size", ctrl.fps as u32);
+        set_u32(&encoder, "bframes", 0);
+    } else if enc_is_amf {
+        // amfh264enc
+        set_str(&encoder, "usage", "ultralowlatency");
+        set_str(&encoder, "rate-control", "cbr");
+        set_u32(&encoder, "bitrate", ctrl.bitrate_kbps as u32);
+        set_u32(&encoder, "b-frames", 0);
+        set_u32(&encoder, "gop-size", ctrl.fps as u32);
+    } else if enc_is_x264 {
+        // x264enc
+        set_u32(&encoder, "bitrate", ctrl.bitrate_kbps as u32);
+        set_str(&encoder, "speed-preset", "veryfast");
+        set_str(&encoder, "tune", "zerolatency"); // only if property exists; guarded above
+        set_u32(&encoder, "key-int-max", ctrl.fps as u32);
+        set_u32(&encoder, "bframes", 0);
+        set_bool(&encoder, "byte-stream", true);
     }
 
     // Server FPS counter
