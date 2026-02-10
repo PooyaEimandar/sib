@@ -346,34 +346,56 @@ fn build_pipeline_h264(
         )));
     }
 
-    let (enc, enc_is_amf) = if gst_has_element("amfh264enc") {
-        ("amfh264enc", true)
+    let (enc, enc_is_amf, enc_is_nv) = if gst_has_element("nvh264enc") {
+        ("nvh264enc", false, true)
+    } else if gst_has_element("amfh264enc") {
+        ("amfh264enc", true, false)
     } else if gst_has_element("x264enc") {
-        ("x264enc", false)
+        ("x264enc", false, false)
     } else {
         return Err(std::io::Error::other(
-            "No H264 encoder found (amfh264enc/x264enc).",
+            "No H264 encoder found (nvh264enc/amfh264enc/x264enc).",
         ));
+    };
+
+    // (x264enc on your macOS build does NOT have insert-sps-pps.)
+    let enc_props = if enc_is_nv {
+        format!(
+            "preset=low-latency-hq rc-mode=cbr zerolatency=true insert-sps-pps=true repeat-sps-pps=true bitrate={} gop-size={}",
+            ctrl.bitrate_kbps, ctrl.fps
+        )
+    } else if enc_is_amf {
+        format!(
+            "usage=ultralowlatency quality-preset=speed insert-sps-pps=true bitrate={}",
+            ctrl.bitrate_kbps
+        )
+    } else {
+        // x264enc fallback
+        format!(
+            "tune=zerolatency speed-preset=veryfast bitrate={} key-int-max={}",
+            ctrl.bitrate_kbps, ctrl.fps
+        )
     };
 
     let pipeline_desc = format!(
         "{src} !
-         videoconvert !
-         videorate !
-         video/x-raw,framerate={fps}/1 !
-         videoscale !
-         video/x-raw,format=NV12 !
-         capsfilter name=vcaps caps=video/x-raw,width={w},height={h},framerate={fps}/1 !
-         identity name=ftap signal-handoffs=true silent=true !
-         {enc} name=venc !
-         h264parse config-interval=1 !
-         video/x-h264,stream-format=byte-stream,alignment=au !
-         identity name=keyreq silent=true !
-         appsink name=hsink emit-signals=true sync=false max-buffers=2 drop=true",
+     videoconvert !
+     videorate !
+     video/x-raw,framerate={fps}/1 !
+     videoscale !
+     video/x-raw,format=NV12 !
+     capsfilter name=vcaps caps=video/x-raw,width={w},height={h},framerate={fps}/1 !
+     identity name=ftap signal-handoffs=true silent=true !
+     {enc} {enc_props} name=venc !
+     h264parse config-interval=1 !
+     video/x-h264,stream-format=byte-stream,alignment=au !
+     identity name=keyreq silent=true !
+     appsink name=hsink emit-signals=true sync=false max-buffers=2 drop=true",
         fps = ctrl.fps,
         w = ctrl.width,
         h = ctrl.height,
-        enc = enc
+        enc = enc,
+        enc_props = enc_props
     );
 
     let pipeline = gst::parse::launch(&pipeline_desc)
