@@ -549,7 +549,7 @@ fn build_encoder_pipeline_h264_from_appsrc(
      identity name=ftap signal-handoffs=true silent=true !
      {enc} name=venc !
      h264parse config-interval=1 !
-     capsfilter caps=video/x-h264,stream-format=byte-stream,alignment=au !
+     capsfilter caps=video/x-h264,stream-format=avc,alignment=au !
      identity name=keyreq silent=true !
      appsink name=hsink emit-signals=true sync=false max-buffers=2 drop=true",
         w = w,
@@ -609,14 +609,27 @@ fn build_encoder_pipeline_h264_from_appsrc(
     let kbps = ctrl.bitrate_kbps.max(1) as u32;
 
     if enc_is_nv {
+        let kbps = ctrl.bitrate_kbps.max(300) as u32;
+        let fps_u = fps as u32;
+        let gop = (fps_u.max(2) / 2).max(1); // 0.5s
+
+        // Low-latency + stable CBR
         set_str(&encoder, "preset", "low-latency-hq");
         set_str(&encoder, "tune", "ultra-low-latency");
+        // Rate control
         set_str(&encoder, "rc-mode", "cbr");
-        set_bool(&encoder, "zerolatency", true);
-        set_bool(&encoder, "repeat-sequence-header", true);
         set_u32(&encoder, "bitrate", kbps);
-        set_u32(&encoder, "gop-size", fps as u32);
+        // These exist on many builds; guarded by your find_property checks
+        set_u32(&encoder, "max-bitrate", kbps);
+        // VBV buffer: try ~1s worth (in kbps units typically for this plugin)
+        set_u32(&encoder, "vbv-buffer-size", kbps);
+        // GOP / B-frames
+        set_u32(&encoder, "gop-size", gop);
         set_u32(&encoder, "bframes", 0);
+        // Headers (good for joining mid-stream / recovery)
+        set_bool(&encoder, "repeat-sequence-header", true);
+        // Some builds have these; safe to attempt
+        set_bool(&encoder, "zerolatency", true);
     } else if enc_is_amf {
         set_str(&encoder, "usage", "ultralowlatency");
         set_str(&encoder, "rate-control", "cbr");
@@ -633,7 +646,7 @@ fn build_encoder_pipeline_h264_from_appsrc(
     }
 
     // appsink -> channel (drop when slow for realtime)
-    let (sample_tx, sample_rx) = mpsc::channel::<gst::Sample>(8);
+    let (sample_tx, sample_rx) = mpsc::channel::<gst::Sample>(32);
 
     let dropped_counter = Arc::new(AtomicU64::new(0));
     let dropped_counter_cb = dropped_counter.clone();
@@ -716,7 +729,11 @@ fn apply_ctrl(stream: &GstStream, ctrl: &StreamCtrl) -> std::io::Result<()> {
         .build();
 
     capsfilter.set_property("caps", &caps);
-    set_prop_best_u32(encoder, "bitrate", ctrl.bitrate_kbps.max(1) as u32);
+
+    let kbps = ctrl.bitrate_kbps.max(300) as u32;
+    set_prop_best_u32(encoder, "bitrate", kbps);
+    set_prop_best_u32(encoder, "max-bitrate", kbps);
+
     Ok(())
 }
 
@@ -1520,6 +1537,14 @@ async fn handle_ws_json(ctx: WsCtx, text: &str) -> std::io::Result<()> {
                 "[client-stats] rtt={:?}ms jitter={:?}ms loss={:?} fps={:?} in_bps={:?}",
                 st.rtt_ms, st.jitter_ms, st.loss, st.fps, st.available_in_bps
             );
+            if let Some(loss) = st.loss {
+                if loss > 0.02 {
+                    // 2% packet loss
+                    if let Some(rt) = ctx.runtime.read().await.as_ref() {
+                        request_keyframe(&rt.stream.pipeline);
+                    }
+                }
+            }
         }
 
         WsMsg::Ctrl {
