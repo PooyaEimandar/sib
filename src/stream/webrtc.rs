@@ -358,21 +358,23 @@ fn build_pipeline_h264(
         ));
     };
 
-    // (x264enc on your macOS build does NOT have insert-sps-pps.)
     let enc_props = if enc_is_nv {
+        // NVENC builds
         format!(
-            "preset=low-latency-hq rc-mode=cbr zerolatency=true insert-sps-pps=true repeat-sps-pps=true bitrate={} gop-size={}",
+            "preset=low-latency-hq tune=ultra-low-latency rc-mode=cbr zerolatency=true \
+         repeat-sequence-header=true bitrate={} gop-size={} bframes=0",
             ctrl.bitrate_kbps, ctrl.fps
         )
     } else if enc_is_amf {
+        // AMF builds
         format!(
-            "usage=ultralowlatency quality-preset=speed insert-sps-pps=true bitrate={}",
+            "usage=ultralowlatency quality-preset=speed bitrate={}",
             ctrl.bitrate_kbps
         )
     } else {
-        // x264enc fallback
+        // macOS builds
         format!(
-            "tune=zerolatency speed-preset=veryfast bitrate={} key-int-max={}",
+            "tune=zerolatency speed-preset=veryfast bitrate={} key-int-max={} bframes=0",
             ctrl.bitrate_kbps, ctrl.fps
         )
     };
