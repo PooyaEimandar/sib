@@ -359,20 +359,17 @@ fn build_pipeline_h264(
     };
 
     let enc_props = if enc_is_nv {
-        // NVENC builds
         format!(
             "preset=low-latency-hq tune=ultra-low-latency rc-mode=cbr zerolatency=true \
          repeat-sequence-header=true bitrate={} gop-size={} bframes=0",
             ctrl.bitrate_kbps, ctrl.fps
         )
     } else if enc_is_amf {
-        // AMF builds
         format!(
             "usage=ultralowlatency quality-preset=speed bitrate={}",
             ctrl.bitrate_kbps
         )
     } else {
-        // macOS builds
         format!(
             "tune=zerolatency speed-preset=veryfast bitrate={} key-int-max={} bframes=0",
             ctrl.bitrate_kbps, ctrl.fps
