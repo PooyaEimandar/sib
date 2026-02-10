@@ -147,6 +147,15 @@ fn active_ws() -> &'static AtomicU64 {
     ACTIVE_WS.get_or_init(|| AtomicU64::new(0))
 }
 
+#[inline]
+fn utc_ms_now() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 // GStreamer stream pieces
 struct GstStream {
     pipeline: gst::Pipeline,
@@ -545,11 +554,12 @@ fn build_encoder_pipeline_h264_from_appsrc(
         "appsrc name=rawsrc is-live=true format=time do-timestamp=true !
      videoconvert !
      videoscale !
+     videorate !
      capsfilter name=vcaps caps=video/x-raw,format=NV12,width={w},height={h},framerate={fps}/1 !
      identity name=ftap signal-handoffs=true silent=true !
      {enc} name=venc !
      h264parse config-interval=1 !
-     capsfilter caps=video/x-h264,stream-format=avc,alignment=au !
+     capsfilter caps=video/x-h264,stream-format=byte-stream,alignment=au !
      identity name=keyreq silent=true !
      appsink name=hsink emit-signals=true sync=false max-buffers=2 drop=true",
         w = w,
@@ -572,8 +582,8 @@ fn build_encoder_pipeline_h264_from_appsrc(
     // Minimal caps for appsrc input (NV12 + framerate).
     let caps_in = gst::Caps::builder("video/x-raw")
         .field("format", "NV12")
-        .field("width", 1280i32) // MUST match capture hub output
-        .field("height", 720i32) // MUST match capture hub output
+        .field("width", 1280i32)
+        .field("height", 720i32)
         .field("framerate", gst::Fraction::new(fps, 1))
         .build();
     appsrc.set_caps(Some(&caps_in));
@@ -630,6 +640,9 @@ fn build_encoder_pipeline_h264_from_appsrc(
         set_bool(&encoder, "repeat-sequence-header", true);
         // Some builds have these; safe to attempt
         set_bool(&encoder, "zerolatency", true);
+        // safe to attempt
+        set_u32(&encoder, "iframeinterval", gop);
+        set_u32(&encoder, "idrinterval", gop);
     } else if enc_is_amf {
         set_str(&encoder, "usage", "ultralowlatency");
         set_str(&encoder, "rate-control", "cbr");
@@ -970,30 +983,43 @@ async fn start_stream_runtime(
     let push_handle = tokio::spawn(async move {
         let mut pts_ns: u64 = 0;
 
-        loop {
-            tokio::select! {
-                _ = push_stop_child.cancelled() => break,
-                msg = cap_rx.recv() => {
-                    let Ok(frame) = msg else { continue };
+        let result: std::io::Result<()> = async {
+            loop {
+                tokio::select! {
+                    _ = push_stop_child.cancelled() => break,
+                    msg = cap_rx.recv() => {
+                        let Ok(frame) = msg else { continue };
 
-                    let dur_ns = (frame.dur.as_nanos() as u64).max(1);
+                        let dur_ns = (frame.dur.as_nanos() as u64).max(1);
 
-                    let mut buf = gst::Buffer::from_mut_slice(frame.data.to_vec());
-                    if let Some(bm) = buf.get_mut() {
-                        bm.set_duration(gst::ClockTime::from_nseconds(dur_ns));
-                        bm.set_pts(gst::ClockTime::from_nseconds(pts_ns));
-                        bm.set_dts(gst::ClockTime::from_nseconds(pts_ns));
-                    }
-                    pts_ns = pts_ns.saturating_add(dur_ns);
+                        let mut buf = gst::Buffer::with_size(frame.data.len())
+                            .map_err(|_| std::io::Error::other("gst::Buffer::with_size failed"))?;
 
-                    match appsrc.push_buffer(buf) {
-                        Ok(_) => {}
-                        Err(e) => {
+                        {
+                            let bm = buf.get_mut().ok_or_else(|| std::io::Error::other("buffer not writable"))?;
+                            {
+                                let mut map = bm.map_writable().map_err(|_| std::io::Error::other("map_writable failed"))?;
+                                map.as_mut_slice().copy_from_slice(&frame.data);
+                            }
+
+                            bm.set_duration(gst::ClockTime::from_nseconds(dur_ns));
+                            bm.set_pts(gst::ClockTime::from_nseconds(pts_ns));
+                            bm.set_dts(gst::ClockTime::from_nseconds(pts_ns));
+                        }
+
+                        pts_ns = pts_ns.saturating_add(dur_ns);
+
+                        if let Err(e) = appsrc.push_buffer(buf) {
                             warn!("appsrc.push_buffer failed: {e:?}");
                         }
                     }
                 }
             }
+            Ok(())
+        }.await;
+
+        if let Err(e) = result {
+            warn!("raw->appsrc push task error: {e}");
         }
         info!("raw->appsrc push task ended");
     });
@@ -1160,6 +1186,9 @@ struct WsCtx {
 
     dc_next_id: Arc<AtomicU64>,
     on_dc_message: Option<DataChannelMessageCallback>,
+
+    last_keyreq_ms: Arc<AtomicU64>,
+    last_bitrate_change_ms: Arc<AtomicU64>,
 }
 
 /// Handle websocket JSON message
@@ -1533,15 +1562,64 @@ async fn handle_ws_json(ctx: WsCtx, text: &str) -> std::io::Result<()> {
         }
 
         WsMsg::ClientStats(st) => {
-            info!(
-                "[client-stats] rtt={:?}ms jitter={:?}ms loss={:?} fps={:?} in_bps={:?}",
-                st.rtt_ms, st.jitter_ms, st.loss, st.fps, st.available_in_bps
-            );
-            if let Some(loss) = st.loss {
-                if loss > 0.02 {
-                    // 2% packet loss
+            let loss = st.loss.unwrap_or(0.0);
+            let avail = st.available_in_bps.unwrap_or(f64::INFINITY);
+
+            // Keyframe on loss (rate-limited) ----
+            if loss > 0.02 {
+                let now_ms = utc_ms_now();
+                let last = ctx.last_keyreq_ms.load(Ordering::Relaxed);
+                if now_ms.saturating_sub(last) >= 800 {
+                    ctx.last_keyreq_ms.store(now_ms, Ordering::Relaxed);
                     if let Some(rt) = ctx.runtime.read().await.as_ref() {
                         request_keyframe(&rt.stream.pipeline);
+                    }
+                }
+            }
+
+            // Bitrate adaptation on bandwidth (rate-limited) ----
+            let now_ms = utc_ms_now();
+            let last = ctx.last_bitrate_change_ms.load(Ordering::Relaxed);
+            if now_ms.saturating_sub(last) >= 1200 {
+                let target_kbps = ctx.ctrl_state.read().await.bitrate_kbps.max(300);
+                let target_bps = (target_kbps as f64) * 1000.0;
+
+                // thresholds relative to target
+                let low = avail < 1.15 * target_bps; // mild congestion
+                let critical = avail < 0.90 * target_bps; // hard congestion
+
+                if critical || low {
+                    let mut stc = ctx.ctrl_state.write().await;
+                    let old = stc.bitrate_kbps;
+                    // reduce 15% (or 25% if critical)
+                    let factor = if critical { 0.75 } else { 0.85 };
+                    stc.bitrate_kbps = ((stc.bitrate_kbps as f64) * factor).round() as i32;
+                    stc.bitrate_kbps = stc.bitrate_kbps.clamp(600, 12_000);
+
+                    let new = stc.bitrate_kbps;
+                    drop(stc);
+
+                    if new != old {
+                        ctx.last_bitrate_change_ms.store(now_ms, Ordering::Relaxed);
+                        if let Some(rt) = ctx.runtime.read().await.as_ref() {
+                            let _ = apply_ctrl(&rt.stream, &*ctx.ctrl_state.read().await);
+                            // optional: request_keyframe(&rt.stream.pipeline);  // I usually do NOT here
+                        }
+                    }
+                } else if avail > 1.6 * target_bps {
+                    // plenty of headroom -> gently increase
+                    let mut stc = ctx.ctrl_state.write().await;
+                    let old = stc.bitrate_kbps;
+                    stc.bitrate_kbps = ((stc.bitrate_kbps as f64) * 1.10).round() as i32;
+                    stc.bitrate_kbps = stc.bitrate_kbps.clamp(600, 12_000);
+                    let new = stc.bitrate_kbps;
+                    drop(stc);
+
+                    if new != old {
+                        ctx.last_bitrate_change_ms.store(now_ms, Ordering::Relaxed);
+                        if let Some(rt) = ctx.runtime.read().await.as_ref() {
+                            let _ = apply_ctrl(&rt.stream, &*ctx.ctrl_state.read().await);
+                        }
                     }
                 }
             }
@@ -1771,6 +1849,9 @@ impl HAsyncService for Server {
 
             dc_next_id: self.dc_next_id.clone(),
             on_dc_message: self.on_dc_message.clone(),
+
+            last_keyreq_ms: Arc::new(AtomicU64::new(0)),
+            last_bitrate_change_ms: Arc::new(AtomicU64::new(0)),
         };
 
         let _ = out_tx.send(WsMsg::Info("WS connected".into())).await;
