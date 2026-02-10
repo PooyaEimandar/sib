@@ -1,3 +1,8 @@
+//! - ONE shared screen capturer (raw NV12) -> broadcast hub
+//! - Per-WS-session (per-user) encoder pipeline (appsrc -> scale/caps -> H264 encoder -> appsink)
+//! - Each user can set its own bitrate/resolution/fps via Ctrl without affecting the other
+//! - When last WS disconnects, capture hub is stopped.
+
 use crate::network::http::{
     server::HFactory,
     session::{HAsyncService, Session},
@@ -11,10 +16,10 @@ use gstreamer_app as gst_app;
 use gstreamer_video as gst_video;
 use serde::{Deserialize, Serialize};
 use std::sync::{
-    Arc,
+    Arc, OnceLock,
     atomic::{AtomicU64, Ordering},
 };
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{RwLock, broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use webrtc::{
@@ -23,7 +28,7 @@ use webrtc::{
     ice_transport::ice_server::RTCIceServer,
     interceptor::registry::Registry,
     peer_connection::{RTCPeerConnection, configuration::RTCConfiguration},
-    rtp_transceiver::rtp_codec::{RTCRtpCodecCapability, RTPCodecType},
+    rtp_transceiver::rtp_codec::{RTCRtpCodecCapability, RTCRtpCodecParameters, RTPCodecType},
     track::track_local::track_local_static_sample::TrackLocalStaticSample,
 };
 
@@ -118,6 +123,31 @@ pub struct ServerStats {
     pub dropped_samples: u64,
 }
 
+// Shared capture hub - one capture pipeline (raw NV12) -> broadcast frames to all encoders
+#[derive(Clone)]
+struct CapturedFrame {
+    data: Bytes,              // raw NV12 bytes
+    dur: std::time::Duration, // frame duration (best-effort)
+}
+
+struct CaptureHub {
+    pipeline: gst::Pipeline,
+    stop: CancellationToken,
+    bus_handle: tokio::task::JoinHandle<()>,
+    tx: broadcast::Sender<CapturedFrame>,
+}
+
+static CAPTURE_HUB: OnceLock<Arc<RwLock<Option<Arc<CaptureHub>>>>> = OnceLock::new();
+static ACTIVE_WS: OnceLock<AtomicU64> = OnceLock::new();
+
+fn capture_hub_slot() -> &'static Arc<RwLock<Option<Arc<CaptureHub>>>> {
+    CAPTURE_HUB.get_or_init(|| Arc::new(RwLock::new(None)))
+}
+fn active_ws() -> &'static AtomicU64 {
+    ACTIVE_WS.get_or_init(|| AtomicU64::new(0))
+}
+
+// GStreamer stream pieces
 struct GstStream {
     pipeline: gst::Pipeline,
     // video-only controls
@@ -128,28 +158,35 @@ struct GstStream {
 }
 
 struct StreamRuntime {
-    // video
+    // video: encoder pipeline + pumps
     stream: GstStream,
+
+    // raw->appsrc pusher
+    push_stop: CancellationToken,
+    push_handle: tokio::task::JoinHandle<()>,
+
+    // h264 appsink -> webrtc track pump
     pump_stop: CancellationToken,
     pump_handle: tokio::task::JoinHandle<()>,
 
-    // audio
+    // audio (kept per-user, simplest)
     audio_stream: Option<GstStream>,
     audio_pump_stop: Option<CancellationToken>,
     audio_pump_handle: Option<tokio::task::JoinHandle<()>>,
 
+    // stats
     fps_stop: CancellationToken,
     fps_handle: tokio::task::JoinHandle<()>,
 
+    // bus logger (encoder pipeline)
     bus_stop: CancellationToken,
     bus_handle: tokio::task::JoinHandle<()>,
 }
 
 impl Drop for StreamRuntime {
     fn drop(&mut self) {
-        // If the runtime is dropped due to shutdown/abort, we still must stop pipelines,
-        // otherwise GStreamer elements can be disposed while PLAYING (crash/AV).
-
+        // cancel tasks first
+        self.push_stop.cancel();
         self.pump_stop.cancel();
         if let Some(s) = self.audio_pump_stop.as_ref() {
             s.cancel();
@@ -157,7 +194,8 @@ impl Drop for StreamRuntime {
         self.fps_stop.cancel();
         self.bus_stop.cancel();
 
-        // Abort tasks
+        // abort tasks
+        self.push_handle.abort();
         self.pump_handle.abort();
         if let Some(h) = self.audio_pump_handle.as_ref() {
             h.abort();
@@ -165,9 +203,8 @@ impl Drop for StreamRuntime {
         self.fps_handle.abort();
         self.bus_handle.abort();
 
-        // Stop pipelines (EOS -> NULL) with timeout
+        // stop pipelines
         gst_stop_pipeline_graceful(&self.stream.pipeline, 500);
-
         if let Some(a) = self.audio_stream.as_ref() {
             gst_stop_pipeline_graceful(&a.pipeline, 500);
         }
@@ -253,6 +290,7 @@ fn codec_cap(codec: Codec, fmtp_from_offer: Option<&str>) -> RTCRtpCodecCapabili
     }
 }
 
+// Property helpers
 fn prop_type(elem: &gst::Element, prop: &str) -> Option<glib::Type> {
     elem.find_property(prop).map(|ps| ps.value_type())
 }
@@ -281,16 +319,12 @@ fn set_prop_from_str(elem: &gst::Element, prop: &str, value: &str) {
 
 fn gst_stop_pipeline_graceful(p: &gst::Pipeline, timeout_ms: u64) {
     use gst::MessageView;
-    use gst::prelude::*;
 
-    // Ask nicely: EOS
     let _ = p.send_event(gst::event::Eos::new());
 
-    // Wait for EOS/ERROR a bit (important!)
     if let Some(bus) = p.bus() {
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
         while std::time::Instant::now() < deadline {
-            // small polling window
             match bus.timed_pop(gst::ClockTime::from_mseconds(50)) {
                 None => {}
                 Some(msg) => match msg.view() {
@@ -310,12 +344,9 @@ fn gst_stop_pipeline_graceful(p: &gst::Pipeline, timeout_ms: u64) {
         }
     }
 
-    // Force stop: NULL
     if let Err(e) = p.set_state(gst::State::Null) {
         warn!("gst set_state(NULL) failed: {e:?}");
     }
-
-    // Wait for state settle (avoids drop-races)
     let _ = p.state(gst::ClockTime::from_mseconds(timeout_ms));
 }
 
@@ -323,21 +354,21 @@ fn gst_has_element(name: &str) -> bool {
     gst::ElementFactory::find(name).is_some()
 }
 
-fn build_pipeline_h264(
-    ctrl: &StreamCtrl,
-) -> std::io::Result<(GstStream, mpsc::Receiver<gst::Sample>)> {
-    let src = if cfg!(target_os = "macos") {
-        "avfvideosrc capture-screen=true"
+// Capture hub pipeline (raw NV12 appsink)
+fn build_capture_pipeline_raw(fps: i32) -> std::io::Result<(gst::Pipeline, gst_app::AppSink)> {
+    let fps = fps.max(1);
+    let w = 1280;
+    let h = 720;
+
+    let (src, src_factory) = if cfg!(target_os = "macos") {
+        ("avfvideosrc capture-screen=true", "avfvideosrc")
     } else if cfg!(target_os = "windows") {
-        "d3d11screencapturesrc show-cursor=true ! d3d11convert ! d3d11download"
+        (
+            "d3d11screencapturesrc show-cursor=true ! d3d11convert ! d3d11download",
+            "d3d11screencapturesrc",
+        )
     } else {
         return Err(std::io::Error::other("Unsupported platform"));
-    };
-
-    let src_factory = if cfg!(target_os = "macos") {
-        "avfvideosrc"
-    } else {
-        "d3d11screencapturesrc"
     };
 
     if !gst_has_element(src_factory) {
@@ -346,11 +377,163 @@ fn build_pipeline_h264(
         )));
     }
 
-    let (enc, enc_is_amf, enc_is_nv, enc_is_x264) = if gst_has_element("nvh264enc") {
-        ("nvh264enc", false, true, false)
+    // Robust parse: use capsfilter + quote caps strings.
+    let desc = format!(
+        "{src} !
+     videoconvert !
+     videoscale !
+     videorate !
+     video/x-raw,format=NV12,width={w},height={h},framerate={fps}/1 !
+     appsink name=rawsink emit-signals=true sync=false max-buffers=2 drop=true",
+    );
+
+    let pipeline = gst::parse::launch(&desc)
+        .map_err(|e| std::io::Error::other(format!("parse_launch failed: {e:?}\nDESC:\n{desc}")))?
+        .downcast::<gst::Pipeline>()
+        .map_err(|e| std::io::Error::other(format!("not a pipeline: {e:?}")))?;
+
+    let appsink = pipeline
+        .by_name("rawsink")
+        .ok_or_else(|| std::io::Error::other("appsink rawsink not found"))?
+        .downcast::<gst_app::AppSink>()
+        .map_err(|e| std::io::Error::other(format!("rawsink not AppSink: {e:?}")))?;
+
+    Ok((pipeline, appsink))
+}
+
+fn spawn_gst_bus_logger(
+    pipeline: &gst::Pipeline,
+    stop: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    let bus = pipeline.bus().expect("pipeline has no bus");
+    tokio::spawn(async move {
+        use gst::MessageView;
+        loop {
+            tokio::select! {
+                _ = stop.cancelled() => break,
+                _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
+                    while let Some(msg) = bus.pop() {
+                        match msg.view() {
+                            MessageView::Error(e) => {
+                                error!(
+                                    "gst error from {:?}: {} (debug: {:?})",
+                                    e.src().map(|s| s.path_string()),
+                                    e.error(),
+                                    e.debug()
+                                );
+                            }
+                            MessageView::Warning(w) => {
+                                warn!(
+                                    "gst warning from {:?}: {} (debug: {:?})",
+                                    w.src().map(|s| s.path_string()),
+                                    w.error(),
+                                    w.debug()
+                                );
+                            }
+                            MessageView::StateChanged(s) => {
+                                if let Some(src) = msg.src()
+                                    && src.type_().name() == "GstPipeline" {
+                                    info!("gst state changed: {:?} -> {:?}", s.old(), s.current());
+                                }
+                            }
+                            MessageView::Eos(..) => warn!("gst EOS"),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        info!("gst bus logger stopped");
+    })
+}
+
+async fn ensure_capture_hub(initial_fps: i32) -> std::io::Result<Arc<CaptureHub>> {
+    let slot = capture_hub_slot();
+
+    // fast path
+    {
+        if let Some(h) = slot.read().await.as_ref() {
+            return Ok(h.clone());
+        }
+    }
+
+    let (pipeline, appsink) = build_capture_pipeline_raw(initial_fps)?;
+    let (tx, _rx) = broadcast::channel::<CapturedFrame>(16);
+
+    // appsink callback -> broadcast frames
+    {
+        let tx = tx.clone();
+        appsink.set_callbacks(
+            gst_app::AppSinkCallbacks::builder()
+                .new_sample(move |sink| {
+                    let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
+                    let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
+                    let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
+                    let data = Bytes::copy_from_slice(map.as_slice());
+
+                    let dur = buffer
+                        .duration()
+                        .map(|d| std::time::Duration::from_nanos(d.nseconds()))
+                        .filter(|d| d.as_nanos() > 0)
+                        .unwrap_or_else(|| std::time::Duration::from_millis(16));
+
+                    let _ = tx.send(CapturedFrame { data, dur });
+                    Ok(gst::FlowSuccess::Ok)
+                })
+                .build(),
+        );
+    }
+
+    pipeline
+        .set_state(gst::State::Playing)
+        .map_err(|e| std::io::Error::other(format!("capture set_state(Playing) failed: {e:?}")))?;
+
+    let stop = CancellationToken::new();
+    let bus_handle = spawn_gst_bus_logger(&pipeline, stop.child_token());
+
+    let hub = Arc::new(CaptureHub {
+        pipeline,
+        stop,
+        bus_handle,
+        tx,
+    });
+
+    *slot.write().await = Some(hub.clone());
+    info!("capture hub started");
+    Ok(hub)
+}
+
+async fn maybe_stop_capture_hub() {
+    if active_ws().load(Ordering::Relaxed) != 0 {
+        return;
+    }
+    let slot = capture_hub_slot();
+    let hub = slot.write().await.take();
+    if let Some(hub) = hub {
+        info!("stopping capture hub (no active WS)");
+        hub.stop.cancel();
+        gst_stop_pipeline_graceful(&hub.pipeline, 1500);
+        hub.bus_handle.abort();
+    }
+}
+
+// Per-user H264 encoder pipeline (appsrc -> encode -> appsink)
+fn build_encoder_pipeline_h264_from_appsrc(
+    ctrl: &StreamCtrl,
+) -> std::io::Result<(GstStream, gst_app::AppSrc, mpsc::Receiver<gst::Sample>)> {
+    let fps = ctrl.fps.max(1);
+    let w = ctrl.width.max(1);
+    let h = ctrl.height.max(1);
+
+    // encoder selection (fixed booleans; AMF branch bug fixed)
+    let (enc_name, enc_is_nv, enc_is_amf, enc_is_x264) = if gst_has_element("nvh264enc") {
+        // NVIDIA encoder
+        ("nvh264enc", true, false, false)
     } else if gst_has_element("amfh264enc") {
-        ("amfh264enc", true, false, false)
+        // AMD encoder
+        ("amfh264enc", false, true, false)
     } else if gst_has_element("x264enc") {
+        // Software x264 encoder (fallback)
         ("x264enc", false, false, true)
     } else {
         return Err(std::io::Error::other(
@@ -358,32 +541,98 @@ fn build_pipeline_h264(
         ));
     };
 
-    // keep pipeline
-    let pipeline_desc = format!(
-        "{src} !
-         videoconvert !
-         videorate !
-         video/x-raw,framerate={fps}/1 !
-         videoscale !
-         video/x-raw,format=NV12 !
-         capsfilter name=vcaps caps=video/x-raw,width={w},height={h},framerate={fps}/1 !
-         identity name=ftap signal-handoffs=true silent=true !
-         {enc} name=venc !
-         h264parse config-interval=1 !
-         video/x-h264,stream-format=byte-stream,alignment=au !
-         identity name=keyreq silent=true !
-         appsink name=hsink emit-signals=true sync=false max-buffers=2 drop=true",
-        fps = ctrl.fps,
-        w = ctrl.width,
-        h = ctrl.height,
-        enc = enc,
+    let desc = format!(
+        "appsrc name=rawsrc is-live=true format=time do-timestamp=true !
+     videoconvert !
+     videoscale !
+     capsfilter name=vcaps caps=video/x-raw,format=NV12,width={w},height={h},framerate={fps}/1 !
+     identity name=ftap signal-handoffs=true silent=true !
+     {enc} name=venc !
+     h264parse config-interval=1 !
+     capsfilter caps=video/x-h264,stream-format=byte-stream,alignment=au !
+     identity name=keyreq silent=true !
+     appsink name=hsink emit-signals=true sync=false max-buffers=2 drop=true",
+        w = w,
+        h = h,
+        fps = fps,
+        enc = enc_name,
     );
 
-    let pipeline = gst::parse::launch(&pipeline_desc)
-        .map_err(|e| std::io::Error::other(format!("parse_launch failed: {e:?}")))?
+    let pipeline = gst::parse::launch(&desc)
+        .map_err(|e| std::io::Error::other(format!("parse_launch failed: {e:?}\nDESC:\n{desc}")))?
         .downcast::<gst::Pipeline>()
         .map_err(|e| std::io::Error::other(format!("not a pipeline: {e:?}")))?;
 
+    let appsrc = pipeline
+        .by_name("rawsrc")
+        .ok_or_else(|| std::io::Error::other("appsrc rawsrc not found"))?
+        .downcast::<gst_app::AppSrc>()
+        .map_err(|e| std::io::Error::other(format!("rawsrc not AppSrc: {e:?}")))?;
+
+    // Minimal caps for appsrc input (NV12 + framerate).
+    let caps_in = gst::Caps::builder("video/x-raw")
+        .field("format", "NV12")
+        .field("width", 1280i32) // MUST match capture hub output
+        .field("height", 720i32) // MUST match capture hub output
+        .field("framerate", gst::Fraction::new(fps, 1))
+        .build();
+    appsrc.set_caps(Some(&caps_in));
+
+    let capsfilter = pipeline
+        .by_name("vcaps")
+        .ok_or_else(|| std::io::Error::other("capsfilter vcaps not found"))?;
+
+    let encoder = pipeline
+        .by_name("venc")
+        .ok_or_else(|| std::io::Error::other("encoder venc not found"))?;
+
+    // Safe setters (guard + catch_unwind)
+    let set_str = |el: &gst::Element, k: &str, v: &str| {
+        if el.find_property(k).is_some() {
+            let _ = std::panic::catch_unwind(|| set_prop_from_str(el, k, v));
+        }
+    };
+    let set_u32 = |el: &gst::Element, k: &str, v: u32| {
+        if el.find_property(k).is_some() {
+            let _ = std::panic::catch_unwind(|| set_prop_best_u32(el, k, v));
+        }
+    };
+    let set_bool = |el: &gst::Element, k: &str, v: bool| {
+        if el.find_property(k).is_some() {
+            let _ = std::panic::catch_unwind(|| {
+                set_prop_from_str(el, k, if v { "true" } else { "false" })
+            });
+        }
+    };
+
+    // Encoder tuning (low-latency defaults)
+    let kbps = ctrl.bitrate_kbps.max(1) as u32;
+
+    if enc_is_nv {
+        set_str(&encoder, "preset", "low-latency-hq");
+        set_str(&encoder, "tune", "ultra-low-latency");
+        set_str(&encoder, "rc-mode", "cbr");
+        set_bool(&encoder, "zerolatency", true);
+        set_bool(&encoder, "repeat-sequence-header", true);
+        set_u32(&encoder, "bitrate", kbps);
+        set_u32(&encoder, "gop-size", fps as u32);
+        set_u32(&encoder, "bframes", 0);
+    } else if enc_is_amf {
+        set_str(&encoder, "usage", "ultralowlatency");
+        set_str(&encoder, "rate-control", "cbr");
+        set_u32(&encoder, "bitrate", kbps);
+        set_u32(&encoder, "b-frames", 0);
+        set_u32(&encoder, "gop-size", fps as u32);
+    } else if enc_is_x264 {
+        set_u32(&encoder, "bitrate", kbps);
+        set_str(&encoder, "speed-preset", "veryfast");
+        set_str(&encoder, "tune", "zerolatency");
+        set_u32(&encoder, "key-int-max", fps as u32);
+        set_u32(&encoder, "bframes", 0);
+        set_bool(&encoder, "byte-stream", true);
+    }
+
+    // appsink -> channel (drop when slow for realtime)
     let (sample_tx, sample_rx) = mpsc::channel::<gst::Sample>(8);
 
     let dropped_counter = Arc::new(AtomicU64::new(0));
@@ -407,62 +656,7 @@ fn build_pipeline_h264(
             .build(),
     );
 
-    let capsfilter = pipeline
-        .by_name("vcaps")
-        .ok_or_else(|| std::io::Error::other("capsfilter vcaps not found"))?;
-
-    let encoder = pipeline
-        .by_name("venc")
-        .ok_or_else(|| std::io::Error::other("encoder venc not found"))?;
-
-    // Safe setters
-    let set_str = |el: &gst::Element, k: &str, v: &str| {
-        if el.find_property(k).is_some() {
-            let _ = std::panic::catch_unwind(|| set_prop_from_str(el, k, v));
-        }
-    };
-    let set_u32 = |el: &gst::Element, k: &str, v: u32| {
-        if el.find_property(k).is_some() {
-            let _ = std::panic::catch_unwind(|| set_prop_best_u32(el, k, v));
-        }
-    };
-    let set_bool = |el: &gst::Element, k: &str, v: bool| {
-        if el.find_property(k).is_some() {
-            let _ = std::panic::catch_unwind(|| {
-                set_prop_from_str(el, k, if v { "true" } else { "false" })
-            });
-        }
-    };
-
-    // Encoder tuning
-    if enc_is_nv {
-        // nvh264enc
-        set_str(&encoder, "preset", "low-latency-hq");
-        set_str(&encoder, "tune", "ultra-low-latency"); // enum nick (valid)
-        set_str(&encoder, "rc-mode", "cbr");
-        set_bool(&encoder, "zerolatency", true);
-        set_bool(&encoder, "repeat-sequence-header", true);
-        set_u32(&encoder, "bitrate", ctrl.bitrate_kbps as u32);
-        set_u32(&encoder, "gop-size", ctrl.fps as u32);
-        set_u32(&encoder, "bframes", 0);
-    } else if enc_is_amf {
-        // amfh264enc
-        set_str(&encoder, "usage", "ultralowlatency");
-        set_str(&encoder, "rate-control", "cbr");
-        set_u32(&encoder, "bitrate", ctrl.bitrate_kbps as u32);
-        set_u32(&encoder, "b-frames", 0);
-        set_u32(&encoder, "gop-size", ctrl.fps as u32);
-    } else if enc_is_x264 {
-        // x264enc
-        set_u32(&encoder, "bitrate", ctrl.bitrate_kbps as u32);
-        set_str(&encoder, "speed-preset", "veryfast");
-        set_str(&encoder, "tune", "zerolatency"); // only if property exists; guarded above
-        set_u32(&encoder, "key-int-max", ctrl.fps as u32);
-        set_u32(&encoder, "bframes", 0);
-        set_bool(&encoder, "byte-stream", true);
-    }
-
-    // Server FPS counter
+    // FPS counter (encoder pipeline)
     let ftap = pipeline
         .by_name("ftap")
         .ok_or_else(|| std::io::Error::other("identity ftap not found"))?;
@@ -484,12 +678,56 @@ fn build_pipeline_h264(
             frame_counter,
             dropped_counter,
         },
+        appsrc,
         sample_rx,
     ))
 }
 
+fn request_keyframe(pipeline: &gst::Pipeline) {
+    let Some(keyreq) = pipeline.by_name("keyreq") else {
+        return;
+    };
+    let Some(srcpad) = keyreq.static_pad("src") else {
+        return;
+    };
+
+    let ev = gst_video::UpstreamForceKeyUnitEvent::builder()
+        .all_headers(true)
+        .build();
+
+    if !srcpad.send_event(ev) {
+        warn!("request_keyframe: send_event returned false");
+    }
+}
+
+fn apply_ctrl(stream: &GstStream, ctrl: &StreamCtrl) -> std::io::Result<()> {
+    let Some(capsfilter) = stream.capsfilter.as_ref() else {
+        return Ok(());
+    };
+    let Some(encoder) = stream.encoder.as_ref() else {
+        return Ok(());
+    };
+
+    let caps = gst::Caps::builder("video/x-raw")
+        .field("format", "NV12")
+        .field("width", ctrl.width)
+        .field("height", ctrl.height)
+        .field("framerate", gst::Fraction::new(ctrl.fps.max(1), 1))
+        .build();
+
+    capsfilter.set_property("caps", &caps);
+    set_prop_best_u32(encoder, "bitrate", ctrl.bitrate_kbps.max(1) as u32);
+    Ok(())
+}
+
+// Audio pipeline (per-user, simplest)
 fn build_pipeline_opus() -> std::io::Result<(GstStream, mpsc::Receiver<gst::Sample>)> {
-    if !gst_has_element("autoaudiosrc") {
+    if cfg!(target_os = "windows") && !gst_has_element("wasapi2src") {
+        return Err(std::io::Error::other(
+            "Missing wasapi2src. Install GStreamer WASAPI plugins.",
+        ));
+    }
+    if !cfg!(target_os = "windows") && !gst_has_element("autoaudiosrc") {
         return Err(std::io::Error::other(
             "Missing autoaudiosrc. Install GStreamer audio plugins.",
         ));
@@ -505,10 +743,6 @@ fn build_pipeline_opus() -> std::io::Result<(GstStream, mpsc::Receiver<gst::Samp
         ));
     }
 
-    // default audio input on each OS:
-    // - macOS: auto picks system default input
-    // - Windows: auto picks WASAPI default input
-    // - Linux: auto picks Pulse/ALSA default input
     let audio_src = if cfg!(target_os = "windows") {
         "wasapi2src loopback=true"
     } else {
@@ -565,42 +799,7 @@ fn build_pipeline_opus() -> std::io::Result<(GstStream, mpsc::Receiver<gst::Samp
     ))
 }
 
-fn request_keyframe(pipeline: &gst::Pipeline) {
-    let Some(keyreq) = pipeline.by_name("keyreq") else {
-        return;
-    };
-    let Some(srcpad) = keyreq.static_pad("src") else {
-        return;
-    };
-
-    let ev = gst_video::UpstreamForceKeyUnitEvent::builder()
-        .all_headers(true)
-        .build();
-
-    if !srcpad.send_event(ev) {
-        warn!("request_keyframe: send_event returned false");
-    }
-}
-
-fn apply_ctrl(stream: &GstStream, ctrl: &StreamCtrl) -> std::io::Result<()> {
-    let Some(capsfilter) = stream.capsfilter.as_ref() else {
-        return Ok(());
-    };
-    let Some(encoder) = stream.encoder.as_ref() else {
-        return Ok(());
-    };
-
-    let caps = gst::Caps::builder("video/x-raw")
-        .field("width", ctrl.width)
-        .field("height", ctrl.height)
-        .field("framerate", gst::Fraction::new(ctrl.fps, 1))
-        .build();
-
-    capsfilter.set_property("caps", &caps);
-    set_prop_best_u32(encoder, "bitrate", ctrl.bitrate_kbps as u32);
-    Ok(())
-}
-
+// Pumps
 async fn pump_h264_samples(
     mut sample_rx: mpsc::Receiver<gst::Sample>,
     track: Arc<TrackLocalStaticSample>,
@@ -651,7 +850,6 @@ async fn pump_opus_samples(
     track: Arc<TrackLocalStaticSample>,
     stop: CancellationToken,
 ) -> std::io::Result<()> {
-    // opusenc frame-size=20ms
     let dur = std::time::Duration::from_millis(20);
 
     loop {
@@ -688,52 +886,7 @@ async fn pump_opus_samples(
     Ok(())
 }
 
-fn spawn_gst_bus_logger(
-    pipeline: &gst::Pipeline,
-    stop: CancellationToken,
-) -> tokio::task::JoinHandle<()> {
-    let bus = pipeline.bus().expect("pipeline has no bus");
-    tokio::spawn(async move {
-        use gst::MessageView;
-        loop {
-            tokio::select! {
-                _ = stop.cancelled() => break,
-                _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
-                    while let Some(msg) = bus.pop() {
-                        match msg.view() {
-                            MessageView::Error(e) => {
-                                error!(
-                                    "gst error from {:?}: {} (debug: {:?})",
-                                    e.src().map(|s| s.path_string()),
-                                    e.error(),
-                                    e.debug()
-                                );
-                            }
-                            MessageView::Warning(w) => {
-                                warn!(
-                                    "gst warning from {:?}: {} (debug: {:?})",
-                                    w.src().map(|s| s.path_string()),
-                                    w.error(),
-                                    w.debug()
-                                );
-                            }
-                            MessageView::StateChanged(s) => {
-                                if let Some(src) = msg.src()
-                                    && src.type_().name() == "GstPipeline" {
-                                    info!("gst state changed: {:?} -> {:?}", s.old(), s.current());
-                                }
-                            }
-                            MessageView::Eos(..) => warn!("gst EOS"),
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
-        info!("gst bus logger stopped");
-    })
-}
-
+// Start/stop runtime (per-user)
 async fn start_stream_runtime(
     ctrl: StreamCtrl,
     ctrl_state: Arc<RwLock<StreamCtrl>>,
@@ -741,15 +894,19 @@ async fn start_stream_runtime(
     audio_track: Arc<TrackLocalStaticSample>,
     out_tx: mpsc::Sender<WsMsg>,
 ) -> std::io::Result<StreamRuntime> {
-    // video pipeline
-    let (stream, sample_rx) = build_pipeline_h264(&ctrl)?;
+    // Ensure shared capture hub exists
+    let hub = ensure_capture_hub(ctrl.fps).await?;
+    let mut cap_rx = hub.tx.subscribe();
+
+    // Build per-user encoder pipeline
+    let (stream, appsrc, sample_rx) = build_encoder_pipeline_h264_from_appsrc(&ctrl)?;
 
     stream
         .pipeline
         .set_state(gst::State::Playing)
-        .map_err(|e| std::io::Error::other(format!("gst set_state(Playing) failed: {e:?}")))?;
+        .map_err(|e| std::io::Error::other(format!("encoder set_state(Playing) failed: {e:?}")))?;
 
-    // audio pipeline
+    // audio pipeline per-user
     let (audio_stream, audio_rx) = build_pipeline_opus()?;
     audio_stream
         .pipeline
@@ -758,15 +915,15 @@ async fn start_stream_runtime(
             std::io::Error::other(format!("audio gst set_state(Playing) failed: {e:?}"))
         })?;
 
+    // request a keyframe early (best-effort)
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     request_keyframe(&stream.pipeline);
-    info!("gstreamer pipelines -> PLAYING (video+audio)");
 
-    // bus logger
+    // bus logger (encoder pipeline)
     let bus_stop = CancellationToken::new();
     let bus_handle = spawn_gst_bus_logger(&stream.pipeline, bus_stop.child_token());
 
-    // FPS reporter
+    // FPS reporter (encoder pipeline)
     let fps_stop = CancellationToken::new();
     let fps_stop_child = fps_stop.child_token();
     let fc = stream.frame_counter.clone();
@@ -790,7 +947,41 @@ async fn start_stream_runtime(
         info!("fps reporter stopped");
     });
 
-    // video pump
+    // raw->appsrc pusher (per-user)
+    let push_stop = CancellationToken::new();
+    let push_stop_child = push_stop.child_token();
+    let push_handle = tokio::spawn(async move {
+        let mut pts_ns: u64 = 0;
+
+        loop {
+            tokio::select! {
+                _ = push_stop_child.cancelled() => break,
+                msg = cap_rx.recv() => {
+                    let Ok(frame) = msg else { continue };
+
+                    let dur_ns = (frame.dur.as_nanos() as u64).max(1);
+
+                    let mut buf = gst::Buffer::from_mut_slice(frame.data.to_vec());
+                    if let Some(bm) = buf.get_mut() {
+                        bm.set_duration(gst::ClockTime::from_nseconds(dur_ns));
+                        bm.set_pts(gst::ClockTime::from_nseconds(pts_ns));
+                        bm.set_dts(gst::ClockTime::from_nseconds(pts_ns));
+                    }
+                    pts_ns = pts_ns.saturating_add(dur_ns);
+
+                    match appsrc.push_buffer(buf) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            warn!("appsrc.push_buffer failed: {e:?}");
+                        }
+                    }
+                }
+            }
+        }
+        info!("raw->appsrc push task ended");
+    });
+
+    // h264 -> webrtc pump (per-user)
     let pump_stop = CancellationToken::new();
     let pump_stop_child = pump_stop.child_token();
     let pump_handle = tokio::spawn(async move {
@@ -813,6 +1004,10 @@ async fn start_stream_runtime(
 
     Ok(StreamRuntime {
         stream,
+
+        push_stop,
+        push_handle,
+
         pump_stop,
         pump_handle,
 
@@ -822,12 +1017,14 @@ async fn start_stream_runtime(
 
         fps_stop,
         fps_handle,
+
         bus_stop,
         bus_handle,
     })
 }
 
 async fn stop_stream_runtime(mut rt: StreamRuntime) {
+    rt.push_stop.cancel();
     rt.pump_stop.cancel();
     if let Some(s) = rt.audio_pump_stop.as_ref() {
         s.cancel();
@@ -840,12 +1037,14 @@ async fn stop_stream_runtime(mut rt: StreamRuntime) {
         gst_stop_pipeline_graceful(&a.pipeline, 1500);
     }
 
-    // Manually take ownership of handles to avoid Drop conflicts
+    // take ownership of handles to avoid Drop conflicts
+    let push_handle = std::mem::replace(&mut rt.push_handle, tokio::spawn(async {}));
     let pump_handle = std::mem::replace(&mut rt.pump_handle, tokio::spawn(async {}));
     let audio_pump_handle = rt.audio_pump_handle.take();
     let fps_handle = std::mem::replace(&mut rt.fps_handle, tokio::spawn(async {}));
     let bus_handle = std::mem::replace(&mut rt.bus_handle, tokio::spawn(async {}));
 
+    let _ = push_handle.await;
     let _ = pump_handle.await;
     if let Some(h) = audio_pump_handle {
         let _ = h.await;
@@ -856,9 +1055,9 @@ async fn stop_stream_runtime(mut rt: StreamRuntime) {
     info!("stream runtime fully stopped");
 }
 
+// Events / callbacks
 #[derive(Debug, Clone)]
 pub enum SessionEvent {
-    // WebSocket events
     WsAccepted {
         ws_id: u64,
     },
@@ -871,7 +1070,6 @@ pub enum SessionEvent {
         message: String,
     },
 
-    // WebRTC events
     PcCreated {
         ws_id: u64,
         pc_id: u64,
@@ -898,7 +1096,6 @@ pub enum SessionEvent {
         state: webrtc::ice_transport::ice_gatherer_state::RTCIceGathererState,
     },
 
-    // DataChannel events
     DataChannelOpen {
         ws_id: u64,
         pc_id: u64,
@@ -906,7 +1103,6 @@ pub enum SessionEvent {
         label: String,
     },
 
-    // StreamCtrl events
     StreamCtrlApplied {
         ws_id: u64,
         pc_id: Option<u64>,
@@ -927,6 +1123,7 @@ pub enum DataChannelPayload {
 pub type DataChannelMessageCallback =
     Arc<dyn Fn(u64 /*id*/, DataChannelPayload /*payload*/) + Send + Sync + 'static>;
 
+// WS Context
 #[derive(Clone)]
 struct WsCtx {
     ws_id: u64,
@@ -1012,9 +1209,8 @@ async fn handle_ws_json(ctx: WsCtx, text: &str) -> std::io::Result<()> {
             // MediaEngine / Interceptors
             let mut me = MediaEngine::default();
 
-            // video
             me.register_codec(
-                webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecParameters {
+                RTCRtpCodecParameters {
                     capability: codec_cap(video_codec, video_fmtp.as_deref()),
                     payload_type: video_pt,
                     ..Default::default()
@@ -1023,9 +1219,8 @@ async fn handle_ws_json(ctx: WsCtx, text: &str) -> std::io::Result<()> {
             )
             .map_err(|e| std::io::Error::other(format!("register video codec: {e}")))?;
 
-            // audio
             me.register_codec(
-                webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecParameters {
+                RTCRtpCodecParameters {
                     capability: codec_cap(audio_codec, audio_fmtp.as_deref()),
                     payload_type: audio_pt,
                     ..Default::default()
@@ -1062,7 +1257,6 @@ async fn handle_ws_json(ctx: WsCtx, text: &str) -> std::io::Result<()> {
                 ..Default::default()
             };
 
-            // PeerConnection
             let peer = Arc::new(
                 api.new_peer_connection(config)
                     .await
@@ -1071,6 +1265,10 @@ async fn handle_ws_json(ctx: WsCtx, text: &str) -> std::io::Result<()> {
 
             let pc_id = ctx.pc_next_id.fetch_add(1, Ordering::Relaxed);
             *ctx.pc_id_slot.write().await = Some(pc_id);
+
+            // IMPORTANT FIX:
+            // Set ctx.pc immediately so early ICE candidates from the client won't hit "peer not ready".
+            *ctx.pc.write().await = Some(peer.clone());
 
             if let Some(cb) = ctx.on_event.as_ref() {
                 cb(SessionEvent::PcCreated {
@@ -1176,7 +1374,7 @@ async fn handle_ws_json(ctx: WsCtx, text: &str) -> std::io::Result<()> {
                 }));
             }
 
-            // DataChannel (optional)
+            // DataChannel
             {
                 let dc_next_id = ctx.dc_next_id.clone();
                 let on_dc_message = ctx.on_dc_message.clone();
@@ -1274,10 +1472,10 @@ async fn handle_ws_json(ctx: WsCtx, text: &str) -> std::io::Result<()> {
                 let _ = ctx.out_tx.send(WsMsg::Answer(local.sdp)).await;
             }
 
-            // Start runtime (video+audio)
-            let ctrl = ctx.ctrl_state.read().await.clone();
+            // Start per-user runtime (encodes from shared capture)
+            let ctrl_now = ctx.ctrl_state.read().await.clone();
             let rt = start_stream_runtime(
-                ctrl,
+                ctrl_now,
                 ctx.ctrl_state.clone(),
                 video_track.clone(),
                 audio_track.clone(),
@@ -1288,7 +1486,6 @@ async fn handle_ws_json(ctx: WsCtx, text: &str) -> std::io::Result<()> {
             *ctx.track_slot.write().await = Some(video_track);
             *ctx.audio_track_slot.write().await = Some(audio_track);
             *ctx.runtime.write().await = Some(rt);
-            *ctx.pc.write().await = Some(peer);
 
             let _ = ctx
                 .out_tx
@@ -1434,7 +1631,7 @@ async fn handle_ws_json(ctx: WsCtx, text: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Public service
+// Public service
 pub struct Server {
     cfg: ServerConfig,
     initial_ctrl: StreamCtrl,
@@ -1511,6 +1708,8 @@ impl HAsyncService for Server {
 
         // WS session state
         let ws_id = self.ws_next_id.fetch_add(1, Ordering::Relaxed);
+        active_ws().fetch_add(1, Ordering::Relaxed);
+
         let on_event = self.on_event.clone();
         if let Some(cb) = on_event.as_ref() {
             cb(SessionEvent::WsAccepted { ws_id });
@@ -1529,7 +1728,6 @@ impl HAsyncService for Server {
 
         let cfg = Arc::new(self.cfg.clone());
 
-        // websocket context
         let ctx = WsCtx {
             ws_id,
             cfg,
@@ -1594,12 +1792,10 @@ impl HAsyncService for Server {
                                 continue;
                             }
 
-                            // parity with Warp: ignore non-text by default
                             if matches!(code, OpCode::Binary) {
                                 continue;
                             }
 
-                            // single-frame text JSON
                             let text = match std::str::from_utf8(payload.as_ref()) {
                                 Ok(s) => s,
                                 Err(_) => {
@@ -1645,8 +1841,6 @@ impl HAsyncService for Server {
                                     if let Err(e) = handle_ws_json(ctx.clone(), text).await {
                                         let _ = out_tx.send(WsMsg::Error(format!("{e}"))).await;
                                     }
-                                } else {
-                                    // binary fragmented: parity with Warp (ignore)
                                 }
 
                                 frag_buf.clear();
@@ -1663,7 +1857,6 @@ impl HAsyncService for Server {
                     let bytes = match serde_json::to_vec(&m) {
                         Ok(v) => v,
                         Err(e) => {
-                            // best-effort fallback JSON
                             format!(r#"{{"type":"Error","data":"json encode failed: {e}"}}"#).into_bytes()
                         }
                     };
@@ -1697,16 +1890,17 @@ impl HAsyncService for Server {
                     });
                 }
             }
-
             if let Err(e) = peer.close().await {
                 warn!("peer.close failed: {e}");
             }
         }
 
-        Err(std::io::Error::new(
-            std::io::ErrorKind::ConnectionAborted,
-            "ws done",
-        ))
+        // Decrement active ws and maybe stop capture hub
+        if active_ws().fetch_sub(1, Ordering::Relaxed) == 1 {
+            maybe_stop_capture_hub().await;
+        }
+
+        Ok(())
     }
 }
 
