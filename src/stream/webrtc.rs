@@ -123,11 +123,12 @@ pub struct ServerStats {
     pub dropped_samples: u64,
 }
 
-// Shared capture hub - one capture pipeline (raw NV12) -> broadcast frames to all encoders
+// Shared capture hub
+// one capture pipeline (raw NV12) -> broadcast frames to all encoders
 #[derive(Clone)]
 struct CapturedFrame {
     data: Bytes,              // raw NV12 bytes
-    dur: std::time::Duration, // frame duration (best-effort)
+    dur: std::time::Duration, // frame duration
 }
 
 struct CaptureHub {
@@ -135,6 +136,14 @@ struct CaptureHub {
     stop: CancellationToken,
     bus_handle: tokio::task::JoinHandle<()>,
     tx: broadcast::Sender<CapturedFrame>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RtmpBroadcaster {
+    pub ingest_url: String,
+    pub stream_key: String,
+    pub bitrate_kbps: Option<u32>,
+    pub gop_seconds: Option<u32>,
 }
 
 static CAPTURE_HUB: OnceLock<Arc<RwLock<Option<Arc<CaptureHub>>>>> = OnceLock::new();
@@ -304,19 +313,20 @@ fn prop_type(elem: &gst::Element, prop: &str) -> Option<glib::Type> {
     elem.find_property(prop).map(|ps| ps.value_type())
 }
 
-fn set_prop_best_u32(elem: &gst::Element, prop: &str, value: u32) {
-    let Some(t) = prop_type(elem, prop) else {
+fn set_prop_int(elem: &gst::Element, prop: &str, value: u64) {
+    let Some(ps) = elem.find_property(prop) else {
         return;
     };
+    let t = ps.value_type();
 
-    if t == u32::static_type() {
+    if t == u64::static_type() {
         elem.set_property(prop, value);
-    } else if t == i32::static_type() {
-        elem.set_property(prop, value as i32);
-    } else if t == u64::static_type() {
-        elem.set_property(prop, value as u64);
     } else if t == i64::static_type() {
         elem.set_property(prop, value as i64);
+    } else if t == u32::static_type() {
+        elem.set_property(prop, value as u32);
+    } else if t == i32::static_type() {
+        elem.set_property(prop, value as i32);
     }
 }
 
@@ -361,53 +371,6 @@ fn gst_stop_pipeline_graceful(p: &gst::Pipeline, timeout_ms: u64) {
 
 fn gst_has_element(name: &str) -> bool {
     gst::ElementFactory::find(name).is_some()
-}
-
-// Capture hub pipeline (raw NV12 appsink)
-fn build_capture_pipeline_raw(fps: i32) -> std::io::Result<(gst::Pipeline, gst_app::AppSink)> {
-    let fps = fps.max(1);
-    let w = 1280;
-    let h = 720;
-
-    let (src, src_factory) = if cfg!(target_os = "macos") {
-        ("avfvideosrc capture-screen=true", "avfvideosrc")
-    } else if cfg!(target_os = "windows") {
-        (
-            "d3d11screencapturesrc show-cursor=true ! d3d11convert ! d3d11download",
-            "d3d11screencapturesrc",
-        )
-    } else {
-        return Err(std::io::Error::other("Unsupported platform"));
-    };
-
-    if !gst_has_element(src_factory) {
-        return Err(std::io::Error::other(format!(
-            "Missing {src_factory}. Install GStreamer."
-        )));
-    }
-
-    // Robust parse: use capsfilter + quote caps strings.
-    let desc = format!(
-        "{src} !
-     videoconvert !
-     videoscale !
-     videorate !
-     video/x-raw,format=NV12,width={w},height={h},framerate={fps}/1 !
-     appsink name=rawsink emit-signals=true sync=false max-buffers=2 drop=true",
-    );
-
-    let pipeline = gst::parse::launch(&desc)
-        .map_err(|e| std::io::Error::other(format!("parse_launch failed: {e:?}\nDESC:\n{desc}")))?
-        .downcast::<gst::Pipeline>()
-        .map_err(|e| std::io::Error::other(format!("not a pipeline: {e:?}")))?;
-
-    let appsink = pipeline
-        .by_name("rawsink")
-        .ok_or_else(|| std::io::Error::other("appsink rawsink not found"))?
-        .downcast::<gst_app::AppSink>()
-        .map_err(|e| std::io::Error::other(format!("rawsink not AppSink: {e:?}")))?;
-
-    Ok((pipeline, appsink))
 }
 
 fn spawn_gst_bus_logger(
@@ -456,7 +419,204 @@ fn spawn_gst_bus_logger(
     })
 }
 
-async fn ensure_capture_hub(initial_fps: i32) -> std::io::Result<Arc<CaptureHub>> {
+fn build_capture_pipeline(
+    fps: i32,
+    rtmp: Option<Arc<RtmpBroadcaster>>,
+) -> std::io::Result<(gst::Pipeline, gst_app::AppSink)> {
+    let fps = fps.max(1);
+    let w = 1280;
+    let h = 720;
+
+    let (src, src_factory) = if cfg!(target_os = "macos") {
+        ("avfvideosrc capture-screen=true", "avfvideosrc")
+    } else if cfg!(target_os = "windows") {
+        (
+            "d3d11screencapturesrc show-cursor=true ! d3d11convert ! d3d11download",
+            "d3d11screencapturesrc",
+        )
+    } else {
+        return Err(std::io::Error::other("Unsupported platform"));
+    };
+
+    if !gst_has_element(src_factory) {
+        return Err(std::io::Error::other(format!(
+            "Missing {src_factory}. Install GStreamer."
+        )));
+    }
+
+    // pick an H264 encoder for RTMP branch
+    let (enc_name, enc_is_nv, enc_is_amf, enc_is_x264) = if gst_has_element("nvh264enc") {
+        ("nvh264enc", true, false, false)
+    } else if gst_has_element("amfh264enc") {
+        ("amfh264enc", false, true, false)
+    } else if gst_has_element("x264enc") {
+        ("x264enc", false, false, true)
+    } else {
+        ("", false, false, false)
+    };
+
+    // RTMP branch (video + AAC audio)
+    let rtmp_branch = if let Some(r) = rtmp {
+        if enc_name.is_empty()
+            || !gst_has_element("h264parse")
+            || !gst_has_element("flvmux")
+            || !gst_has_element("rtmpsink")
+        {
+            warn!("RTMP requested but missing encoder/parse/mux/sink; RTMP disabled.");
+            "".to_string()
+        } else {
+            let kbps = r.bitrate_kbps.unwrap_or(4500).max(300);
+            let gop_s = r.gop_seconds.unwrap_or(2).max(1);
+            let gop = (fps as u32).saturating_mul(gop_s).max(1); // seconds -> frames
+            let location = format!(
+                "{}/{} live=1",
+                r.ingest_url.trim_end_matches('/'),
+                r.stream_key
+            );
+
+            let enc_props = if enc_is_nv {
+                format!(
+                    "{enc} name=rtmpenc rc-mode=cbr bitrate={kbps} bframes=0 gop-size={gop} preset=low-latency-hq tune=ultra-low-latency",
+                    enc = enc_name
+                )
+            } else if enc_is_amf {
+                format!(
+                    "{enc} name=rtmpenc usage=ultralowlatency rate-control=cbr bitrate={kbps} b-frames=0 gop-size={gop}",
+                    enc = enc_name
+                )
+            } else if enc_is_x264 {
+                // No byte-stream=true for RTMP/FLV, flvmux wants AVC
+                format!(
+                    "{enc} name=rtmpenc bitrate={kbps} speed-preset=veryfast tune=zerolatency key-int-max={gop} bframes=0",
+                    enc = enc_name
+                )
+            } else {
+                format!("{enc} name=rtmpenc", enc = enc_name)
+            };
+
+            // AAC encoder selection
+            let aac_enc = if gst_has_element("fdkaacenc") {
+                Some("fdkaacenc bitrate=128000")
+            } else if gst_has_element("faac") {
+                Some("faac bitrate=128000")
+            } else if gst_has_element("voaacenc") {
+                Some("voaacenc bitrate=128000")
+            } else if gst_has_element("avenc_aac") {
+                Some("avenc_aac bitrate=128000")
+            } else {
+                None
+            };
+
+            let has_aacparse = gst_has_element("aacparse");
+
+            let (audio_src, has_audio_src) = if cfg!(target_os = "windows") {
+                ("wasapi2src loopback=true", gst_has_element("wasapi2src"))
+            } else {
+                ("autoaudiosrc", gst_has_element("autoaudiosrc"))
+            };
+
+            // If no real audio, send silence (some players choke on no audio track)
+            let audio_branch = if let (Some(aac_enc), true) = (aac_enc, has_aacparse) {
+                if has_audio_src {
+                    format!(
+                        r#"
+                    {audio_src} !
+                        queue leaky=downstream max-size-buffers=8 max-size-bytes=0 max-size-time=0 !
+                        audioconvert !
+                        audioresample !
+                        audio/x-raw,rate=48000,channels=2 !
+                        {aac_enc} !
+                        aacparse !
+                        mux.
+                    "#,
+                        audio_src = audio_src,
+                        aac_enc = aac_enc
+                    )
+                } else {
+                    format!(
+                        r#"
+                    audiotestsrc wave=silence is-live=true !
+                        queue leaky=downstream max-size-buffers=8 max-size-bytes=0 max-size-time=0 !
+                        audioconvert !
+                        audioresample !
+                        audio/x-raw,rate=48000,channels=2 !
+                        {aac_enc} !
+                        aacparse !
+                        mux.
+                    "#,
+                        aac_enc = aac_enc
+                    )
+                }
+            } else {
+                warn!(
+                    "RTMP: No AAC encoder/aacparse available (fdkaacenc/faac/voaacenc/avenc_aac + aacparse). Telegram may not show the stream."
+                );
+                "".to_string()
+            };
+
+            // tighten queues for low latency
+            format!(
+                r#"
+            t. ! queue leaky=downstream max-size-buffers=2 max-size-bytes=0 max-size-time=0 !
+                videoconvert !
+                {enc_props} !
+                h264parse config-interval=1 !
+                video/x-h264,stream-format=avc,alignment=au !
+                mux.
+
+            {audio_branch}
+
+            flvmux name=mux streamable=true !
+                rtmpsink location="{location}" sync=false async=false
+            "#
+            )
+        }
+    } else {
+        "".to_string()
+    };
+
+    // LOW-LATENCY CAPTURE:
+    // - videorate drop-only=true (never duplicates frames)
+    // - queue right after tee with max-size-buffers=1
+    // - appsink max-buffers=1 drop=true sync=false
+    let desc = format!(
+        r#"{src} !
+            videoconvert !
+            videoscale !
+            videorate drop-only=true !
+            video/x-raw,format=NV12,width={w},height={h},framerate={fps}/1 !
+            tee name=t
+
+            t. ! queue leaky=downstream max-size-buffers=1 max-size-bytes=0 max-size-time=0 !
+                appsink name=rawsink emit-signals=true sync=false max-buffers=1 drop=true
+
+            {rtmp_branch}
+        "#,
+        src = src,
+        w = w,
+        h = h,
+        fps = fps,
+        rtmp_branch = rtmp_branch,
+    );
+
+    let pipeline = gst::parse::launch(&desc)
+        .map_err(|e| std::io::Error::other(format!("parse_launch failed: {e:?}\nDESC:\n{desc}")))?
+        .downcast::<gst::Pipeline>()
+        .map_err(|e| std::io::Error::other(format!("not a pipeline: {e:?}")))?;
+
+    let appsink = pipeline
+        .by_name("rawsink")
+        .ok_or_else(|| std::io::Error::other("appsink rawsink not found"))?
+        .downcast::<gst_app::AppSink>()
+        .map_err(|e| std::io::Error::other(format!("rawsink not AppSink: {e:?}")))?;
+
+    Ok((pipeline, appsink))
+}
+
+async fn ensure_capture_hub(
+    initial_fps: i32,
+    rtmp: Option<Arc<RtmpBroadcaster>>,
+) -> std::io::Result<Arc<CaptureHub>> {
     let slot = capture_hub_slot();
 
     // fast path
@@ -466,7 +626,7 @@ async fn ensure_capture_hub(initial_fps: i32) -> std::io::Result<Arc<CaptureHub>
         }
     }
 
-    let (pipeline, appsink) = build_capture_pipeline_raw(initial_fps)?;
+    let (pipeline, appsink) = build_capture_pipeline(initial_fps, rtmp)?;
     let (tx, _rx) = broadcast::channel::<CapturedFrame>(16);
 
     // appsink callback -> broadcast frames
@@ -534,34 +694,38 @@ fn build_encoder_pipeline_h264_from_appsrc(
     let w = ctrl.width.max(1);
     let h = ctrl.height.max(1);
 
-    // encoder selection (fixed booleans; AMF branch bug fixed)
-    let (enc_name, enc_is_nv, enc_is_amf, enc_is_x264) = if gst_has_element("nvh264enc") {
-        // NVIDIA encoder
-        ("nvh264enc", true, false, false)
-    } else if gst_has_element("amfh264enc") {
-        // AMD encoder
-        ("amfh264enc", false, true, false)
-    } else if gst_has_element("x264enc") {
-        // Software x264 encoder (fallback)
-        ("x264enc", false, false, true)
-    } else {
-        return Err(std::io::Error::other(
-            "No H264 encoder found (nvh264enc/amfh264enc/x264enc).",
-        ));
-    };
+    // Encoder selection (macOS VideoToolbox first; keep fallbacks)
+    let (enc_name, enc_is_vt, enc_is_nv, enc_is_amf, enc_is_x264) =
+        if cfg!(target_os = "macos") && gst_has_element("vtenc_h264") {
+            ("vtenc_h264", true, false, false, false)
+        } else if gst_has_element("nvh264enc") {
+            ("nvh264enc", false, true, false, false)
+        } else if gst_has_element("amfh264enc") {
+            ("amfh264enc", false, false, true, false)
+        } else if gst_has_element("x264enc") {
+            ("x264enc", false, false, false, true)
+        } else {
+            return Err(std::io::Error::other(
+                "No H264 encoder found (vtenc_h264/nvh264enc/amfh264enc/x264enc).",
+            ));
+        };
 
+    // LOW-LATENCY ENCODER PIPELINE:
+    // - appsrc block=false (never stalls push loop)
+    // - videorate drop-only=true (never duplicates)
+    // - appsink max-buffers=1 drop=true sync=false
     let desc = format!(
-        "appsrc name=rawsrc is-live=true format=time do-timestamp=true !
-     videoconvert !
-     videoscale !
-     videorate !
-     capsfilter name=vcaps caps=video/x-raw,format=NV12,width={w},height={h},framerate={fps}/1 !
-     identity name=ftap signal-handoffs=true silent=true !
-     {enc} name=venc !
-     h264parse config-interval=1 !
-     capsfilter caps=video/x-h264,stream-format=byte-stream,alignment=au !
-     identity name=keyreq silent=true !
-     appsink name=hsink emit-signals=true sync=false max-buffers=2 drop=true",
+        "appsrc name=rawsrc is-live=true format=time do-timestamp=true block=false max-bytes=0 !
+         videoconvert !
+         videoscale !
+         videorate drop-only=true !
+         capsfilter name=vcaps caps=video/x-raw,format=NV12,width={w},height={h},framerate={fps}/1 !
+         identity name=ftap signal-handoffs=true silent=true !
+         {enc} name=venc !
+         h264parse config-interval=1 !
+         capsfilter caps=video/x-h264,stream-format=byte-stream,alignment=au !
+         identity name=keyreq silent=true !
+         appsink name=hsink emit-signals=true sync=false max-buffers=1 drop=true",
         w = w,
         h = h,
         fps = fps,
@@ -579,7 +743,7 @@ fn build_encoder_pipeline_h264_from_appsrc(
         .downcast::<gst_app::AppSrc>()
         .map_err(|e| std::io::Error::other(format!("rawsrc not AppSrc: {e:?}")))?;
 
-    // Minimal caps for appsrc input (NV12 + framerate).
+    // Set caps on appsrc
     let caps_in = gst::Caps::builder("video/x-raw")
         .field("format", "NV12")
         .field("width", 1280i32)
@@ -587,6 +751,15 @@ fn build_encoder_pipeline_h264_from_appsrc(
         .field("framerate", gst::Fraction::new(fps, 1))
         .build();
     appsrc.set_caps(Some(&caps_in));
+
+    // Extra low-latency appsrc knobs
+    if appsrc.find_property("block").is_some() {
+        appsrc.set_property("block", false);
+    }
+
+    set_prop_int(appsrc.upcast_ref::<gst::Element>(), "max-bytes", 0u64);
+    set_prop_int(appsrc.upcast_ref::<gst::Element>(), "min-latency", 0u64);
+    set_prop_int(appsrc.upcast_ref::<gst::Element>(), "max-latency", 0u64);
 
     let capsfilter = pipeline
         .by_name("vcaps")
@@ -604,7 +777,7 @@ fn build_encoder_pipeline_h264_from_appsrc(
     };
     let set_u32 = |el: &gst::Element, k: &str, v: u32| {
         if el.find_property(k).is_some() {
-            let _ = std::panic::catch_unwind(|| set_prop_best_u32(el, k, v));
+            let _ = std::panic::catch_unwind(|| set_prop_int(el, k, v as u64));
         }
     };
     let set_bool = |el: &gst::Element, k: &str, v: bool| {
@@ -615,50 +788,71 @@ fn build_encoder_pipeline_h264_from_appsrc(
         }
     };
 
-    // Encoder tuning (low-latency defaults)
-    let kbps = ctrl.bitrate_kbps.max(1) as u32;
+    // Encoder tuning
+    let kbps = ctrl.bitrate_kbps.max(300) as u32;
+    let gop_frames = (fps as u32).max(1); // 1s GOP by default
 
-    if enc_is_nv {
-        let kbps = ctrl.bitrate_kbps.max(300) as u32;
-        let fps_u = fps as u32;
-        let gop = (fps_u.max(2) / 2).max(1); // 0.5s
+    if enc_is_vt {
+        // vtenc_h264 property availability varies by build.
+        let bps = kbps.saturating_mul(1000);
 
+        // Some builds use bitrate in bps, some kbps; guarded anyway.
+        set_u32(&encoder, "bitrate", bps);
+
+        // reduce latency
+        set_bool(&encoder, "allow-frame-reordering", false);
+        set_bool(&encoder, "realtime", true);
+
+        // keyframe interval variants
+        set_u32(&encoder, "max-keyframe-interval", gop_frames);
+        set_u32(&encoder, "max-keyframe-interval-duration", 2);
+        set_u32(&encoder, "keyframe-interval", 2);
+    } else if enc_is_nv {
         // Low-latency + stable CBR
         set_str(&encoder, "preset", "low-latency-hq");
         set_str(&encoder, "tune", "ultra-low-latency");
+
         // Rate control
         set_str(&encoder, "rc-mode", "cbr");
         set_u32(&encoder, "bitrate", kbps);
-        // These exist on many builds; guarded by your find_property checks
         set_u32(&encoder, "max-bitrate", kbps);
-        // VBV buffer: try ~1s worth (in kbps units typically for this plugin)
+
+        // VBV buffer ~1s
         set_u32(&encoder, "vbv-buffer-size", kbps);
+
         // GOP / B-frames
-        set_u32(&encoder, "gop-size", gop);
+        set_u32(&encoder, "gop-size", gop_frames);
         set_u32(&encoder, "bframes", 0);
-        // Headers (good for joining mid-stream / recovery)
+
+        // For WebRTC (Annex-B)
         set_bool(&encoder, "repeat-sequence-header", true);
-        // Some builds have these; safe to attempt
         set_bool(&encoder, "zerolatency", true);
-        // safe to attempt
-        set_u32(&encoder, "iframeinterval", gop);
-        set_u32(&encoder, "idrinterval", gop);
+
+        // Keyframe interval variants
+        set_u32(&encoder, "iframeinterval", gop_frames);
+        set_u32(&encoder, "idrinterval", gop_frames);
     } else if enc_is_amf {
         set_str(&encoder, "usage", "ultralowlatency");
         set_str(&encoder, "rate-control", "cbr");
         set_u32(&encoder, "bitrate", kbps);
         set_u32(&encoder, "b-frames", 0);
-        set_u32(&encoder, "gop-size", fps as u32);
+        set_u32(&encoder, "gop-size", gop_frames);
     } else if enc_is_x264 {
         set_u32(&encoder, "bitrate", kbps);
         set_str(&encoder, "speed-preset", "veryfast");
         set_str(&encoder, "tune", "zerolatency");
-        set_u32(&encoder, "key-int-max", fps as u32);
+        set_u32(&encoder, "key-int-max", gop_frames);
         set_u32(&encoder, "bframes", 0);
+
+        // For WebRTC (Annex-B)
         set_bool(&encoder, "byte-stream", true);
+
+        // reduce lookahead if present
+        set_u32(&encoder, "rc-lookahead", 0);
+        set_bool(&encoder, "sync-lookahead", false);
     }
 
-    // appsink -> channel (drop when slow for realtime)
+    // appsink -> channel
     let (sample_tx, sample_rx) = mpsc::channel::<gst::Sample>(32);
 
     let dropped_counter = Arc::new(AtomicU64::new(0));
@@ -736,16 +930,19 @@ fn apply_ctrl(stream: &GstStream, ctrl: &StreamCtrl) -> std::io::Result<()> {
 
     let caps = gst::Caps::builder("video/x-raw")
         .field("format", "NV12")
-        .field("width", ctrl.width)
-        .field("height", ctrl.height)
+        .field("width", ctrl.width.max(1))
+        .field("height", ctrl.height.max(1))
         .field("framerate", gst::Fraction::new(ctrl.fps.max(1), 1))
         .build();
 
+    // capsfilter property exists on capsfilter element
     capsfilter.set_property("caps", &caps);
 
-    let kbps = ctrl.bitrate_kbps.max(300) as u32;
-    set_prop_best_u32(encoder, "bitrate", kbps);
-    set_prop_best_u32(encoder, "max-bitrate", kbps);
+    // bitrate knobs vary per encoder
+    let kbps = ctrl.bitrate_kbps.max(300) as u64;
+    set_prop_int(encoder, "bitrate", kbps);
+    set_prop_int(encoder, "max-bitrate", kbps);
+    set_prop_int(encoder, "target-bitrate", kbps);
 
     Ok(())
 }
@@ -779,14 +976,18 @@ fn build_pipeline_opus() -> std::io::Result<(GstStream, mpsc::Receiver<gst::Samp
         "autoaudiosrc"
     };
 
+    // low latency:
+    // - queue leaky
+    // - appsink max-buffers small
     let pipeline_desc = format!(
         "{audio_src} !
+        queue leaky=downstream max-size-buffers=8 max-size-bytes=0 max-size-time=0 !
         audioconvert !
         audioresample !
         audio/x-raw,rate=48000,channels=2 !
         opusenc bitrate=64000 frame-size=20 !
         opusparse !
-        appsink name=asink emit-signals=true sync=false max-buffers=8 drop=true"
+        appsink name=asink emit-signals=true sync=false max-buffers=2 drop=true"
     );
 
     let pipeline = gst::parse::launch(&pipeline_desc)
@@ -922,10 +1123,11 @@ async fn start_stream_runtime(
     ctrl_state: Arc<RwLock<StreamCtrl>>,
     video_track: Arc<TrackLocalStaticSample>,
     audio_track: Arc<TrackLocalStaticSample>,
+    rtmp: Option<Arc<RtmpBroadcaster>>,
     out_tx: mpsc::Sender<WsMsg>,
 ) -> std::io::Result<StreamRuntime> {
     // Ensure shared capture hub exists
-    let hub = ensure_capture_hub(ctrl.fps).await?;
+    let hub = ensure_capture_hub(ctrl.fps, rtmp).await?;
     let mut cap_rx = hub.tx.subscribe();
 
     // Build per-user encoder pipeline
@@ -945,15 +1147,15 @@ async fn start_stream_runtime(
             std::io::Error::other(format!("audio gst set_state(Playing) failed: {e:?}"))
         })?;
 
-    // request a keyframe early (best-effort)
+    // request a keyframe early
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     request_keyframe(&stream.pipeline);
 
-    // bus logger (encoder pipeline)
+    // bus logger
     let bus_stop = CancellationToken::new();
     let bus_handle = spawn_gst_bus_logger(&stream.pipeline, bus_stop.child_token());
 
-    // FPS reporter (encoder pipeline)
+    // FPS reporter
     let fps_stop = CancellationToken::new();
     let fps_stop_child = fps_stop.child_token();
     let fc = stream.frame_counter.clone();
@@ -1009,6 +1211,7 @@ async fn start_stream_runtime(
 
                         pts_ns = pts_ns.saturating_add(dur_ns);
 
+                        // appsrc is configured block=false; if downstream is slow, it drops/backs up minimally
                         if let Err(e) = appsrc.push_buffer(buf) {
                             warn!("appsrc.push_buffer failed: {e:?}");
                         }
@@ -1024,7 +1227,7 @@ async fn start_stream_runtime(
         info!("raw->appsrc push task ended");
     });
 
-    // h264 -> webrtc pump (per-user)
+    // h264 -> webrtc pump per-user
     let pump_stop = CancellationToken::new();
     let pump_stop_child = pump_stop.child_token();
     let pump_handle = tokio::spawn(async move {
@@ -1035,7 +1238,7 @@ async fn start_stream_runtime(
         info!("video pump task ended");
     });
 
-    // audio pump
+    // audio pump per-user
     let audio_pump_stop = CancellationToken::new();
     let audio_pump_child = audio_pump_stop.child_token();
     let audio_pump_handle = tokio::spawn(async move {
@@ -1189,6 +1392,8 @@ struct WsCtx {
 
     last_keyreq_ms: Arc<AtomicU64>,
     last_bitrate_change_ms: Arc<AtomicU64>,
+
+    rtmp: Option<Arc<RtmpBroadcaster>>,
 }
 
 /// Handle websocket JSON message
@@ -1312,8 +1517,7 @@ async fn handle_ws_json(ctx: WsCtx, text: &str) -> std::io::Result<()> {
             let pc_id = ctx.pc_next_id.fetch_add(1, Ordering::Relaxed);
             *ctx.pc_id_slot.write().await = Some(pc_id);
 
-            // IMPORTANT FIX:
-            // Set ctx.pc immediately so early ICE candidates from the client won't hit "peer not ready".
+            // set ctx.pc immediately so early ICE won't hit "peer not ready"
             *ctx.pc.write().await = Some(peer.clone());
 
             if let Some(cb) = ctx.on_event.as_ref() {
@@ -1518,13 +1722,14 @@ async fn handle_ws_json(ctx: WsCtx, text: &str) -> std::io::Result<()> {
                 let _ = ctx.out_tx.send(WsMsg::Answer(local.sdp)).await;
             }
 
-            // Start per-user runtime (encodes from shared capture)
+            // Start per-user runtime
             let ctrl_now = ctx.ctrl_state.read().await.clone();
             let rt = start_stream_runtime(
                 ctrl_now,
                 ctx.ctrl_state.clone(),
                 video_track.clone(),
                 audio_track.clone(),
+                ctx.rtmp.clone(),
                 ctx.out_tx.clone(),
             )
             .await?;
@@ -1565,7 +1770,7 @@ async fn handle_ws_json(ctx: WsCtx, text: &str) -> std::io::Result<()> {
             let loss = st.loss.unwrap_or(0.0);
             let avail = st.available_in_bps.unwrap_or(f64::INFINITY);
 
-            // Keyframe on loss (rate-limited) ----
+            // Keyframe on loss (rate-limited)
             if loss > 0.02 {
                 let now_ms = utc_ms_now();
                 let last = ctx.last_keyreq_ms.load(Ordering::Relaxed);
@@ -1577,25 +1782,22 @@ async fn handle_ws_json(ctx: WsCtx, text: &str) -> std::io::Result<()> {
                 }
             }
 
-            // Bitrate adaptation on bandwidth (rate-limited) ----
+            // Bitrate adaptation on bandwidth (rate-limited)
             let now_ms = utc_ms_now();
             let last = ctx.last_bitrate_change_ms.load(Ordering::Relaxed);
             if now_ms.saturating_sub(last) >= 1200 {
                 let target_kbps = ctx.ctrl_state.read().await.bitrate_kbps.max(300);
                 let target_bps = (target_kbps as f64) * 1000.0;
 
-                // thresholds relative to target
-                let low = avail < 1.15 * target_bps; // mild congestion
-                let critical = avail < 0.90 * target_bps; // hard congestion
+                let low = avail < 1.15 * target_bps;
+                let critical = avail < 0.90 * target_bps;
 
                 if critical || low {
                     let mut stc = ctx.ctrl_state.write().await;
                     let old = stc.bitrate_kbps;
-                    // reduce 15% (or 25% if critical)
                     let factor = if critical { 0.75 } else { 0.85 };
                     stc.bitrate_kbps = ((stc.bitrate_kbps as f64) * factor).round() as i32;
                     stc.bitrate_kbps = stc.bitrate_kbps.clamp(600, 12_000);
-
                     let new = stc.bitrate_kbps;
                     drop(stc);
 
@@ -1603,11 +1805,9 @@ async fn handle_ws_json(ctx: WsCtx, text: &str) -> std::io::Result<()> {
                         ctx.last_bitrate_change_ms.store(now_ms, Ordering::Relaxed);
                         if let Some(rt) = ctx.runtime.read().await.as_ref() {
                             let _ = apply_ctrl(&rt.stream, &*ctx.ctrl_state.read().await);
-                            // optional: request_keyframe(&rt.stream.pipeline);  // I usually do NOT here
                         }
                     }
                 } else if avail > 1.6 * target_bps {
-                    // plenty of headroom -> gently increase
                     let mut stc = ctx.ctrl_state.write().await;
                     let old = stc.bitrate_kbps;
                     stc.bitrate_kbps = ((stc.bitrate_kbps as f64) * 1.10).round() as i32;
@@ -1690,6 +1890,7 @@ async fn handle_ws_json(ctx: WsCtx, text: &str) -> std::io::Result<()> {
                     ctx.ctrl_state.clone(),
                     video_track,
                     audio_track,
+                    ctx.rtmp.clone(),
                     ctx.out_tx.clone(),
                 )
                 .await?;
@@ -1746,16 +1947,23 @@ pub struct Server {
     ws_next_id: Arc<AtomicU64>,
     pc_next_id: Arc<AtomicU64>,
     on_event: Option<SessionEventCallback>,
+
+    rtmp: Option<Arc<RtmpBroadcaster>>,
 }
 
 impl Default for Server {
     fn default() -> Self {
-        Server::new(ServerConfig::default(), StreamCtrl::default(), None)
+        Server::new(ServerConfig::default(), StreamCtrl::default(), None, None)
     }
 }
 
 impl Server {
-    pub fn new(cfg: ServerConfig, initial_ctrl: StreamCtrl, index: Option<Bytes>) -> Self {
+    pub fn new(
+        cfg: ServerConfig,
+        initial_ctrl: StreamCtrl,
+        index: Option<Bytes>,
+        rtmp: Option<RtmpBroadcaster>,
+    ) -> Self {
         Self {
             cfg,
             initial_ctrl,
@@ -1765,6 +1973,7 @@ impl Server {
             ws_next_id: Arc::new(AtomicU64::new(1)),
             pc_next_id: Arc::new(AtomicU64::new(1)),
             on_event: None,
+            rtmp: rtmp.map(Arc::new),
         }
     }
 
@@ -1852,6 +2061,8 @@ impl HAsyncService for Server {
 
             last_keyreq_ms: Arc::new(AtomicU64::new(0)),
             last_bitrate_change_ms: Arc::new(AtomicU64::new(0)),
+
+            rtmp: self.rtmp.clone(),
         };
 
         let _ = out_tx.send(WsMsg::Info("WS connected".into())).await;
@@ -1881,10 +2092,7 @@ impl HAsyncService for Server {
                         OpCode::Text | OpCode::Binary => {
                             if expecting_continuation {
                                 if let Some(cb) = on_event.as_ref() {
-                                    cb(SessionEvent::WsProtocolError {
-                                        ws_id,
-                                        message: "expected continuation frame".into(),
-                                    });
+                                    cb(SessionEvent::WsProtocolError { ws_id, message: "expected continuation frame".into() });
                                 }
                                 session.ws_close_async(Some(err_protocol)).await?;
                                 break;
@@ -2027,6 +2235,8 @@ impl HFactory for Server {
             ws_next_id: self.ws_next_id.clone(),
             pc_next_id: self.pc_next_id.clone(),
             on_event: self.on_event.clone(),
+
+            rtmp: self.rtmp.clone(),
         }
     }
 }
@@ -2034,7 +2244,7 @@ impl HFactory for Server {
 #[cfg(test)]
 pub mod tests {
     use crate::network::http::server::{H2Config, HFactory};
-    use crate::stream::webrtc::{DataChannelPayload, Server};
+    use crate::stream::webrtc::{DataChannelPayload, RtmpBroadcaster, Server};
     use bytes::Bytes;
     use tracing::info;
 
@@ -2055,6 +2265,12 @@ pub mod tests {
             Default::default(),
             Default::default(),
             std::fs::read(html_file).ok().map(Bytes::from),
+            Some(RtmpBroadcaster {
+                ingest_url: "".to_owned(),
+                stream_key: "".to_owned(),
+                bitrate_kbps: Some(2500),
+                gop_seconds: Some(2),
+            }),
         );
 
         webrtc_server.set_on_dc_message(std::sync::Arc::new(|dc_id, payload| match payload {
