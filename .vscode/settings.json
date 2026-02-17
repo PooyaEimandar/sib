@@ -1,8 +1,6 @@
 // settings.json
 {
   "rust-analyzer.cargo.allFeatures": false,
-  "rust-analyzer.cargo.features": [
-    "stm-webrtc-sender"
-  ],
+  "rust-analyzer.cargo.features": [],
   "rust-analyzer.cargo.noDefaultFeatures": true
 }

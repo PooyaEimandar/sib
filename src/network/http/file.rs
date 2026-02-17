@@ -105,13 +105,11 @@ fn serve_fn<S: Session>(
     file_tuple: &mut Option<(StatusCode, PathBuf, u64, u64)>,
     close_connection_on_failed_and_disable_content_length: (bool, bool),
 ) -> std::io::Result<()> {
-    let min_bytes_on_the_fly_size = min_max_compress_thresholds.0;
-    let max_bytes_on_the_fly_size = min_max_compress_thresholds.1;
+    let (min_bytes_on_the_fly_size, max_bytes_on_the_fly_size) = min_max_compress_thresholds;
 
-    let content_disposition = content_disposition_allow_ranges.0;
-    let allow_ranges = content_disposition_allow_ranges.1;
-    let close_connection_on_failed = close_connection_on_failed_and_disable_content_length.0;
-    let disable_content_length = close_connection_on_failed_and_disable_content_length.1;
+    let (content_disposition, allow_ranges) = content_disposition_allow_ranges;
+    let (close_connection_on_failed, disable_content_length) =
+        close_connection_on_failed_and_disable_content_length;
 
     let range_header = if allow_ranges {
         session.req_header(&header::RANGE)
@@ -119,6 +117,7 @@ fn serve_fn<S: Session>(
         None
     };
     let range_requested = range_header.is_some();
+
     let encoding = match session.req_header(&header::ACCEPT_ENCODING) {
         Some(val) => {
             let mime_type: Mime = file_info
@@ -132,11 +131,10 @@ fn serve_fn<S: Session>(
 
     let mut rsp_headers = http::HeaderMap::new();
     let mut applied_encoding: Option<&'static str> = None;
+
     let (file_path, total_size) = match encoding {
-        EncodingType::None => {
-            // Serve file directly
-            (file_info.path.clone(), file_info.size)
-        }
+        // Serve file directly
+        EncodingType::None => (file_info.path.clone(), file_info.size),
         EncodingType::NotAcceptable => {
             let headers = get_error_headers!(close_connection_on_failed);
             return session
@@ -180,66 +178,64 @@ fn serve_fn<S: Session>(
                 }
             }
         }
+
         EncodingType::Gzip { level } => {
             if let Some(gz_info) = file_info.gz_info {
                 // we already have the gz info in the cache
                 rsp_headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
                 applied_encoding = Some("gzip");
                 gz_info
-            } else {
+            } else if file_info.size >= min_bytes_on_the_fly_size
+                && file_info.size <= max_bytes_on_the_fly_size
+                && !range_requested
+            {
                 // On-the-fly only if size is within [min,max] AND not a Range request
-                if file_info.size >= min_bytes_on_the_fly_size
-                    && file_info.size <= max_bytes_on_the_fly_size
-                    && !range_requested
-                {
-                    let (status, body) = compress_then_respond(
-                        &mut rsp_headers,
-                        &file_info,
-                        "gzip",
-                        disable_content_length,
-                        |b| encode_gzip(b, level),
-                    )?;
+                let (status, body) = compress_then_respond(
+                    &mut rsp_headers,
+                    &file_info,
+                    "gzip",
+                    disable_content_length,
+                    |b| encode_gzip(b, level),
+                )?;
 
-                    return session
-                        .status_code(status)
-                        .headers(&rsp_headers)?
-                        .body(body)
-                        .eom();
-                } else {
-                    // fall back to original file
-                    (file_info.path.clone(), file_info.size)
-                }
+                return session
+                    .status_code(status)
+                    .headers(&rsp_headers)?
+                    .body(body)
+                    .eom();
+            } else {
+                // fall back to original file
+                (file_info.path.clone(), file_info.size)
             }
         }
+
         EncodingType::Zstd { level } => {
             if let Some(zstd_info) = file_info.zstd_info {
                 // we already have the zstd info in the cache
                 rsp_headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("zstd"));
                 applied_encoding = Some("zstd");
                 zstd_info
-            } else {
+            } else if file_info.size >= min_bytes_on_the_fly_size
+                && file_info.size <= max_bytes_on_the_fly_size
+                && !range_requested
+            {
                 // On-the-fly only if size is within [min,max] AND not a Range request
-                if file_info.size >= min_bytes_on_the_fly_size
-                    && file_info.size <= max_bytes_on_the_fly_size
-                    && !range_requested
-                {
-                    let (status, body) = compress_then_respond(
-                        &mut rsp_headers,
-                        &file_info,
-                        "zstd",
-                        disable_content_length,
-                        |b| encode_zstd(b, level),
-                    )?;
+                let (status, body) = compress_then_respond(
+                    &mut rsp_headers,
+                    &file_info,
+                    "zstd",
+                    disable_content_length,
+                    |b| encode_zstd(b, level),
+                )?;
 
-                    return session
-                        .status_code(status)
-                        .headers(&rsp_headers)?
-                        .body(body)
-                        .eom();
-                } else {
-                    // fall back to original file
-                    (file_info.path.clone(), file_info.size)
-                }
+                return session
+                    .status_code(status)
+                    .headers(&rsp_headers)?
+                    .body(body)
+                    .eom();
+            } else {
+                // fall back to original file
+                (file_info.path.clone(), file_info.size)
             }
         }
     };
@@ -247,6 +243,7 @@ fn serve_fn<S: Session>(
     let range = range_header.and_then(|h| parse_byte_range(&h, total_size));
 
     let etag_to_send = rep_etag(&file_info.etag, applied_encoding);
+
     if let Some(header_val) = session.req_header(&header::IF_NONE_MATCH)
         && if_none_match_contains(&header_val, &etag_to_send)
     {
@@ -271,12 +268,14 @@ fn serve_fn<S: Session>(
             ),
             (header::VARY, HeaderValue::from_static("Accept-Encoding")),
         ]);
+
         return session
             .status_code(StatusCode::NOT_MODIFIED)
             .headers(&rsp_headers)?
             .body(Bytes::new())
             .eom();
     }
+
     rsp_headers.extend([
         (
             header::CONTENT_TYPE,
@@ -340,41 +339,28 @@ fn serve_fn<S: Session>(
     Ok(())
 }
 
-#[cfg(feature = "net-h3-server")]
-async fn serve_async_fn<S: Session>(
+async fn serve_fn_async<S: Session>(
     session: &mut S,
-    path: &PathBuf,
-    file_cache: &FileCache,
+    file_info: FileInfo,
     encoding_order: &[EncodingType],
     min_max_compress_thresholds: (u64, u64),
+    content_disposition_allow_ranges: (&str, bool),
     file_tuple: &mut Option<(StatusCode, PathBuf, u64, u64)>,
+    close_connection_on_failed_and_disable_content_length: (bool, bool),
 ) -> std::io::Result<()> {
-    use crate::network::http::session;
+    let (min_bytes_on_the_fly_size, max_bytes_on_the_fly_size) = min_max_compress_thresholds;
 
-    let min_bytes_on_the_fly_size = min_max_compress_thresholds.0;
-    let max_bytes_on_the_fly_size = min_max_compress_thresholds.1;
-    const DISABLE_CONTENT_LENGTH: bool = true;
+    let (content_disposition, allow_ranges) = content_disposition_allow_ranges;
+    let (close_connection_on_failed, disable_content_length) =
+        close_connection_on_failed_and_disable_content_length;
 
-    // meta
-    let meta = match tokio::fs::metadata(&path).await {
-        Ok(meta) => meta,
-        Err(e) => {
-            error!(
-                "File server failed to get metadata for path: {}: {}",
-                &path, e
-            );
-            return session
-                .status_code(StatusCode::NOT_FOUND)
-                .body(Bytes::new())
-                .eom();
-        }
+    let range_header = if allow_ranges {
+        session.req_header(&header::RANGE)
+    } else {
+        None
     };
-
-    // file cache lookup
-    let file_info = get_file_info!(session, path, meta, file_cache, false);
-
-    let range_header = session.req_header(&header::RANGE);
     let range_requested = range_header.is_some();
+
     let encoding = match session.req_header(&header::ACCEPT_ENCODING) {
         Some(val) => {
             let mime_type: Mime = file_info
@@ -388,18 +374,20 @@ async fn serve_async_fn<S: Session>(
 
     let mut rsp_headers = http::HeaderMap::new();
     let mut applied_encoding: Option<&'static str> = None;
+
     let (file_path, total_size) = match encoding {
-        EncodingType::None => {
-            // Serve file directly
-            (file_info.path.clone(), file_info.size)
-        }
+        // Serve file directly
+        EncodingType::None => (file_info.path.clone(), file_info.size),
         EncodingType::NotAcceptable => {
+            let headers = get_error_headers!(close_connection_on_failed);
             return session
                 .status_code(StatusCode::NOT_ACCEPTABLE)
+                .headers(&headers)?
                 .body(Bytes::new())
                 .eom_async()
                 .await;
         }
+
         EncodingType::Br {
             buffer_size,
             quality,
@@ -420,7 +408,7 @@ async fn serve_async_fn<S: Session>(
                         &mut rsp_headers,
                         &file_info,
                         "br",
-                        DISABLE_CONTENT_LENGTH,
+                        disable_content_length,
                         |b| encode_brotli(b, buffer_size, quality, lgwindow),
                     )?;
 
@@ -436,67 +424,65 @@ async fn serve_async_fn<S: Session>(
                 }
             }
         }
+
         EncodingType::Gzip { level } => {
             if let Some(gz_info) = file_info.gz_info {
                 // we already have the gz info in the cache
                 rsp_headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
                 applied_encoding = Some("gzip");
                 gz_info
-            } else {
+            } else if file_info.size >= min_bytes_on_the_fly_size
+                && file_info.size <= max_bytes_on_the_fly_size
+                && !range_requested
+            {
                 // On-the-fly only if size is within [min,max] AND not a Range request
-                if file_info.size >= min_bytes_on_the_fly_size
-                    && file_info.size <= max_bytes_on_the_fly_size
-                    && !range_requested
-                {
-                    let (status, body) = compress_then_respond(
-                        &mut rsp_headers,
-                        &file_info,
-                        "gzip",
-                        DISABLE_CONTENT_LENGTH,
-                        |b| encode_gzip(b, level),
-                    )?;
-                    return session
-                        .status_code(status)
-                        .headers(&rsp_headers)?
-                        .body(body)
-                        .eom_async()
-                        .await;
-                } else {
-                    // fall back to original file
-                    (file_info.path.clone(), file_info.size)
-                }
+                let (status, body) = compress_then_respond(
+                    &mut rsp_headers,
+                    &file_info,
+                    "gzip",
+                    disable_content_length,
+                    |b| encode_gzip(b, level),
+                )?;
+
+                return session
+                    .status_code(status)
+                    .headers(&rsp_headers)?
+                    .body(body)
+                    .eom_async()
+                    .await;
+            } else {
+                // fall back to original file
+                (file_info.path.clone(), file_info.size)
             }
         }
+
         EncodingType::Zstd { level } => {
             if let Some(zstd_info) = file_info.zstd_info {
                 // we already have the zstd info in the cache
                 rsp_headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("zstd"));
                 applied_encoding = Some("zstd");
                 zstd_info
-            } else {
-                // On-the-fly only if size is within [min,max] AND not a Range request
-                if file_info.size >= min_bytes_on_the_fly_size
-                    && file_info.size <= max_bytes_on_the_fly_size
-                    && !range_requested
-                {
-                    let (status, body) = compress_then_respond(
-                        &mut rsp_headers,
-                        &file_info,
-                        "zstd",
-                        DISABLE_CONTENT_LENGTH,
-                        |b| encode_zstd(b, level),
-                    )?;
+            } else if file_info.size >= min_bytes_on_the_fly_size
+                && file_info.size <= max_bytes_on_the_fly_size
+                && !range_requested
+            {
+                let (status, body) = compress_then_respond(
+                    &mut rsp_headers,
+                    &file_info,
+                    "zstd",
+                    disable_content_length,
+                    |b| encode_zstd(b, level),
+                )?;
 
-                    return session
-                        .status_code(status)
-                        .headers(&rsp_headers)?
-                        .body(body)
-                        .eom_async()
-                        .await;
-                } else {
-                    // fall back to original file
-                    (file_info.path.clone(), file_info.size)
-                }
+                return session
+                    .status_code(status)
+                    .headers(&rsp_headers)?
+                    .body(body)
+                    .eom_async()
+                    .await;
+            } else {
+                // fall back to original file
+                (file_info.path.clone(), file_info.size)
             }
         }
     };
@@ -504,6 +490,7 @@ async fn serve_async_fn<S: Session>(
     let range = range_header.and_then(|h| parse_byte_range(&h, total_size));
 
     let etag_to_send = rep_etag(&file_info.etag, applied_encoding);
+
     if let Some(header_val) = session.req_header(&header::IF_NONE_MATCH)
         && if_none_match_contains(&header_val, &etag_to_send)
     {
@@ -513,8 +500,10 @@ async fn serve_async_fn<S: Session>(
                 HeaderValue::from_str(enc).map_err(std::io::Error::other)?,
             );
         }
+        if !disable_content_length {
+            rsp_headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("0"));
+        }
         rsp_headers.extend([
-            (header::CONTENT_LENGTH, HeaderValue::from_static("0")),
             (
                 header::ETAG,
                 HeaderValue::from_str(&etag_to_send).map_err(std::io::Error::other)?,
@@ -526,6 +515,7 @@ async fn serve_async_fn<S: Session>(
             ),
             (header::VARY, HeaderValue::from_static("Accept-Encoding")),
         ]);
+
         return session
             .status_code(StatusCode::NOT_MODIFIED)
             .headers(&rsp_headers)?
@@ -533,6 +523,7 @@ async fn serve_async_fn<S: Session>(
             .eom_async()
             .await;
     }
+
     rsp_headers.extend([
         (
             header::CONTENT_TYPE,
@@ -544,7 +535,7 @@ async fn serve_async_fn<S: Session>(
         ),
         (
             header::CONTENT_DISPOSITION,
-            HeaderValue::from_static("inline"),
+            HeaderValue::from_str(content_disposition).map_err(std::io::Error::other)?,
         ),
         (
             header::ETAG,
@@ -554,29 +545,33 @@ async fn serve_async_fn<S: Session>(
     ]);
 
     let (status, start, end) = if let Some(r) = range {
-        let content_length = r.end - r.start;
-        rsp_headers.extend([
-            (
-                header::CONTENT_RANGE,
-                HeaderValue::from_str(&format!("bytes {}-{}/{}", r.start, r.end - 1, total_size))
-                    .map_err(std::io::Error::other)?,
-            ),
-            (
+        rsp_headers.insert(
+            header::CONTENT_RANGE,
+            HeaderValue::from_str(&format!("bytes {}-{}/{}", r.start, r.end - 1, total_size))
+                .map_err(std::io::Error::other)?,
+        );
+        if !disable_content_length {
+            let content_length = r.end - r.start;
+            rsp_headers.insert(
                 header::CONTENT_LENGTH,
                 HeaderValue::from_str(&content_length.to_string())
                     .map_err(std::io::Error::other)?,
-            ),
-        ]);
-
+            );
+        }
         (StatusCode::PARTIAL_CONTENT, r.start, r.end)
     } else {
-        rsp_headers.insert(
-            header::CONTENT_LENGTH,
-            HeaderValue::from_str(&total_size.to_string()).map_err(std::io::Error::other)?,
-        );
+        if !disable_content_length {
+            rsp_headers.insert(
+                header::CONTENT_LENGTH,
+                HeaderValue::from_str(&total_size.to_string()).map_err(std::io::Error::other)?,
+            );
+        }
         (StatusCode::OK, 0, total_size)
     };
-    rsp_headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+
+    if allow_ranges {
+        rsp_headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    }
 
     if session.req_method() == http::Method::HEAD {
         return session
@@ -587,21 +582,58 @@ async fn serve_async_fn<S: Session>(
             .await;
     }
 
+    session.status_code(status);
     session.headers(&rsp_headers)?;
     *file_tuple = Some((status, file_path, start, end));
     Ok(())
 }
 
-/// Serve a file over HTTP/1.x
-/// # Arguments
-/// * `session` - The HTTP session to use for serving
-/// * `path` - The path to the file to serve
-/// * `file_cache` - The file cache to use for caching file metadata
-/// * `encoding_order` - The order of encodings to consider for compression
-/// * `min_max_compress_thresholds` - The minimum and maximum size thresholds for on-the-fly compression
-/// * `stream_threshold_and_chunk_size` - The threshold size for streaming and the chunk size to use for streaming
-/// * `content_disposition` - The content disposition header value to use (e.g., "inline" or "attachment; filename=\"sample.m4v\"")
-/// * `allow_ranges` - Whether to allow range requests or not. If false, all requests will return the full file with status 200. If true, range requests will be honored for partial content delivery like download managers.
+#[cfg(feature = "net-h3-server")]
+async fn serve_async_fn<S: Session>(
+    session: &mut S,
+    path: &PathBuf,
+    file_cache: &FileCache,
+    encoding_order: &[EncodingType],
+    min_max_compress_thresholds: (u64, u64),
+    file_tuple: &mut Option<(StatusCode, PathBuf, u64, u64)>,
+) -> std::io::Result<()> {
+    use crate::network::http::session;
+
+    let (min_bytes_on_the_fly_size, max_bytes_on_the_fly_size) = min_max_compress_thresholds;
+    const DISABLE_CONTENT_LENGTH: bool = true;
+
+    // meta
+    let meta = match tokio::fs::metadata(path).await {
+        Ok(meta) => meta,
+        Err(e) => {
+            error!(
+                "File server failed to get metadata for path: {}: {}",
+                path.display(),
+                e
+            );
+            return session
+                .status_code(StatusCode::NOT_FOUND)
+                .body(Bytes::new())
+                .eom_async()
+                .await;
+        }
+    };
+
+    let file_info = get_file_info!(session, path, meta, file_cache, false);
+
+    // Reuse same logic as async fn: but content-disposition fixed to inline for h3
+    serve_fn_async(
+        session,
+        file_info,
+        encoding_order,
+        (min_bytes_on_the_fly_size, max_bytes_on_the_fly_size),
+        ("inline", true),
+        file_tuple,
+        (false, DISABLE_CONTENT_LENGTH),
+    )
+    .await
+}
+
 #[cfg(feature = "net-h1-server")]
 pub fn serve_h1<S: Session>(
     session: &mut S,
@@ -610,13 +642,12 @@ pub fn serve_h1<S: Session>(
     encoding_order: &[EncodingType],
     min_max_compress_thresholds: (u64, u64),
     stream_threshold_and_chunk_size: (u64, usize),
-    content_disposition: &str,
-    allow_ranges: bool,
+    content_disposition_allow_ranges: (&str, bool),
 ) -> std::io::Result<()> {
     let mut file_tuple: Option<(StatusCode, PathBuf, u64, u64)> = None;
 
     // meta
-    let meta = match std::fs::metadata(&path) {
+    let meta = match std::fs::metadata(path) {
         Ok(meta) => meta,
         Err(e) => {
             error!(
@@ -635,7 +666,7 @@ pub fn serve_h1<S: Session>(
 
     // file cache lookup
     const CLOSE_CONNECTION_ON_FAILED: bool = true;
-    let file_info = get_file_info!(session, &path, meta, file_cache, CLOSE_CONNECTION_ON_FAILED);
+    let file_info = get_file_info!(session, path, meta, file_cache, CLOSE_CONNECTION_ON_FAILED);
 
     // Handle headers, range parsing, etc.
     serve_fn(
@@ -643,8 +674,7 @@ pub fn serve_h1<S: Session>(
         file_info,
         encoding_order,
         min_max_compress_thresholds,
-        content_disposition,
-        allow_ranges,
+        content_disposition_allow_ranges,
         &mut file_tuple,
         (CLOSE_CONNECTION_ON_FAILED, false),
     )?;
@@ -757,14 +787,11 @@ pub async fn serve_h1_async<S: Session>(
     stream_threshold_and_chunk_size: (u64, usize),
     content_disposition_allow_ranges: (&str, bool),
 ) -> std::io::Result<()> {
-    use bytes::Bytes;
-    use http::StatusCode;
     use std::io::SeekFrom;
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
     let mut file_tuple: Option<(StatusCode, PathBuf, u64, u64)> = None;
 
-    // meta (async)
     let meta = match tokio::fs::metadata(path).await {
         Ok(m) => m,
         Err(e) => {
@@ -788,7 +815,8 @@ pub async fn serve_h1_async<S: Session>(
     const CLOSE_CONNECTION_ON_FAILED: bool = true;
     let file_info = get_file_info!(session, path, meta, file_cache, CLOSE_CONNECTION_ON_FAILED);
 
-    serve_fn(
+    // async path must use serve_fn_async
+    serve_fn_async(
         session,
         file_info,
         encoding_order,
@@ -796,7 +824,8 @@ pub async fn serve_h1_async<S: Session>(
         content_disposition_allow_ranges,
         &mut file_tuple,
         (CLOSE_CONNECTION_ON_FAILED, false),
-    )?;
+    )
+    .await?;
 
     // If serve_fn already responded (HEAD / 304 / 406 etc.), it wouldn't set file_tuple.
     let Some((status, file_path, start, end)) = file_tuple else {
@@ -918,9 +947,9 @@ pub async fn serve_h2<S: Session>(
 
     // file cache lookup
     const CLOSE_CONNECTION_ON_FAILED: bool = false;
-    let file_info = get_file_info!(session, &path, meta, file_cache, CLOSE_CONNECTION_ON_FAILED);
+    let file_info = get_file_info!(session, path, meta, file_cache, CLOSE_CONNECTION_ON_FAILED);
 
-    let result = serve_fn(
+    let result = serve_fn_async(
         session,
         file_info,
         encoding_order,
@@ -928,7 +957,8 @@ pub async fn serve_h2<S: Session>(
         content_disposition_allow_ranges,
         &mut file_tuple,
         (CLOSE_CONNECTION_ON_FAILED, true),
-    );
+    )
+    .await;
 
     // If we have a file tuple, it means it is ready to be served
     if let Some((status, file_path, start, end)) = file_tuple {
@@ -993,7 +1023,7 @@ pub async fn serve_h2<S: Session>(
 #[cfg(feature = "net-h3-server")]
 pub async fn serve_h3<S: Session>(
     session: &mut S,
-    path: &str,
+    path: &PathBuf,
     file_cache: &FileCache,
     encoding_order: &[EncodingType],
     min_max_compress_thresholds: (u64, u64),
@@ -1055,6 +1085,7 @@ pub async fn serve_h3<S: Session>(
                 .await;
         }
     }
+
     result
 }
 
@@ -1161,7 +1192,6 @@ fn compress_then_respond(
                 "Compression failed ({encoding_name}) for {}: {e}",
                 file_info.path.display()
             );
-
             Ok((StatusCode::INTERNAL_SERVER_ERROR, Bytes::new()))
         }
     }
@@ -1257,9 +1287,11 @@ fn choose_encoding(accept: &HeaderValue, mime: &Mime, order: &[EncodingType]) ->
         Ok(s) => s,
         Err(_) => return EncodingType::None,
     };
+
     let is_media = matches!(mime.type_(), mime::IMAGE | mime::AUDIO | mime::VIDEO);
     let is_svg = mime.type_() == mime::IMAGE
         && (mime.subtype() == mime::SVG || mime.suffix() == Some(mime::XML));
+
     if order.is_empty() || (is_media && !is_svg) {
         return EncodingType::None;
     }
@@ -1283,6 +1315,7 @@ fn choose_encoding(accept: &HeaderValue, mime: &Mime, order: &[EncodingType]) ->
         let token_raw = parts.next().unwrap_or_default().trim();
         let token = token_raw.to_ascii_lowercase();
         let mut q: f32 = 1.0;
+
         for p in parts {
             let p = p.trim();
             if let Some(v) = p.strip_prefix("q=").or_else(|| p.strip_prefix("Q="))
@@ -1291,6 +1324,7 @@ fn choose_encoding(accept: &HeaderValue, mime: &Mime, order: &[EncodingType]) ->
                 q = val;
             }
         }
+
         match token.as_str() {
             "*" => star_q = Some(q),
             "identity" => identity_q = Some(q),
@@ -1395,6 +1429,7 @@ pub async fn serve_h2_streaming<S: Session>(
             format!("range start {} beyond EOF {}", start, file_len),
         ));
     }
+
     let end_excl = end.min(file_len).max(start);
     let total_u64 = end_excl.saturating_sub(start);
     let total = usize::try_from(total_u64)
@@ -1410,6 +1445,7 @@ pub async fn serve_h2_streaming<S: Session>(
         header::ACCEPT_RANGES,
         http::HeaderValue::from_static("bytes"),
     );
+
     if status == http::StatusCode::PARTIAL_CONTENT && total > 0 {
         let end_inclusive = end_excl - 1;
         let cr = format!("bytes {}-{}/{}", start, end_inclusive, file_len);
@@ -1442,13 +1478,23 @@ pub async fn serve_h2_streaming<S: Session>(
         // Consume any already granted capacity before awaiting new credit
         let mut cap = stream.capacity();
         if cap == 0 {
-            const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3); // seconds
-            // Ensure we keep requesting capacity (some peers grant lazily)
             stream.reserve_capacity(chunk_size);
 
-            // Protect against stalls if WINDOW_UPDATEs stop
+            #[cfg(all(feature = "rt-tokio", not(feature = "rt-glommio")))]
+            {
+                const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+                cap = tokio::select! {
+                    res = stream.next_capacity() => res,
+                    _ = tokio::time::sleep(TIMEOUT) => Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!("H2 next_capacity timed out after {:?}", TIMEOUT),
+                    )),
+                }?;
+            }
+
             #[cfg(all(target_os = "linux", feature = "rt-glommio", not(feature = "rt-tokio")))]
             {
+                const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
                 cap = match glommio::timer::timeout(TIMEOUT, async {
                     stream
                         .next_capacity()
@@ -1464,18 +1510,7 @@ pub async fn serve_h2_streaming<S: Session>(
                             format!("H2 next_capacity timed out after {:?}", TIMEOUT),
                         ));
                     }
-                }
-            };
-
-            #[cfg(all(feature = "rt-tokio", not(feature = "rt-glommio")))]
-            {
-                cap = tokio::select! {
-                    res = stream.next_capacity() => res,
-                    _ = tokio::time::sleep(TIMEOUT) => Err(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        format!("H2 next_capacity timed out after {:?}", TIMEOUT),
-                    )),
-                }?;
+                };
             }
 
             if cap == 0 {
@@ -1523,12 +1558,14 @@ pub async fn serve_h3_streaming<S: Session>(
     let file = std::fs::File::open(file_path)?;
     let meta = file.metadata()?;
     let file_len = meta.len();
+
     if start >= file_len {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!("range start {} beyond EOF {}", start, file_len),
         ));
     }
+
     let end_excl = end.min(file_len).max(start);
     let total = (end_excl - start) as usize;
 
@@ -1541,6 +1578,7 @@ pub async fn serve_h3_streaming<S: Session>(
         header::ACCEPT_RANGES,
         http::HeaderValue::from_static("bytes"),
     );
+
     if status == http::StatusCode::PARTIAL_CONTENT && total > 0 {
         let end_inclusive = end_excl - 1;
         let cr = format!("bytes {}-{}/{}", start, end_inclusive, file_len);
@@ -1633,8 +1671,7 @@ mod tests {
                 ],
                 (MIN_BYTES_ON_THE_FLY_SIZE, MAX_BYTES_ON_THE_FLY_SIZE),
                 (H1_STREAM_THRESHOLD, H1_STREAM_CHUNK_SIZE),
-                "inline",
-                true,
+                ("inline", true),
             )
         }
     }
@@ -1776,8 +1813,7 @@ mod tests {
         let mut threads = Vec::new();
 
         // create self-signed TLS certificates
-        use crate::network::http::server::tests::create_self_signed_tls_pems;
-        let (cert, key) = create_self_signed_tls_pems();
+        let mtls = crate::MtlsIdentity::generate(&[], &[], false);
 
         cfg_if::cfg_if! {
             if #[cfg(feature = "net-h1-server")] {
@@ -1787,8 +1823,8 @@ mod tests {
 
                 for _ in 0..NUMBER_OF_WORKERS {
                     let addr = "0.0.0.0:8080";
-                    let cert_pem = cert.clone();
-                    let key_pem = key.clone();
+                    let cert_pem = mtls.server_cert_pem.clone();
+                    let key_pem = mtls.server_key_pem.clone();
                     let h1_handle = std::thread::spawn(move || {
                         let id = std::thread::current().id();
                         tracing::info!("Starting H1 server on {addr} with thread: {id:?}");
@@ -1809,17 +1845,18 @@ mod tests {
 
         cfg_if::cfg_if! {
             if #[cfg(feature = "net-h2-server")] {
-                let cert_h2_pem = cert.clone();
-                let key_h2_pem = key.clone();
+                let cert_pem = mtls.server_cert_pem.clone();
+                let key_pem = mtls.server_key_pem.clone();
+                let cancel = tokio_util::sync::CancellationToken::new();
                 let h2_handle = std::thread::spawn(move || {
                     use crate::network::http::server::H2Config;
                     let addr = "0.0.0.0:8081";
-                    let cert_pem = cert_h2_pem.as_bytes();
-                    let key_pem = key_h2_pem.as_bytes();
+                    let cert_pem = cert_pem.as_bytes();
+                    let key_pem = key_pem.as_bytes();
                     let id = std::thread::current().id();
                     tracing::info!("Starting H2 server on {addr} with thread: {id:?}");
                     FileServer(FileService)
-                        .start_h2_tls(addr, (None, cert_pem, key_pem), H2Config::default())
+                        .start_h2_tls(addr, (None, cert_pem, key_pem), H2Config::default(), cancel.clone())
                         .unwrap_or_else(|_| panic!("H2 file server failed to start for thread {id:?}"));
                 });
                 threads.push(h2_handle);
