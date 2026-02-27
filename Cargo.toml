@@ -163,7 +163,6 @@ net-h1-server = [
     "heapless",
     "http",
     "httparse",
-    "httpdate",
     "may",
     "mtls",
     "once_cell",
