@@ -75,7 +75,7 @@ impl TlDate {
     }
 
     #[inline(always)]
-    unsafe fn as_str<'a>(&'a self) -> &'a str {
+    unsafe fn as_str(&self) -> &str {
         // Always ASCII, always 29 bytes.
         let bytes: &[u8; 29] = unsafe { &*self.buf.get() };
         unsafe { std::str::from_utf8_unchecked(bytes) }
@@ -133,7 +133,7 @@ impl TlDate {
 }
 
 thread_local! {
-    static TL_DATE: TlDate = TlDate::new();
+    static TL_DATE: TlDate = const { TlDate::new() };
 }
 
 const WEEKDAY: [[u8; 3]; 7] = [
