@@ -61,7 +61,7 @@ sudo apt install -y cmake clang lld llvm libclang-dev
 
 Setup
 
-- MSVC
+- [MSVC](https://visualstudio.microsoft.com/downloads/)
 - [CMake](https://cmake.org/download/)
 - [Clang](https://github.com/llvm/llvm-project/releases)
 - [NASM](https://www.nasm.us/)
