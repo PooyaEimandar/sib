@@ -26,9 +26,9 @@ struct Server;
 impl HService for Server {
     fn call<S: Session>(&mut self, session: &mut S) -> std::io::Result<()> {
         use core::fmt::Write;
-        use sib::network::http::h1_session;
+        let time = sib::network::http::date::current_date_str();
         let mut res: heapless::String<256> = heapless::String::new();
-        if session.req_path() == "/json" {
+        if session.req_path_bytes() == b"/json" {
             // Respond with JSON
             let json = serde_json::to_vec(&JsonMessage::default())?;
             write!(
@@ -40,7 +40,7 @@ impl HService for Server {
                 Content-Length: {}\r\n\
                 \r\n\
                     {}",
-                h1_session::CURRENT_DATE.load(),
+                time,
                 &json.len().to_string(),
                 String::from_utf8_lossy(&json)
             )
@@ -56,7 +56,7 @@ impl HService for Server {
              Content-Length: 13\r\n\
              \r\n\
              Hello, World!",
-                h1_session::CURRENT_DATE.load()
+                time
             )
             .unwrap();
             session.write_all_eom(res.as_bytes())
@@ -85,13 +85,14 @@ fn main() {
     for _ in 0..cpus {
         let handle = std::thread::spawn(move || {
             let id = std::thread::current().id();
-            info!("Listening {addr} on thread: {id:?}");
+            tracing::info!("Listening {addr} on thread: {id:?}");
             Server
                 .start_h1(
                     addr,
                     H1Config {
                         io_timeout: std::time::Duration::from_secs(15),
                         stack_size,
+                        ..Default::default()
                     },
                 )
                 .unwrap_or_else(|_| panic!("H1 server failed to start for thread {id:?}"))

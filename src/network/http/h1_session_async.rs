@@ -164,6 +164,11 @@ where
     }
 
     #[inline]
+    fn req_path_bytes(&self) -> &[u8] {
+        self.uri.path().as_bytes()
+    }
+
+    #[inline]
     fn req_query(&self) -> String {
         self.uri.query().map(|q| q.to_string()).unwrap_or_default()
     }

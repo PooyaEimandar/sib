@@ -109,6 +109,11 @@ impl Session for H2Session {
     }
 
     #[inline]
+    fn req_path_bytes(&self) -> &[u8] {
+        self.req.uri().path().as_bytes()
+    }
+
+    #[inline]
     fn req_query(&self) -> String {
         self.req.uri().query().unwrap_or("").to_string()
     }

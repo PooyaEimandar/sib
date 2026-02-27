@@ -1,12 +1,10 @@
 use crate::network::http::session::Session;
-use arc_swap::ArcSwap;
 use bytes::{Buf, BufMut, BytesMut};
 use http::{HeaderName, HeaderValue};
 use std::io::{self, Read, Write};
 use std::mem::MaybeUninit;
 use std::net::IpAddr;
 use std::str::FromStr;
-use std::sync::Arc;
 
 #[cfg(feature = "net-ws-server")]
 use crate::network::http::ws;
@@ -16,25 +14,6 @@ const CRLF: &[u8] = b"\r\n";
 
 pub(crate) const BUF_LEN: usize = 8 * 4096;
 pub(crate) const MAX_HEADERS: usize = 32;
-
-pub static CURRENT_DATE: once_cell::sync::Lazy<Arc<ArcSwap<Arc<str>>>> =
-    once_cell::sync::Lazy::new(|| {
-        let now = httpdate::HttpDate::from(std::time::SystemTime::now()).to_string();
-        let swap = Arc::new(ArcSwap::from_pointee(Arc::from(now.into_boxed_str())));
-        let swap_clone: Arc<ArcSwap<Arc<str>>> = Arc::clone(&swap);
-        may::go!(move || loop {
-            let now = std::time::SystemTime::now();
-            let subsec = now
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .subsec_millis();
-            let delay = 1_000u64.saturating_sub(subsec as u64);
-            may::coroutine::sleep(std::time::Duration::from_millis(delay));
-            let new_date = httpdate::HttpDate::from(std::time::SystemTime::now()).to_string();
-            swap_clone.store(Arc::<str>::from(new_date.into_boxed_str()).into());
-        });
-        swap
-    });
 
 #[cfg(feature = "net-ws-server")]
 #[inline]
@@ -143,6 +122,11 @@ where
     #[inline]
     fn req_path(&self) -> String {
         self.req.path.unwrap_or_default().into()
+    }
+
+    #[inline]
+    fn req_path_bytes(&self) -> &[u8] {
+        self.req.path.unwrap_or_default().as_bytes()
     }
 
     #[inline]
@@ -292,7 +276,7 @@ where
             .extend_from_slice(SERVER_NAME.as_bytes())
             .ok();
         self.status_buf
-            .extend_from_slice(CURRENT_DATE.load().as_bytes())
+            .extend_from_slice(crate::network::http::date::current_date_str().as_bytes())
             .ok();
         self.status_buf.extend_from_slice(CRLF).ok();
 

@@ -16,6 +16,9 @@ pub fn init_global_poller(num_of_workers: usize, stack_size: usize) {
     may::config()
         .set_workers(num_of_workers)
         .set_stack_size(stack_size);
+
+    #[cfg(feature = "net-h1-server")]
+    crate::network::http::date::start_date_ticker();
 }
 
 #[cfg(feature = "mtls")]

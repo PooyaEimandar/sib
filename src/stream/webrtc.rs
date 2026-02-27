@@ -746,8 +746,8 @@ fn build_encoder_pipeline_h264_from_appsrc(
     // Set caps on appsrc
     let caps_in = gst::Caps::builder("video/x-raw")
         .field("format", "NV12")
-        .field("width", 1280i32)
-        .field("height", 720i32)
+        .field("width", w)
+        .field("height", h)
         .field("framerate", gst::Fraction::new(fps, 1))
         .build();
     appsrc.set_caps(Some(&caps_in));
@@ -2244,7 +2244,7 @@ impl HFactory for Server {
 #[cfg(test)]
 pub mod tests {
     use crate::network::http::server::{H2Config, HFactory};
-    use crate::stream::webrtc::{DataChannelPayload, RtmpBroadcaster, Server};
+    use crate::stream::webrtc::{DataChannelPayload, Server};
     use bytes::Bytes;
     use tracing::info;
 
@@ -2265,12 +2265,12 @@ pub mod tests {
             Default::default(),
             Default::default(),
             std::fs::read(html_file).ok().map(Bytes::from),
-            Some(RtmpBroadcaster {
-                ingest_url: "".to_owned(),
-                stream_key: "".to_owned(),
-                bitrate_kbps: Some(2500),
-                gop_seconds: Some(2),
-            }),
+            None, // Some(RtmpBroadcaster {
+                  //     ingest_url: "".to_owned(),
+                  //     stream_key: "".to_owned(),
+                  //     bitrate_kbps: Some(2500),
+                  //     gop_seconds: Some(2),
+                  // }),
         );
 
         webrtc_server.set_on_dc_message(std::sync::Arc::new(|dc_id, payload| match payload {

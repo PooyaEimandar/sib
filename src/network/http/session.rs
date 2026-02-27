@@ -7,6 +7,7 @@ pub trait Session {
     fn req_method(&self) -> http::Method;
     fn req_method_str(&self) -> Option<&str>;
     fn req_path(&self) -> String;
+    fn req_path_bytes(&self) -> &[u8];
     fn req_query(&self) -> String;
     fn req_http_version(&self) -> http::Version;
     fn req_headers(&self) -> http::HeaderMap;
