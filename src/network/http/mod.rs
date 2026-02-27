@@ -1,4 +1,3 @@
-pub mod date;
 pub mod server;
 
 #[cfg(feature = "net-file-server")]
@@ -27,6 +26,7 @@ cfg_if::cfg_if! {
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "net-h1-server")] {
+        pub mod date;
         pub mod h1_session;
         pub mod h1_server;
     }
