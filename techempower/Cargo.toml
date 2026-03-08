@@ -14,7 +14,7 @@ readme = "README.md"
 [dependencies]
 sib = { path = "../", default-features = false, features = ["net-h1-server"] }
 bytes = { version = "1.11.1", default-features = false }
-heapless = { version = "0.9.1", default-features = false }
+http = { version = "1.4.0", default-features = false, features = ["std"] }
 mimalloc = { version = "0.1.48", default-features = false, features = ["secure"] }
 num_cpus = { version = "1.17.0", default-features = false }
 serde = { version = "1.0.228", default-features = false, features = ["derive"] }
