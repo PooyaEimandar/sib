@@ -9,6 +9,8 @@ use sib::network::http::{
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+const PLAINTEXT_BODY: &[u8] = b"Hello, World!";
+const PLAINTEXT_CONTENT_LENGTH: &str = "13";
 #[derive(serde::Serialize)]
 struct JsonMessage<'a> {
     message: &'a str,
@@ -27,20 +29,6 @@ struct Server;
 impl HService for Server {
     fn call<S: Session>(&mut self, session: &mut S) -> std::io::Result<()> {
         match session.req_path_bytes() {
-            b"/plaintext" => {
-                const PLAINTEXT_BODY: &[u8] = b"Hello, World!";
-                const PLAINTEXT_CONTENT_LENGTH: usize = PLAINTEXT_BODY.len();
-
-                session
-                    .status_code(StatusCode::OK)
-                    .header_str("Content-Type", "text/plain")?
-                    .header_str(
-                        "Content-Length",
-                        PLAINTEXT_CONTENT_LENGTH.to_string().as_str(),
-                    )?
-                    .body(Bytes::from_static(PLAINTEXT_BODY))
-                    .eom()
-            }
             b"/json" => {
                 let json = serde_json::to_vec(&JsonMessage::default())?;
                 let json_len = json.len().to_string();
@@ -53,8 +41,10 @@ impl HService for Server {
                     .eom()
             }
             _ => session
-                .status_code(StatusCode::NOT_FOUND)
-                .header_str("Content-Length", "0")?
+                .status_code(StatusCode::OK)
+                .header_str("Content-Type", "text/plain")?
+                .header_str("Content-Length", PLAINTEXT_CONTENT_LENGTH)?
+                .body(Bytes::from_static(PLAINTEXT_BODY))
                 .eom(),
         }
     }
