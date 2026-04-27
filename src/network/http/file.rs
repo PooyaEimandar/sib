@@ -1643,7 +1643,7 @@ mod tests {
 
     #[cfg(feature = "net-h1-server")]
     impl crate::network::http::session::HService for FileService {
-        fn call<S: Session>(&mut self, session: &mut S) -> std::io::Result<()> {
+        fn call<S: Session>(&self, session: &mut S) -> std::io::Result<()> {
             const MIN_BYTES_ON_THE_FLY_SIZE: u64 = 1024;
             const MAX_BYTES_ON_THE_FLY_SIZE: u64 = 512 * 1024; // 512 KB
             const H1_STREAM_THRESHOLD: u64 = 256 * 1024; // 256 KB
@@ -1679,7 +1679,7 @@ mod tests {
     #[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
     #[async_trait::async_trait(?Send)]
     impl crate::network::http::session::HAsyncService for FileService {
-        async fn call<SE: Session>(&mut self, session: &mut SE) -> std::io::Result<()> {
+        async fn call<SE: Session>(&self, session: &mut SE) -> std::io::Result<()> {
             const MIN_BYTES_ON_THE_FLY_SIZE: u64 = 1024;
             const MAX_BYTES_ON_THE_FLY_SIZE: u64 = 512 * 1024; // 512 KB
             const H2_STREAM_THRESHOLD: u64 = 128 * 1024; // 128 KB
