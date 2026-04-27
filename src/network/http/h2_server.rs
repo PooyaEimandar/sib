@@ -74,7 +74,7 @@ cfg_if::cfg_if! {
                 .map_err(|e| std::io::Error::other(format!("h2 handshake error: {e}")))?;
 
             // Per-connection service shared among streams
-            let svc = std::rc::Rc::new(std::cell::RefCell::new(Some(service)));
+            let svc = std::rc::Rc::new(service);
 
             while let Some(r) = conn.accept().await {
                 let (request, respond) = match r {
@@ -88,26 +88,13 @@ cfg_if::cfg_if! {
                     }
                 };
 
-                let svc_rc = std::rc::Rc::clone(&svc);
+                let service = std::rc::Rc::clone(&svc);
 
                 glommio::spawn_local(async move {
-                    let mut service = loop {
-                        if let Some(s) = {
-                            let mut guard = svc_rc.borrow_mut();
-                            guard.take()
-                        } {
-                            break s;
-                        }
-                        glommio::yield_if_needed().await;
-                    };
-
                     // run the service on this H2 stream
                     let result = service
                         .call(&mut H2Session::new(peer_addr, request, respond))
                         .await;
-
-                    // put service back for the next stream
-                    *svc_rc.borrow_mut() = Some(service);
 
                     if let Err(e) = result {
                         error!("h2 service error: {e}");
@@ -224,7 +211,7 @@ cfg_if::cfg_if! {
 
         pub(crate) async fn serve_h1<S, T>(
             mut stream: S,
-            mut service: T,
+            service: T,
             config: &H2Config,
             peer_addr: std::net::IpAddr,
             shutdown: tokio_util::sync::CancellationToken,
@@ -429,15 +416,13 @@ cfg_if::cfg_if! {
             }
             .map_err(|e| std::io::Error::other(format!("h2 handshake error: {e}")))?;
 
-            // One service instance per connection, shared across streams on this conn
-            let svc = std::rc::Rc::new(std::cell::RefCell::new(Some(service)));
+            let svc = std::rc::Rc::new(service);
 
             // Serve multiplexed requests
             loop {
                 if shutdown.is_cancelled() {
                     return Ok(());
                 }
-                let svc_rc = std::rc::Rc::clone(&svc);
 
                 let next = tokio::select! {
                     _ = shutdown.cancelled() => return Ok(()),
@@ -446,23 +431,13 @@ cfg_if::cfg_if! {
 
                 match next {
                     Some(Ok((request, respond))) => {
+                        let service = std::rc::Rc::clone(&svc);
+
                         // Each H2 stream runs on the same LocalSet thread
                         tokio::task::spawn_local(async move {
-                            let mut service = loop {
-                                if let Some(s) = {
-                                    let mut guard = svc_rc.borrow_mut();
-                                    guard.take()
-                                } {
-                                    break s;
-                                }
-                                tokio::task::yield_now().await;
-                            };
-
                             let result = service
                                 .call(&mut H2Session::new(peer_addr, request, respond))
                                 .await;
-
-                            *svc_rc.borrow_mut() = Some(service);
 
                             if let Err(e) = result {
                                 error!("h2 service error: {e}");
