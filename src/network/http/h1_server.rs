@@ -10,13 +10,13 @@ use std::{
 pub(crate) fn serve<T: HService>(
     stream: &mut TcpStream,
     peer_addr: &IpAddr,
-    mut service: T,
+    service: T,
 ) -> std::io::Result<()> {
     let mut req_buf = BytesMut::with_capacity(BUF_LEN);
     let mut rsp_buf = BytesMut::with_capacity(BUF_LEN);
 
     loop {
-        if read_write(stream, peer_addr, &mut req_buf, &mut rsp_buf, &mut service)? {
+        if read_write(stream, peer_addr, &mut req_buf, &mut rsp_buf, &service)? {
             #[cfg(unix)]
             {
                 use may::io::WaitIo;
@@ -33,13 +33,13 @@ pub(crate) fn serve<T: HService>(
 pub(crate) fn serve_tls<T: HService>(
     stream: &mut boring::ssl::SslStream<TcpStream>,
     peer_addr: &IpAddr,
-    mut service: T,
+    service: T,
 ) -> std::io::Result<()> {
     let mut req_buf = BytesMut::with_capacity(BUF_LEN);
     let mut rsp_buf = BytesMut::with_capacity(BUF_LEN);
 
     loop {
-        if read_write(stream, peer_addr, &mut req_buf, &mut rsp_buf, &mut service)? {
+        if read_write(stream, peer_addr, &mut req_buf, &mut rsp_buf, &service)? {
             #[cfg(unix)]
             {
                 use may::io::WaitIo;
@@ -177,7 +177,7 @@ fn read_write<S, T>(
     peer_addr: &IpAddr,
     req_buf: &mut BytesMut,
     rsp_buf: &mut BytesMut,
-    service: &mut T,
+    service: &T,
 ) -> std::io::Result<bool>
 where
     S: Read + Write,
