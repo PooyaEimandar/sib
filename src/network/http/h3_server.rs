@@ -94,7 +94,7 @@ where
     };
 
     // Shared per-connection service among request tasks (kept on the same LocalSet thread)
-    let svc = std::rc::Rc::new(std::cell::RefCell::new(Some(service)));
+    let svc = std::rc::Rc::new(service);
 
     loop {
         let svc_rc = std::rc::Rc::clone(&svc);
@@ -103,26 +103,13 @@ where
             Ok(Some(resolver)) => {
                 match resolver.resolve_request().await {
                     Ok((req, stream)) => {
+                        let service = std::rc::Rc::clone(&svc_rc);
                         tokio::task::spawn_local(async move {
-                            // Spin-yield until we can take the service (single owner at a time)
-                            let mut service = loop {
-                                if let Some(s) = {
-                                    let mut guard = svc_rc.borrow_mut();
-                                    guard.take()
-                                } {
-                                    break s;
-                                }
-                                tokio::task::yield_now().await;
-                            };
-
                             // Run the service
                             use crate::network::http::h3_session::H3Session;
                             let result = service
                                 .call(&mut H3Session::new(peer_addr, req, stream))
                                 .await;
-
-                            // Put the service back for the next request
-                            *svc_rc.borrow_mut() = Some(service);
 
                             if let Err(e) = result {
                                 error!("h3 service error: {e}");
