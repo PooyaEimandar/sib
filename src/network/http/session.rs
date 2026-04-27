@@ -85,10 +85,10 @@ pub trait Session {
 }
 
 pub trait HService {
-    fn call<S: Session>(&mut self, session: &mut S) -> std::io::Result<()>;
+    fn call<S: Session>(&self, session: &mut S) -> std::io::Result<()>;
 }
 
 #[async_trait::async_trait(?Send)]
 pub trait HAsyncService {
-    async fn call<S: Session>(&mut self, session: &mut S) -> std::io::Result<()>;
+    async fn call<S: Session>(&self, session: &mut S) -> std::io::Result<()>;
 }
