@@ -1453,7 +1453,7 @@ pub mod tests {
 
     #[cfg(feature = "net-h1-server")]
     impl HService for EchoServer {
-        fn call<SE: Session>(&mut self, session: &mut SE) -> std::io::Result<()> {
+        fn call<SE: Session>(&self, session: &mut SE) -> std::io::Result<()> {
             // WebSocket upgrade path
             #[cfg(feature = "net-ws-server")]
             if session.is_ws() {
@@ -1599,7 +1599,7 @@ pub mod tests {
     #[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
     #[async_trait::async_trait(?Send)]
     impl HAsyncService for EchoServer {
-        async fn call<S: Session>(&mut self, session: &mut S) -> std::io::Result<()> {
+        async fn call<S: Session>(&self, session: &mut S) -> std::io::Result<()> {
             // WebSocket upgrade path
             #[cfg(feature = "net-ws-server")]
             if session.is_ws() {
