@@ -1,5 +1,4 @@
 use crate::database::fdb::{db::FDB, future::FDBFuture};
-use std::ffi::CStr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FDBStreamingMode {
@@ -117,22 +116,13 @@ pub struct FDBTransaction {
     pub trs: *mut foundationdb_sys::FDBTransaction,
 }
 
-#[inline]
-fn fdb_err(code: i32) -> std::io::Error {
-    let cstr = unsafe { foundationdb_sys::fdb_get_error(code) };
-    let s = unsafe { CStr::from_ptr(cstr) }
-        .to_string_lossy()
-        .into_owned();
-    std::io::Error::new(std::io::ErrorKind::Other, format!("FDB error {code}: {s}"))
-}
-
 impl FDBTransaction {
     #[inline]
     pub fn new(db: &FDB) -> std::io::Result<Self> {
         let mut trs: *mut foundationdb_sys::FDBTransaction = std::ptr::null_mut();
         let rc = unsafe { foundationdb_sys::fdb_database_create_transaction(db.db, &mut trs) };
         if rc != 0 {
-            return Err(fdb_err(rc));
+            return Err(super::fdb_err(rc));
         }
         Ok(Self { trs })
     }
@@ -218,6 +208,27 @@ impl FDBTransaction {
         }
     }
 
+    #[inline]
+    pub async fn get_async_value_optional(
+        &self,
+        key: &[u8],
+        snapshot: bool,
+    ) -> std::io::Result<Option<Vec<u8>>> {
+        loop {
+            let fut = self.get(key, snapshot)?;
+            fut.await_until_ready().await?;
+            let code = fut.get_error_code();
+            if code == 0 {
+                match fut.get_value() {
+                    Ok(v) => return Ok(Some(v.to_vec())),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                    Err(e) => return Err(e),
+                }
+            }
+            self.on_error_async(code).await?;
+        }
+    }
+
     /// Returns a future for range read. (Used only inside retry loop below.)
     #[inline]
     pub fn get_range<'a>(&self, range: &FDBRange<'a>) -> std::io::Result<FDBFuture> {
@@ -252,7 +263,7 @@ impl FDBTransaction {
 
         let code = fut.get_error_code();
         if code != 0 {
-            return Err(fdb_err(code)); // use your FDB error mapper
+            return Err(super::fdb_err(code)); // use your FDB error mapper
         }
 
         let mut kvs_ptr: *const foundationdb_sys::FDBKeyValue = std::ptr::null();
@@ -267,20 +278,11 @@ impl FDBTransaction {
             )
         };
         if rc != 0 {
-            return Err(fdb_err(rc));
+            return Err(super::fdb_err(rc));
         }
 
         if count <= 0 || kvs_ptr.is_null() {
             return Ok((Vec::new(), more != 0));
-        }
-
-        #[inline]
-        unsafe fn copy_bytes(ptr: *const u8, len: usize) -> Vec<u8> {
-            if ptr.is_null() || len == 0 {
-                return Vec::new();
-            }
-            // NOTE: value/key buffers are byte-aligned; &[u8] is fine.
-            unsafe { std::slice::from_raw_parts(ptr, len).to_vec() }
         }
 
         let mut out = Vec::with_capacity(count as usize);
@@ -292,8 +294,58 @@ impl FDBTransaction {
             let klen = kv.key_length as usize;
             let vlen = kv.value_length as usize;
 
-            let key = unsafe { copy_bytes(kv.key as *const u8, klen) };
-            let val = unsafe { copy_bytes(kv.value as *const u8, vlen) };
+            let key = unsafe { copy_bytes(kv.key, klen) };
+            let val = unsafe { copy_bytes(kv.value, vlen) };
+
+            out.push((key, val));
+        }
+
+        Ok((out, more != 0))
+    }
+
+    #[inline]
+    pub async fn get_range_async<'a>(
+        &self,
+        range: &FDBRange<'a>,
+    ) -> std::io::Result<(Vec<(Vec<u8>, Vec<u8>)>, bool)> {
+        let fut = self.get_range(range)?;
+        fut.await_until_ready().await?;
+
+        let code = fut.get_error_code();
+        if code != 0 {
+            return Err(super::fdb_err(code)); // use your FDB error mapper
+        }
+
+        let mut kvs_ptr: *const foundationdb_sys::FDBKeyValue = std::ptr::null();
+        let mut count: i32 = 0;
+        let mut more: i32 = 0;
+        let rc = unsafe {
+            foundationdb_sys::fdb_future_get_keyvalue_array(
+                fut.fut,
+                &mut kvs_ptr,
+                &mut count,
+                &mut more,
+            )
+        };
+        if rc != 0 {
+            return Err(super::fdb_err(rc));
+        }
+
+        if count <= 0 || kvs_ptr.is_null() {
+            return Ok((Vec::new(), more != 0));
+        }
+
+        let mut out = Vec::with_capacity(count as usize);
+
+        for i in 0..(count as usize) {
+            // Read struct without assuming alignment
+            let kv = unsafe { kvs_ptr.add(i).read_unaligned() };
+
+            let klen = kv.key_length as usize;
+            let vlen = kv.value_length as usize;
+
+            let key = unsafe { copy_bytes(kv.key, klen) };
+            let val = unsafe { copy_bytes(kv.value, vlen) };
 
             out.push((key, val));
         }
@@ -313,7 +365,18 @@ impl FDBTransaction {
         fut.block_until_ready();
         let code = fut.get_error_code();
         if code != 0 {
-            return Err(fdb_err(code));
+            return Err(super::fdb_err(code));
+        }
+        Ok(())
+    }
+
+    #[inline]
+    pub async fn commit_async(&self) -> std::io::Result<()> {
+        let fut = self.commit()?;
+        fut.await_until_ready().await?;
+        let code = fut.get_error_code();
+        if code != 0 {
+            return Err(super::fdb_err(code));
         }
         Ok(())
     }
@@ -332,10 +395,31 @@ impl FDBTransaction {
         fut.block_until_ready();
         let rc = fut.get_error_code();
         if rc != 0 {
-            return Err(fdb_err(rc));
+            return Err(super::fdb_err(rc));
         }
         Ok(())
     }
+
+    #[inline]
+    async fn on_error_async(&self, code: i32) -> std::io::Result<()> {
+        let fut =
+            FDBFuture::new(unsafe { foundationdb_sys::fdb_transaction_on_error(self.trs, code) })?;
+        fut.await_until_ready().await?;
+        let rc = fut.get_error_code();
+        if rc != 0 {
+            return Err(super::fdb_err(rc));
+        }
+        Ok(())
+    }
+}
+
+#[inline]
+unsafe fn copy_bytes(ptr: *const u8, len: usize) -> Vec<u8> {
+    if ptr.is_null() || len == 0 {
+        return Vec::new();
+    }
+    // NOTE: value/key buffers are byte-aligned; &[u8] is fine.
+    unsafe { std::slice::from_raw_parts(ptr, len).to_vec() }
 }
 
 impl Drop for FDBTransaction {
@@ -373,5 +457,35 @@ where
         }
 
         trx.on_error_blocking(code)?;
+    }
+}
+
+#[inline]
+pub async fn run_async<R, F>(db: &FDB, mut f: F) -> std::io::Result<R>
+where
+    F: FnMut(&FDBTransaction) -> std::io::Result<FDBTransactionOutcome<R>>,
+{
+    loop {
+        let trx = FDBTransaction::new(db)?;
+
+        // user logic
+        let out = match f(&trx)? {
+            FDBTransactionOutcome::Ok(v) => v,
+            FDBTransactionOutcome::Retry(code) => {
+                trx.on_error_async(code).await?;
+                continue;
+            }
+        };
+
+        // commit
+        let fut = trx.commit()?;
+        fut.await_until_ready().await?;
+        let code = fut.get_error_code();
+
+        if code == 0 {
+            return Ok(out);
+        }
+
+        trx.on_error_async(code).await?;
     }
 }
