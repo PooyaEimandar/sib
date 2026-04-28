@@ -1,4 +1,5 @@
 use crossbeam::queue::ArrayQueue;
+use foundationdb_sys::FDBDatabaseOption;
 use std::{cell::UnsafeCell, fmt, num::NonZeroU64, sync::Arc, time::Duration};
 
 #[cfg(feature = "rt-tokio")]
@@ -177,10 +178,14 @@ pub struct FDBPool {
 
 impl FDBPool {
     /// Build an FDB pool by opening `pool_size` FDB handles up-front.
-    pub fn new(cluster_path: String, pool_size: NonZeroU64) -> std::io::Result<Self> {
+    pub fn new(
+        cluster_path: String,
+        pool_size: NonZeroU64,
+        options: &[(FDBDatabaseOption, &[u8])],
+    ) -> std::io::Result<Self> {
         let pool = Pool::new_with(pool_size, |_i| {
             // Open one FDB handle per slot
-            FDB::new(&cluster_path)
+            FDB::new(&cluster_path, options)
         })?;
         Ok(Self { pool })
     }
@@ -210,7 +215,7 @@ impl FDBPool {
         f: F,
     ) -> std::io::Result<R> {
         let loan = self.loan_blocking(timeout)?;
-        Ok(f(&*loan))
+        Ok(f(&loan))
     }
 
     /// loan fdb connection (mutable)
@@ -221,7 +226,7 @@ impl FDBPool {
         f: F,
     ) -> std::io::Result<R> {
         let mut loan = self.loan_blocking(timeout)?;
-        Ok(f(&mut *loan))
+        Ok(f(&mut loan))
     }
 
     /// Async loan with timeout (immutable)
@@ -232,7 +237,7 @@ impl FDBPool {
         Fut: std::future::Future<Output = R>,
     {
         let loan = self.loan(timeout).await?;
-        Ok(f(&*loan).await)
+        Ok(f(&loan).await)
     }
 
     /// Async loan with timeout (mutable)
@@ -247,7 +252,7 @@ impl FDBPool {
         Fut: std::future::Future<Output = R>,
     {
         let mut loan = self.loan(timeout).await?;
-        Ok(f(&mut *loan).await)
+        Ok(f(&mut loan).await)
     }
 }
 
@@ -338,7 +343,7 @@ mod tests {
         }
 
         const NUMBER_OF_WORKERS: usize = 1;
-        crate::init_global_poller(NUMBER_OF_WORKERS, 1 * 1024 * 1024);
+        crate::init_global_poller(NUMBER_OF_WORKERS, 1024 * 1024);
 
         let pool = std::sync::Arc::new(
             Pool::new_with(NonZeroU64::new(3).unwrap(), |_i| Ok(Counter::default())).unwrap(),
@@ -417,7 +422,7 @@ mod tests {
     fn test_fdb_pool_timeout_when_all_held() {
         const TIME: Duration = Duration::from_millis(5);
         const NUMBER_OF_WORKERS: usize = 1;
-        crate::init_global_poller(NUMBER_OF_WORKERS, 1 * 1024 * 1024);
+        crate::init_global_poller(NUMBER_OF_WORKERS, 1024 * 1024);
 
         let pool = Pool::new_with(NonZeroU64::new(1).unwrap(), |_| Ok(123u32)).unwrap();
 
@@ -462,7 +467,8 @@ mod tests {
         std::thread::sleep(Duration::from_secs(1));
 
         let cluster_path = default_fdb_cluster_path();
-        let pool = FDBPool::new(cluster_path, NonZeroU64::new(1).unwrap()).expect("create pool");
+        let pool =
+            FDBPool::new(cluster_path, NonZeroU64::new(1).unwrap(), &[]).expect("create pool");
 
         let lease = pool.try_loan().expect("acquire");
         let key = b"key1";
@@ -470,14 +476,14 @@ mod tests {
 
         {
             // set
-            let tr = FDBTransaction::new(&*lease).expect("new transaction failed");
+            let tr = FDBTransaction::new(&lease).expect("new transaction failed");
             tr.set(key, value);
             tr.commit_blocking().expect("commit failed");
         }
 
         {
             // get
-            let tr = FDBTransaction::new(&*lease).expect("new transaction failed");
+            let tr = FDBTransaction::new(&lease).expect("new transaction failed");
             let fut: crate::database::fdb::future::FDBFuture = tr.get(key, false).unwrap();
             fut.block_until_ready();
             let result = fut.get_value().expect("get failed");
@@ -496,27 +502,27 @@ mod tests {
         std::thread::sleep(Duration::from_secs(1));
 
         let cluster_path = default_fdb_cluster_path();
-        let pool = FDBPool::new(cluster_path, NonZeroU64::new(1).unwrap()).expect("create pool");
+        let pool =
+            FDBPool::new(cluster_path, NonZeroU64::new(1).unwrap(), &[]).expect("create pool");
 
         let lease = pool.try_loan().expect("acquire");
         let key = b"key2";
         let value = b"hello";
 
         // set
-        crate::database::fdb::trans::run(&*lease, |tr| {
+        crate::database::fdb::trans::run(&lease, |tr| {
             tr.set(key, value);
             Ok(crate::database::fdb::trans::FDBTransactionOutcome::Ok(()))
         })
         .expect("commit failed");
 
         // get
-        crate::database::fdb::trans::run(&*lease, |tr| {
-            tr.get_blocking_value_optional(key, false)
-                .and_then(|res_opt| {
-                    let res = res_opt.expect("key missing");
-                    assert_eq!(res.iter().as_slice(), value.as_slice(), "value mismatch");
-                    Ok(crate::database::fdb::trans::FDBTransactionOutcome::Ok(()))
-                })
+        crate::database::fdb::trans::run(&lease, |tr| {
+            tr.get_blocking_value_optional(key, false).map(|res_opt| {
+                let res = res_opt.expect("key missing");
+                assert_eq!(res.iter().as_slice(), value.as_slice(), "value mismatch");
+                crate::database::fdb::trans::FDBTransactionOutcome::Ok(())
+            })
         })
         .expect("commit failed");
 
@@ -544,8 +550,9 @@ mod tests {
 
         // Pool must allow 2 concurrent leases for the two threads
         let cluster_path = default_fdb_cluster_path();
-        let pool =
-            Arc::new(FDBPool::new(cluster_path, NonZeroU64::new(2).unwrap()).expect("create pool"));
+        let pool = Arc::new(
+            FDBPool::new(cluster_path, NonZeroU64::new(2).unwrap(), &[]).expect("create pool"),
+        );
 
         // Use a unique key so parallel test runs don’t collide
         let key = "conflict_inc".to_owned()
@@ -560,7 +567,7 @@ mod tests {
         // Initialize key = "0"
         {
             let lease = pool.try_loan().expect("acquire init lease");
-            trans::run(&*lease, |tr| {
+            trans::run(&lease, |tr| {
                 tr.set(key.as_bytes(), b"0");
                 Ok(FDBTransactionOutcome::Ok(()))
             })
@@ -576,7 +583,7 @@ mod tests {
         let a_ctr = Arc::clone(&attempts_a);
         let t1 = thread::spawn(move || {
             let lease = pool_a.try_loan().expect("acquire lease A");
-            trans::run(&*lease, |tr| {
+            trans::run(&lease, |tr| {
                 a_ctr.fetch_add(1, Ordering::Relaxed);
 
                 // Read-modify-write (conflicts with other thread)
@@ -601,7 +608,7 @@ mod tests {
         let b_ctr = Arc::clone(&attempts_b);
         let t2 = thread::spawn(move || {
             let lease = pool_b.try_loan().expect("acquire lease B");
-            trans::run(&*lease, |tr| {
+            trans::run(&lease, |tr| {
                 b_ctr.fetch_add(1, Ordering::Relaxed);
 
                 let cur = tr
@@ -624,7 +631,7 @@ mod tests {
         // Final value must be 2 if both increments committed (with retries)
         {
             let lease = pool.try_loan().expect("acquire final lease");
-            trans::run(&*lease, |tr| {
+            trans::run(&lease, |tr| {
                 let final_val = tr
                     .get_blocking_value_optional(key.as_bytes(), false)?
                     .expect("key missing");
@@ -667,7 +674,8 @@ mod tests {
         std::thread::sleep(Duration::from_secs(1));
 
         let cluster_path = default_fdb_cluster_path();
-        let pool = FDBPool::new(cluster_path, NonZeroU64::new(1).unwrap()).expect("create pool");
+        let pool =
+            FDBPool::new(cluster_path, NonZeroU64::new(1).unwrap(), &[]).expect("create pool");
         let lease = pool.try_loan().expect("acquire");
 
         let calls = Arc::new(AtomicUsize::new(0));
@@ -680,7 +688,7 @@ mod tests {
         let value = b"ok";
 
         // Run: first attempt returns Retry, second attempt does the write and commits.
-        let res = trans::run(&*lease, move |tr| {
+        let res = trans::run(&lease, move |tr| {
             let n = calls_cl.fetch_add(1, Ordering::SeqCst);
 
             if n == 0 {
@@ -699,7 +707,7 @@ mod tests {
         );
 
         // Verify the write landed
-        trans::run(&*lease, |tr| {
+        trans::run(&lease, |tr| {
             let got = tr
                 .get_blocking_value_optional(key.as_bytes(), false)?
                 .expect("key missing");
