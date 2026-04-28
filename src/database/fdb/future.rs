@@ -40,6 +40,10 @@ impl FDBFuture {
         }
     }
 
+    pub async fn await_until_ready(&self) -> std::io::Result<()> {
+        FDBFutureAwaitUntilReady::new(self.fut).await
+    }
+
     pub fn get_error_code(&self) -> i32 {
         unsafe { fdb_future_get_error(self.fut) }
     }
@@ -92,6 +96,65 @@ impl Drop for FDBFuture {
         }
         unsafe {
             foundationdb_sys::fdb_future_destroy(self.fut);
+        }
+    }
+}
+
+struct FDBFutureAwaitUntilReady {
+    fut: *mut foundationdb_sys::FDB_future,
+    waker: Option<std::sync::Arc<futures_util::task::AtomicWaker>>,
+}
+
+impl FDBFutureAwaitUntilReady {
+    fn new(fut: *mut foundationdb_sys::FDB_future) -> Self {
+        Self { fut, waker: None }
+    }
+}
+
+impl std::future::Future for FDBFutureAwaitUntilReady {
+    type Output = std::io::Result<()>;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let ready = unsafe { foundationdb_sys::fdb_future_is_ready(self.fut) };
+        if ready == 0 {
+            let mut register = false;
+            let waker = self.waker.get_or_insert_with(|| {
+                register = true;
+                std::sync::Arc::new(futures_util::task::AtomicWaker::new())
+            });
+            waker.register(cx.waker());
+            if register {
+                let waker = waker.clone();
+                let waker_ptr = std::sync::Arc::into_raw(waker);
+
+                extern "C" fn fdb_future_callback(
+                    _: *mut foundationdb_sys::FDBFuture,
+                    callback_parameter: *mut ::std::os::raw::c_void,
+                ) {
+                    let waker: std::sync::Arc<futures_util::task::AtomicWaker> =
+                        unsafe { std::sync::Arc::from_raw(callback_parameter as *const _) };
+                    waker.wake();
+                }
+
+                unsafe {
+                    foundationdb_sys::fdb_future_set_callback(
+                        self.fut,
+                        Some(fdb_future_callback),
+                        waker_ptr as *mut _,
+                    );
+                }
+            }
+            std::task::Poll::Pending
+        } else {
+            let fdb_err = unsafe { foundationdb_sys::fdb_future_get_error(self.fut) };
+            if fdb_err != 0 {
+                std::task::Poll::Ready(Err(super::fdb_err(fdb_err)))
+            } else {
+                std::task::Poll::Ready(Ok(()))
+            }
         }
     }
 }
