@@ -37,3 +37,11 @@ macro_rules! fdb_network_stop {
         handle.join().expect("Failed to join FDB network thread");
     }};
 }
+
+#[inline]
+fn fdb_err(code: i32) -> std::io::Error {
+    let cstr = unsafe { foundationdb_sys::fdb_get_error(code) };
+    let s = unsafe { std::ffi::CStr::from_ptr(cstr) }
+        .to_string_lossy();
+    std::io::Error::other(format!("FDB error {code}: {s}"))
+}
