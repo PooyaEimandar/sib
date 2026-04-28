@@ -105,48 +105,44 @@ impl BucketTtlCache {
         let key = key.to_vec();
         let value = value.to_vec();
 
-        tokio::task::spawn_blocking(move || {
-            use crate::database::fdb::trans::FDBTransaction;
+        use crate::database::fdb::trans::FDBTransaction;
 
-            let loan = pool
-                .try_loan()
-                .ok_or_else(|| std::io::Error::other("no FDB handle in pool"))?;
-            let exp_ms = now_ms().saturating_add(ttl.as_millis() as u64);
-            let bucket = (exp_ms / bucket_ms) * bucket_ms;
+        let loan = pool
+            .try_loan()
+            .ok_or_else(|| std::io::Error::other("no FDB handle in pool"))?;
+        let exp_ms = now_ms().saturating_add(ttl.as_millis() as u64);
+        let bucket = (exp_ms / bucket_ms) * bucket_ms;
 
-            let kd = {
-                let mut k =
-                    Vec::with_capacity(ROOT_PFX.len() + ns.len() + DATA_SEG.len() + key.len());
-                k.extend_from_slice(ROOT_PFX);
-                k.extend_from_slice(&ns);
-                k.extend_from_slice(DATA_SEG);
-                k.extend_from_slice(&key);
-                k
-            };
-            let kt = {
-                let mut k = Vec::with_capacity(
-                    ROOT_PFX.len() + ns.len() + TTL_SEG.len() + 8 + 1 + key.len(),
-                );
-                k.extend_from_slice(ROOT_PFX);
-                k.extend_from_slice(&ns);
-                k.extend_from_slice(TTL_SEG);
-                k.extend_from_slice(&bucket.to_be_bytes());
-                k.push(b'/');
-                k.extend_from_slice(&key);
-                k
-            };
+        let kd = {
+            let mut k =
+                Vec::with_capacity(ROOT_PFX.len() + ns.len() + DATA_SEG.len() + key.len());
+            k.extend_from_slice(ROOT_PFX);
+            k.extend_from_slice(&ns);
+            k.extend_from_slice(DATA_SEG);
+            k.extend_from_slice(&key);
+            k
+        };
+        let kt = {
+            let mut k = Vec::with_capacity(
+                ROOT_PFX.len() + ns.len() + TTL_SEG.len() + 8 + 1 + key.len(),
+            );
+            k.extend_from_slice(ROOT_PFX);
+            k.extend_from_slice(&ns);
+            k.extend_from_slice(TTL_SEG);
+            k.extend_from_slice(&bucket.to_be_bytes());
+            k.push(b'/');
+            k.extend_from_slice(&key);
+            k
+        };
 
-            let mut payload = Vec::with_capacity(8 + value.len());
-            payload.extend_from_slice(&exp_ms.to_be_bytes());
-            payload.extend_from_slice(&value);
+        let mut payload = Vec::with_capacity(8 + value.len());
+        payload.extend_from_slice(&exp_ms.to_be_bytes());
+        payload.extend_from_slice(&value);
 
-            let trx = FDBTransaction::new(&*loan)?;
-            trx.set(&kd, &payload);
-            trx.set(&kt, b"");
-            trx.commit_blocking()
-        })
-        .await
-        .map_err(std::io::Error::from)?
+        let trx = FDBTransaction::new(&loan)?;
+        trx.set(&kd, &payload);
+        trx.set(&kt, b"");
+        trx.commit_async().await
     }
 
     #[cfg(feature = "rt-may")]
@@ -167,7 +163,7 @@ impl BucketTtlCache {
         payload.extend_from_slice(&exp_ms.to_be_bytes());
         payload.extend_from_slice(value);
 
-        let trx = FDBTransaction::new(&*loan)?;
+        let trx = FDBTransaction::new(&loan)?;
         trx.set(&kd, &payload);
         trx.set(&kt, b"");
         trx.commit_blocking()
@@ -182,7 +178,7 @@ impl BucketTtlCache {
             .try_loan()
             .ok_or_else(|| std::io::Error::other("no FDB handle in pool"))?;
         let kd = self.k_data(key);
-        let trx = FDBTransaction::new(&*loan)?;
+        let trx = FDBTransaction::new(&loan)?;
 
         let val = trx.get_blocking_value_optional(&kd, true)?;
         if let Some(raw) = val {
@@ -208,34 +204,30 @@ impl BucketTtlCache {
         let pool = self.pool.clone();
         let kd = self.k_data(key);
 
-        tokio::task::spawn_blocking(move || {
-            use crate::database::fdb::trans::FDBTransaction;
+        use crate::database::fdb::trans::FDBTransaction;
 
-            let loan = pool
-                .try_loan()
-                .ok_or_else(|| std::io::Error::other("no FDB handle in pool"))?;
-            let trx = FDBTransaction::new(&*loan)?;
+        let loan = pool
+            .try_loan()
+            .ok_or_else(|| std::io::Error::other("no FDB handle in pool"))?;
+        let trx = FDBTransaction::new(&loan)?;
 
-            let val = trx.get_blocking_value_optional(&kd, true)?;
-            if let Some(raw) = val {
-                if raw.len() < 8 {
-                    return Ok(None);
-                }
-                let mut be = [0u8; 8];
-                be.copy_from_slice(&raw[..8]);
-                let exp = u64::from_be_bytes(be);
-                if now_ms() >= exp {
-                    // best-effort scrub; ttl index will be removed by GC
-                    trx.clear(&kd);
-                    let _ = trx.commit_blocking();
-                    return Ok(None);
-                }
-                return Ok(Some(raw[8..].to_vec()));
+        let val = trx.get_async_value_optional(&kd, true).await?;
+        if let Some(raw) = val {
+            if raw.len() < 8 {
+                return Ok(None);
             }
-            Ok(None)
-        })
-        .await
-        .map_err(std::io::Error::from)?
+            let mut be = [0u8; 8];
+            be.copy_from_slice(&raw[..8]);
+            let exp = u64::from_be_bytes(be);
+            if now_ms() >= exp {
+                // best-effort scrub; ttl index will be removed by GC
+                trx.clear(&kd);
+                trx.commit_async().await?;
+                return Ok(None);
+            }
+            return Ok(Some(raw[8..].to_vec()));
+        }
+        Ok(None)
     }
 
     #[cfg(feature = "rt-may")]
@@ -247,7 +239,7 @@ impl BucketTtlCache {
             .try_loan()
             .ok_or_else(|| std::io::Error::other("no FDB handle in pool"))?;
         let kd = self.k_data(key);
-        let trx = FDBTransaction::new(&*loan)?;
+        let trx = FDBTransaction::new(&loan)?;
         trx.clear(&kd);
         trx.commit_blocking()
     }
@@ -257,18 +249,14 @@ impl BucketTtlCache {
         let pool = self.pool.clone();
         let kd = self.k_data(key);
 
-        tokio::task::spawn_blocking(move || {
-            use crate::database::fdb::trans::FDBTransaction;
+        use crate::database::fdb::trans::FDBTransaction;
 
-            let loan = pool
-                .try_loan()
-                .ok_or_else(|| std::io::Error::other("no FDB handle in pool"))?;
-            let trx = FDBTransaction::new(&*loan)?;
-            trx.clear(&kd);
-            trx.commit_blocking()
-        })
-        .await
-        .map_err(std::io::Error::from)?
+        let loan = pool
+            .try_loan()
+            .ok_or_else(|| std::io::Error::other("no FDB handle in pool"))?;
+        let trx = FDBTransaction::new(&loan)?;
+        trx.clear(&kd);
+        trx.commit_async().await
     }
 
     #[cfg(feature = "rt-may")]
@@ -283,7 +271,7 @@ impl BucketTtlCache {
         let limit = self.bucket_of(now.saturating_sub(self.lazy_expiration_ms));
 
         let k_gc = self.k_gc_checkpoint();
-        let trx = FDBTransaction::new(&*loan)?;
+        let trx = FDBTransaction::new(&loan)?;
         let last = trx.get_blocking_value_optional(&k_gc, true)?;
         drop(trx);
 
@@ -307,7 +295,7 @@ impl BucketTtlCache {
         loop {
             use crate::database::fdb::trans::{FDBRange, FDBStreamingMode};
 
-            let trx = FDBTransaction::new(&*loan)?;
+            let trx = FDBTransaction::new(&loan)?;
             let range = FDBRange {
                 begin_key: &start,
                 begin_or_equal: true,
@@ -329,7 +317,7 @@ impl BucketTtlCache {
                 break;
             }
 
-            let trx = FDBTransaction::new(&*loan)?;
+            let trx = FDBTransaction::new(&loan)?;
             for (k_ttl, _) in &batch {
                 if let Some(pos) = k_ttl.iter().rposition(|&b| b == b'/') {
                     let key = &k_ttl[pos + 1..];
@@ -341,7 +329,7 @@ impl BucketTtlCache {
             trx.commit_blocking()?;
         }
 
-        let trx = FDBTransaction::new(&*loan)?;
+        let trx = FDBTransaction::new(&loan)?;
         trx.clear_range(&start, &end);
         trx.set(&k_gc, &candidate.to_be_bytes());
         trx.commit_blocking()?;
@@ -356,108 +344,104 @@ impl BucketTtlCache {
         let lazy_expiration_ms = self.lazy_expiration_ms;
         let gc_batch = self.gc_batch;
 
-        tokio::task::spawn_blocking(move || {
-            use crate::database::fdb::trans::FDBTransaction;
+        use crate::database::fdb::trans::FDBTransaction;
 
-            let loan = pool
-                .try_loan()
-                .ok_or_else(|| std::io::Error::other("no FDB handle in pool"))?;
-            let now = now_ms();
-            let limit = (now.saturating_sub(lazy_expiration_ms) / bucket_ms) * bucket_ms;
+        let loan = pool
+            .try_loan()
+            .ok_or_else(|| std::io::Error::other("no FDB handle in pool"))?;
+        let now = now_ms();
+        let limit = (now.saturating_sub(lazy_expiration_ms) / bucket_ms) * bucket_ms;
 
-            // load checkpoint
-            let k_gc = {
-                let mut k = Vec::with_capacity(ROOT_PFX.len() + ns.len() + GC_LAST.len());
-                k.extend_from_slice(ROOT_PFX);
-                k.extend_from_slice(&ns);
-                k.extend_from_slice(GC_LAST);
-                k
+        // load checkpoint
+        let k_gc = {
+            let mut k = Vec::with_capacity(ROOT_PFX.len() + ns.len() + GC_LAST.len());
+            k.extend_from_slice(ROOT_PFX);
+            k.extend_from_slice(&ns);
+            k.extend_from_slice(GC_LAST);
+            k
+        };
+        let trx = FDBTransaction::new(&loan)?;
+        let last = trx.get_async_value_optional(&k_gc, true).await?; // retry-safe
+        drop(trx);
+
+        let start_bucket = match last {
+            Some(b) if b.len() == 8 => {
+                u64::from_be_bytes(b.as_slice().try_into().unwrap()).saturating_add(bucket_ms)
+            }
+            _ => 0,
+        };
+        let candidate = if start_bucket == 0 {
+            (now.saturating_sub(lazy_expiration_ms + bucket_ms) / bucket_ms) * bucket_ms
+        } else {
+            start_bucket
+        };
+
+        if candidate == 0 || candidate >= limit {
+            return Ok(false);
+        }
+
+        // stream-delete bucket in batches
+        let (start, end) = {
+            let mut s = Vec::with_capacity(ROOT_PFX.len() + ns.len() + TTL_SEG.len() + 8 + 1);
+            s.extend_from_slice(ROOT_PFX);
+            s.extend_from_slice(&ns);
+            s.extend_from_slice(TTL_SEG);
+            s.extend_from_slice(&candidate.to_be_bytes());
+            s.push(b'/');
+            let mut e = s.clone();
+            e.push(0xFF);
+            (s, e)
+        };
+
+        loop {
+            use crate::database::fdb::trans::{FDBRange, FDBStreamingMode};
+            let trx = FDBTransaction::new(&loan)?;
+            let range = FDBRange {
+                begin_key: &start,
+                begin_or_equal: true,
+                begin_offset: 0,
+                end_key: &end,
+                end_or_equal: false,
+                end_offset: 0,
+                limit: gc_batch as i32,
+                target_bytes: 1 << 20, // NEW: 1 MiB hint
+                mode: FDBStreamingMode::WantAll,
+                iteration: 0,
+                snapshot: true,
+                reverse: false,
             };
-            let trx = FDBTransaction::new(&*loan)?;
-            let last = trx.get_blocking_value_optional(&k_gc, true)?; // retry-safe
+            let (batch, _more) = trx.get_range_async(&range).await?;
+            // Drop before write txn
             drop(trx);
 
-            let start_bucket = match last {
-                Some(b) if b.len() == 8 => {
-                    u64::from_be_bytes(b.as_slice().try_into().unwrap()).saturating_add(bucket_ms)
-                }
-                _ => 0,
-            };
-            let candidate = if start_bucket == 0 {
-                (now.saturating_sub(lazy_expiration_ms + bucket_ms) / bucket_ms) * bucket_ms
-            } else {
-                start_bucket
-            };
-
-            if candidate == 0 || candidate >= limit {
-                return Ok(false);
+            if batch.is_empty() {
+                break;
             }
 
-            // stream-delete bucket in batches
-            let (start, end) = {
-                let mut s = Vec::with_capacity(ROOT_PFX.len() + ns.len() + TTL_SEG.len() + 8 + 1);
-                s.extend_from_slice(ROOT_PFX);
-                s.extend_from_slice(&ns);
-                s.extend_from_slice(TTL_SEG);
-                s.extend_from_slice(&candidate.to_be_bytes());
-                s.push(b'/');
-                let mut e = s.clone();
-                e.push(0xFF);
-                (s, e)
-            };
-
-            loop {
-                use crate::database::fdb::trans::{FDBRange, FDBStreamingMode};
-                let trx = FDBTransaction::new(&*loan)?;
-                let range = FDBRange {
-                    begin_key: &start,
-                    begin_or_equal: true,
-                    begin_offset: 0,
-                    end_key: &end,
-                    end_or_equal: false,
-                    end_offset: 0,
-                    limit: gc_batch as i32,
-                    target_bytes: 1 << 20, // NEW: 1 MiB hint
-                    mode: FDBStreamingMode::WantAll,
-                    iteration: 0,
-                    snapshot: true,
-                    reverse: false,
-                };
-                let (batch, _more) = trx.get_range_blocking(&range)?;
-                // Drop before write txn
-                drop(trx);
-
-                if batch.is_empty() {
-                    break;
+            let trx = FDBTransaction::new(&loan)?;
+            for (k_ttl, _) in &batch {
+                if let Some(pos) = k_ttl.iter().rposition(|&b| b == b'/') {
+                    let key = &k_ttl[pos + 1..];
+                    let mut kd = Vec::with_capacity(
+                        ROOT_PFX.len() + ns.len() + DATA_SEG.len() + key.len(),
+                    );
+                    kd.extend_from_slice(ROOT_PFX);
+                    kd.extend_from_slice(&ns);
+                    kd.extend_from_slice(DATA_SEG);
+                    kd.extend_from_slice(key);
+                    trx.clear(&kd);
                 }
-
-                let trx = FDBTransaction::new(&*loan)?;
-                for (k_ttl, _) in &batch {
-                    if let Some(pos) = k_ttl.iter().rposition(|&b| b == b'/') {
-                        let key = &k_ttl[pos + 1..];
-                        let mut kd = Vec::with_capacity(
-                            ROOT_PFX.len() + ns.len() + DATA_SEG.len() + key.len(),
-                        );
-                        kd.extend_from_slice(ROOT_PFX);
-                        kd.extend_from_slice(&ns);
-                        kd.extend_from_slice(DATA_SEG);
-                        kd.extend_from_slice(key);
-                        trx.clear(&kd);
-                    }
-                    trx.clear(k_ttl);
-                }
-                trx.commit_blocking()?;
+                trx.clear(k_ttl);
             }
+            trx.commit_async().await?;
+        }
 
-            // tidy + checkpoint
-            let trx = FDBTransaction::new(&*loan)?;
-            trx.clear_range(&start, &end);
-            trx.set(&k_gc, &candidate.to_be_bytes());
-            trx.commit_blocking()?;
-            Ok(true)
-        })
-        .await
-        .map_err(std::io::Error::from)?
+        // tidy + checkpoint
+        let trx = FDBTransaction::new(&loan)?;
+        trx.clear_range(&start, &end);
+        trx.set(&k_gc, &candidate.to_be_bytes());
+        trx.commit_async().await?;
+        Ok(true)
     }
 
     #[cfg(feature = "rt-may")]
@@ -503,7 +487,7 @@ mod tests {
         #[cfg(target_os = "linux")]
         let cluster = "/etc/foundationdb/fdb.cluster";
 
-        let pool = FDBPool::new(cluster.to_owned(), NonZeroU64::new(4).unwrap())
+        let pool = FDBPool::new(cluster.to_owned(), NonZeroU64::new(4).unwrap(), &[])
             .expect("Failed to create FDBPool");
 
         Some((handle, net, pool))
