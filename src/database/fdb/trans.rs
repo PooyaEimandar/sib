@@ -463,13 +463,13 @@ where
 #[inline]
 pub async fn run_async<R, F>(db: &FDB, mut f: F) -> std::io::Result<R>
 where
-    F: FnMut(&FDBTransaction) -> std::io::Result<FDBTransactionOutcome<R>>,
+    F: AsyncFnMut(&FDBTransaction) -> std::io::Result<FDBTransactionOutcome<R>>,
 {
     loop {
         let trx = FDBTransaction::new(db)?;
 
         // user logic
-        let out = match f(&trx)? {
+        let out = match f(&trx).await? {
             FDBTransactionOutcome::Ok(v) => v,
             FDBTransactionOutcome::Retry(code) => {
                 trx.on_error_async(code).await?;
