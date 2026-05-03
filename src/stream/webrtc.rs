@@ -1988,7 +1988,7 @@ impl Server {
 
 #[async_trait::async_trait(?Send)]
 impl HAsyncService for Server {
-    async fn call<S: Session>(&mut self, session: &mut S) -> std::io::Result<()> {
+    async fn call<S: Session>(&self, session: &mut S) -> std::io::Result<()> {
         if !session.is_ws() {
             if let Some(index) = self.index.clone() {
                 return session
