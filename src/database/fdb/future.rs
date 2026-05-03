@@ -102,7 +102,7 @@ impl Drop for FDBFuture {
 
 struct FDBFutureAwaitUntilReady<'a> {
     fut: &'a FDBFuture,
-    waker: Option<Arc<AtomicWaker>>,
+    waker: Option<std::sync::Arc<futures_util::task::AtomicWaker>>,
 }
 
 impl<'a> FDBFutureAwaitUntilReady<'a> {
@@ -123,28 +123,34 @@ impl<'a> std::future::Future for FDBFutureAwaitUntilReady<'a> {
             let mut register = false;
             let waker = self.waker.get_or_insert_with(|| {
                 register = true;
-                Arc::new(AtomicWaker::new())
+                std::sync::Arc::new(futures_util::task::AtomicWaker::new())
             });
             waker.register(cx.waker());
             if register {
                 let waker = waker.clone();
-                let waker_ptr = Arc::into_raw(waker);
+                let waker_ptr = std::sync::Arc::into_raw(waker);
 
                 extern "C" fn fdb_future_callback(
                     _: *mut foundationdb_sys::FDBFuture,
                     callback_parameter: *mut ::std::os::raw::c_void,
                 ) {
-                    let waker: Arc<AtomicWaker> =
-                        unsafe { Arc::from_raw(callback_parameter as *const _) };
+                    let waker: std::sync::Arc<futures_util::task::AtomicWaker> =
+                        unsafe { std::sync::Arc::from_raw(callback_parameter as *const _) };
                     waker.wake();
                 }
 
-                unsafe {
+                let callback_err = unsafe {
                     foundationdb_sys::fdb_future_set_callback(
                         self.fut.fut,
                         Some(fdb_future_callback),
                         waker_ptr as *mut _,
-                    );
+                    )
+                };
+                if callback_err != 0 {
+                    unsafe {
+                        let _ = std::sync::Arc::from_raw(waker_ptr);
+                    }
+                    return std::task::Poll::Ready(Err(super::fdb_err(callback_err)));
                 }
             }
             std::task::Poll::Pending
