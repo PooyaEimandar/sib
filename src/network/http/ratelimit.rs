@@ -186,7 +186,7 @@ impl<Svc> super::session::HService for RateLimitedService<Svc>
 where
     Svc: super::session::HService,
 {
-    fn call<SE: super::session::Session>(&mut self, sess: &mut SE) -> std::io::Result<()> {
+    fn call<SE: super::session::Session>(&self, sess: &mut SE) -> std::io::Result<()> {
         let (anon_user_key, set_cookie) = self.user_key_and_cookie(sess);
         let cascaded_key = {
             let k = self.key_policy.make_key(sess);
@@ -218,7 +218,7 @@ impl<Svc> super::session::HAsyncService for RateLimitedService<Svc>
 where
     Svc: super::session::HAsyncService,
 {
-    async fn call<SE: super::session::Session>(&mut self, sess: &mut SE) -> std::io::Result<()> {
+    async fn call<SE: super::session::Session>(&self, sess: &mut SE) -> std::io::Result<()> {
         let (anon_user_key, set_cookie) = self.user_key_and_cookie(sess);
         let cascaded_key = {
             let k = self.key_policy.make_key(sess);
