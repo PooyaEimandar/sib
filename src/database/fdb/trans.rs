@@ -216,7 +216,7 @@ impl FDBTransaction {
     ) -> std::io::Result<Option<Vec<u8>>> {
         loop {
             let fut = self.get(key, snapshot)?;
-            fut.await_until_ready().await?;
+            let _ = fut.await_until_ready().await;
             let code = fut.get_error_code();
             if code == 0 {
                 match fut.get_value() {
