@@ -149,12 +149,7 @@ impl<'a> std::future::Future for FDBFutureAwaitUntilReady<'a> {
             }
             std::task::Poll::Pending
         } else {
-            let fdb_err = unsafe { foundationdb_sys::fdb_future_get_error(self.fut.fut) };
-            if fdb_err != 0 {
-                std::task::Poll::Ready(Err(fdb_error(fdb_err)))
-            } else {
-                std::task::Poll::Ready(Ok(()))
-            }
+            std::task::Poll::Ready(Ok(()))
         }
     }
 }
