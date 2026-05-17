@@ -53,7 +53,7 @@ hex = { version = "0.4.3", optional = true }
 http = { version = "1.4.0", optional = true, default-features = false, features = [
     "std",
 ] }
-hmac = { version = "0.12.1", optional = true, default-features = false }
+hmac = { version = "0.13.0", optional = true, default-features = false }
 httparse = { version = "1.10.1", optional = true, default-features = false }
 httpdate = { version = "1.0.3", optional = true, default-features = false }
 http-body-util = { version = "0.1.3", optional = true }
@@ -77,17 +77,17 @@ rustls = { version = "0.23.40", optional = true, default-features = false, featu
     "std",
     "tls12",
 ] }
-rustls-pki-types = { version = "1.14.0", optional = true, default-features = false }
+rustls-pki-types = { version = "1.14.1", optional = true, default-features = false }
 serde = { version = "1.0.188", optional = true, default-features = false, features = [
     "std",
 ] }
 serde_json = { version = "1.0.107", optional = true, default-features = false, features = [
     "std",
 ] }
-sha1 = { version = "0.10.6", optional = true, default-features = false, features = [
+sha1 = { version = "0.11.0", optional = true, default-features = false, features = [
     "std",
 ] }
-sha2 = { version = "0.10.9", optional = true, default-features = false, features = [
+sha2 = { version = "0.11.0", optional = true, default-features = false, features = [
     "std",
 ] }
 socket2 = { version = "0.6.3", optional = true, default-features = false, features = [
@@ -97,7 +97,7 @@ tracing = { version = "0.1.44", default-features = false, features = [
     "attributes",
     "std",
 ] }
-tokio = { version = "1.51.1", optional = true, default-features = false, features = [
+tokio = { version = "1.52.3", optional = true, default-features = false, features = [
     "fs",
     "io-util",
     "macros",
@@ -240,13 +240,13 @@ nonzero_ext = { version = "0.3.0", default-features = false, features = [
     "std",
 ] }
 num_cpus = { version = "1.17.0" }
-reqwest = { version = "0.13.2", default-features = false, features = [
+reqwest = { version = "0.13.3", default-features = false, features = [
     "blocking",
     "http2",
     "http3",
 ] }
-sha2 = { version = "0.10.9", default-features = false, features = ["std"] }
-tungstenite = { version = "0.28.0" }
+sha2 = { version = "0.11.0", default-features = false, features = ["std"] }
+tungstenite = { version = "0.29.0" }
 native-tls = "0.2.18"
 tokio = { version = "1.51.1", default-features = false, features = [
     "macros",
