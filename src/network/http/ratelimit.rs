@@ -131,7 +131,10 @@ impl<Svc> RateLimitedService<Svc> {
             .eom()
     }
 
-    #[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
+    #[cfg(any(
+        feature = "net-h2-server",
+        all(feature = "net-h3-server", target_os = "linux")
+    ))]
     async fn stamp_429<S: super::session::Session>(sess: &mut S) -> std::io::Result<()> {
         let body = Bytes::from_static(b"Too Many Requests");
         sess.status_code(StatusCode::TOO_MANY_REQUESTS)
@@ -186,7 +189,7 @@ impl<Svc> super::session::HService for RateLimitedService<Svc>
 where
     Svc: super::session::HService,
 {
-    fn call<SE: super::session::Session>(&mut self, sess: &mut SE) -> std::io::Result<()> {
+    fn call<SE: super::session::Session>(&self, sess: &mut SE) -> std::io::Result<()> {
         let (anon_user_key, set_cookie) = self.user_key_and_cookie(sess);
         let cascaded_key = {
             let k = self.key_policy.make_key(sess);
@@ -212,13 +215,16 @@ where
     }
 }
 
-#[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
+#[cfg(any(
+    feature = "net-h2-server",
+    all(feature = "net-h3-server", target_os = "linux")
+))]
 #[async_trait::async_trait(?Send)]
 impl<Svc> super::session::HAsyncService for RateLimitedService<Svc>
 where
     Svc: super::session::HAsyncService,
 {
-    async fn call<SE: super::session::Session>(&mut self, sess: &mut SE) -> std::io::Result<()> {
+    async fn call<SE: super::session::Session>(&self, sess: &mut SE) -> std::io::Result<()> {
         let (anon_user_key, set_cookie) = self.user_key_and_cookie(sess);
         let cascaded_key = {
             let k = self.key_policy.make_key(sess);
@@ -269,7 +275,10 @@ mod tests {
         #[cfg(feature = "net-h1-server")]
         type Service = RateLimitedService<EchoServer>;
 
-        #[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
+        #[cfg(any(
+            feature = "net-h2-server",
+            all(feature = "net-h3-server", target_os = "linux")
+        ))]
         type HAsyncService = RateLimitedService<EchoServer>;
 
         #[cfg(feature = "net-wt-server")]
@@ -290,7 +299,10 @@ mod tests {
             )
         }
 
-        #[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
+        #[cfg(any(
+            feature = "net-h2-server",
+            all(feature = "net-h3-server", target_os = "linux")
+        ))]
         fn async_service(&self, _id: usize) -> Self::HAsyncService {
             use crate::network::http::ratelimit::RLKey;
             RateLimitedService::new(
@@ -389,6 +401,7 @@ mod tests {
 
     #[cfg(feature = "net-h1-server")]
     #[test]
+    #[ignore = "legacy network integration test uses fixed ports or long-running servers"]
     fn test_ratelimit_h1_server() {
         use crate::network::http::server::{H1Config, HFactory};
         use std::time::Duration;
@@ -426,6 +439,7 @@ mod tests {
 
     #[cfg(feature = "net-h2-server")]
     #[test]
+    #[ignore = "legacy network integration test uses fixed ports or long-running servers"]
     fn test_ratelimit_h2_tls_server() {
         use crate::network::http::server::{H2Config, HFactory};
         use reqwest::blocking::Client;
@@ -468,8 +482,9 @@ mod tests {
         verify_cookie_flow(&client, &url, reqwest::Version::HTTP_2);
     }
 
-    #[cfg(feature = "net-h3-server")]
+    #[cfg(all(feature = "net-h3-server", target_os = "linux"))]
     #[test]
+    #[ignore = "legacy network integration test uses fixed ports or long-running servers"]
     fn test_ratelimit_h3_tls_server() {
         use crate::network::http::server::H3Config;
         use reqwest::blocking::Client;

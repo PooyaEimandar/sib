@@ -21,34 +21,19 @@ where
         }
     };
 
-    // Share the per-connection service among request tasks
-    let svc = std::rc::Rc::new(std::cell::RefCell::new(Some(service)));
+    let svc = std::rc::Rc::new(service);
 
     loop {
-        let svc_rc = std::rc::Rc::clone(&svc);
         match h3_conn.accept().await {
             Ok(Some(resolver)) => {
                 match resolver.resolve_request().await {
                     Ok((req, stream)) => {
+                        let service = std::rc::Rc::clone(&svc);
                         glommio::spawn_local(async move {
-                            let mut service = loop {
-                                if let Some(s) = {
-                                    let mut guard = svc_rc.borrow_mut();
-                                    guard.take()
-                                } {
-                                    break s;
-                                }
-                                glommio::yield_if_needed().await;
-                            };
-
-                            // run the service
                             use crate::network::http::h3_session::H3Session;
                             let result = service
                                 .call(&mut H3Session::new(peer_addr, req, stream))
                                 .await;
-
-                            // Put the service back for the next request.
-                            *svc_rc.borrow_mut() = Some(service);
 
                             if let Err(e) = result {
                                 error!("h3 service error: {e}");
@@ -93,47 +78,28 @@ where
         }
     };
 
-    // Shared per-connection service among request tasks (kept on the same LocalSet thread)
-    let svc = std::rc::Rc::new(std::cell::RefCell::new(Some(service)));
+    let svc = std::rc::Rc::new(service);
 
     loop {
-        let svc_rc = std::rc::Rc::clone(&svc);
-
         match h3_conn.accept().await {
-            Ok(Some(resolver)) => {
-                match resolver.resolve_request().await {
-                    Ok((req, stream)) => {
-                        tokio::task::spawn_local(async move {
-                            // Spin-yield until we can take the service (single owner at a time)
-                            let mut service = loop {
-                                if let Some(s) = {
-                                    let mut guard = svc_rc.borrow_mut();
-                                    guard.take()
-                                } {
-                                    break s;
-                                }
-                                tokio::task::yield_now().await;
-                            };
+            Ok(Some(resolver)) => match resolver.resolve_request().await {
+                Ok((req, stream)) => {
+                    let service = std::rc::Rc::clone(&svc);
+                    tokio::task::spawn_local(async move {
+                        use crate::network::http::h3_session::H3Session;
+                        let result = service
+                            .call(&mut H3Session::new(peer_addr, req, stream))
+                            .await;
 
-                            // Run the service
-                            use crate::network::http::h3_session::H3Session;
-                            let result = service
-                                .call(&mut H3Session::new(peer_addr, req, stream))
-                                .await;
-
-                            // Put the service back for the next request
-                            *svc_rc.borrow_mut() = Some(service);
-
-                            if let Err(e) = result {
-                                error!("h3 service error: {e}");
-                            }
-                        });
-                    }
-                    Err(e) => {
-                        error!("resolve_request: {e:?}");
-                    }
+                        if let Err(e) = result {
+                            error!("h3 service error: {e}");
+                        }
+                    });
                 }
-            }
+                Err(e) => {
+                    error!("resolve_request: {e:?}");
+                }
+            },
             Ok(None) => break, // graceful close
             Err(e) => {
                 error!("h3 accept error: {e:?}");

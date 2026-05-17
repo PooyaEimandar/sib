@@ -225,7 +225,7 @@ impl RlidSigner {
     }
 
     fn gen_id(&self) -> String {
-        use rand::RngCore;
+        use rand::Rng;
         let mut b = [0u8; 16];
         // Use a fast RNG; swap to a CSPRNG (rand::rngs::OsRng) if you prefer.
         rand::rng().fill_bytes(&mut b);

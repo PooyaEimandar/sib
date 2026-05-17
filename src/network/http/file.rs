@@ -588,7 +588,7 @@ async fn serve_fn_async<S: Session>(
     Ok(())
 }
 
-#[cfg(feature = "net-h3-server")]
+#[cfg(all(feature = "net-h3-server", target_os = "linux"))]
 async fn serve_async_fn<S: Session>(
     session: &mut S,
     path: &PathBuf,
@@ -1020,7 +1020,7 @@ pub async fn serve_h2<S: Session>(
     result
 }
 
-#[cfg(feature = "net-h3-server")]
+#[cfg(all(feature = "net-h3-server", target_os = "linux"))]
 pub async fn serve_h3<S: Session>(
     session: &mut S,
     path: &PathBuf,
@@ -1542,7 +1542,7 @@ pub async fn serve_h2_streaming<S: Session>(
     Ok(())
 }
 
-#[cfg(feature = "net-h3-server")]
+#[cfg(all(feature = "net-h3-server", target_os = "linux"))]
 pub async fn serve_h3_streaming<S: Session>(
     session: &mut S,
     status: http::StatusCode,
@@ -1643,7 +1643,7 @@ mod tests {
 
     #[cfg(feature = "net-h1-server")]
     impl crate::network::http::session::HService for FileService {
-        fn call<S: Session>(&mut self, session: &mut S) -> std::io::Result<()> {
+        fn call<S: Session>(&self, session: &mut S) -> std::io::Result<()> {
             const MIN_BYTES_ON_THE_FLY_SIZE: u64 = 1024;
             const MAX_BYTES_ON_THE_FLY_SIZE: u64 = 512 * 1024; // 512 KB
             const H1_STREAM_THRESHOLD: u64 = 256 * 1024; // 256 KB
@@ -1676,10 +1676,13 @@ mod tests {
         }
     }
 
-    #[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
+    #[cfg(any(
+        feature = "net-h2-server",
+        all(feature = "net-h3-server", target_os = "linux")
+    ))]
     #[async_trait::async_trait(?Send)]
     impl crate::network::http::session::HAsyncService for FileService {
-        async fn call<SE: Session>(&mut self, session: &mut SE) -> std::io::Result<()> {
+        async fn call<SE: Session>(&self, session: &mut SE) -> std::io::Result<()> {
             const MIN_BYTES_ON_THE_FLY_SIZE: u64 = 1024;
             const MAX_BYTES_ON_THE_FLY_SIZE: u64 = 512 * 1024; // 512 KB
             const H2_STREAM_THRESHOLD: u64 = 128 * 1024; // 128 KB
@@ -1687,7 +1690,7 @@ mod tests {
 
             if session.req_http_version() == http::Version::HTTP_3 {
                 #[cfg(all(
-                    feature = "net-h3-server",
+                    all(feature = "net-h3-server", target_os = "linux"),
                     feature = "rt-glommio",
                     target_os = "linux"
                 ))]
@@ -1793,7 +1796,10 @@ mod tests {
         #[cfg(feature = "net-h1-server")]
         type Service = FileService;
 
-        #[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
+        #[cfg(any(
+            feature = "net-h2-server",
+            all(feature = "net-h3-server", target_os = "linux")
+        ))]
         type HAsyncService = FileService;
 
         #[cfg(feature = "net-h1-server")]
@@ -1801,13 +1807,16 @@ mod tests {
             FileService
         }
 
-        #[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
+        #[cfg(any(
+            feature = "net-h2-server",
+            all(feature = "net-h3-server", target_os = "linux")
+        ))]
         fn async_service(&self, _id: usize) -> Self::HAsyncService {
             FileService
         }
     }
-
     #[test]
+    #[ignore = "legacy network integration test uses fixed ports and long-running servers"]
     fn file_server() {
         // Pick a port and start the server
         let mut threads = Vec::new();
@@ -1864,7 +1873,7 @@ mod tests {
         }
 
         cfg_if::cfg_if! {
-            if #[cfg(feature = "net-h3-server")] {
+            if #[cfg(all(feature = "net-h3-server", target_os = "linux"))] {
                 let cert_h3_pem = cert.clone();
                 let key_h3_pem = key.clone();
                 let h3_handle = std::thread::spawn(move || {

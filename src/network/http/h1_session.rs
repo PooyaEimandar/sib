@@ -2,7 +2,6 @@ use crate::network::http::session::Session;
 use bytes::{Buf, BufMut, BytesMut};
 use http::{HeaderName, HeaderValue};
 use std::io::{self, Read, Write};
-use std::mem::MaybeUninit;
 use std::net::IpAddr;
 use std::str::FromStr;
 
@@ -41,16 +40,20 @@ fn drain_nb<W: Write>(w: &mut W, buf: &mut BytesMut) -> io::Result<()> {
     Ok(())
 }
 
-pub struct H1Session<'buf, 'header, 'stream, S>
+pub struct H1Session<'buf, 'stream, S>
 where
     S: Read + Write,
     'buf: 'stream,
 {
     peer_addr: &'stream IpAddr,
-    // request headers
-    req: httparse::Request<'header, 'buf>,
+    method: Option<String>,
+    path: String,
+    version: Option<u8>,
+    headers: Vec<(HeaderName, HeaderValue)>,
     // request buffer
     req_buf: &'buf mut BytesMut,
+    // request body size parsed from Content-Length
+    content_length: usize,
     // length of response headers (those you append with header/header_str)
     rsp_headers_len: usize,
     // buffer for response (your headers + blank line + body) OR ws send queue after upgrade
@@ -66,7 +69,7 @@ where
 }
 
 #[async_trait::async_trait(?Send)]
-impl<'buf, 'header, 'stream, S> Session for H1Session<'buf, 'header, 'stream, S>
+impl<'buf, 'stream, S> Session for H1Session<'buf, 'stream, S>
 where
     S: Read + Write,
 {
@@ -79,23 +82,20 @@ where
     fn req_host(&self) -> Option<(String, Option<u16>)> {
         use super::server::parse_authority;
         if let Some(host) = self
-            .req
             .headers
             .iter()
-            .find(|h| h.name.eq_ignore_ascii_case("host"))
-            .and_then(|h| std::str::from_utf8(h.value).ok())
+            .find(|(name, _)| name == http::header::HOST)
+            .and_then(|(_, value)| value.to_str().ok())
             && let Some(a) = parse_authority(host.trim())
         {
             return Some(a);
         }
-        if matches!(self.req.method, Some("CONNECT"))
-            && let Some(path) = self.req.path
-            && let Some(a) = parse_authority(path.trim())
+        if matches!(self.method.as_deref(), Some("CONNECT"))
+            && let Some(a) = parse_authority(self.path.trim())
         {
             return Some(a);
         }
-        if let Some(path) = self.req.path
-            && let Some((scheme, rest)) = path.split_once("://")
+        if let Some((scheme, rest)) = self.path.split_once("://")
             && (scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
         {
             let auth_end = rest.find('/').unwrap_or(rest.len());
@@ -108,7 +108,7 @@ where
 
     #[inline]
     fn req_method(&self) -> http::Method {
-        if let Some(str) = self.req.method {
+        if let Some(str) = self.method.as_deref() {
             return http::Method::from_str(str).unwrap_or_default();
         }
         http::Method::GET
@@ -116,24 +116,22 @@ where
 
     #[inline]
     fn req_method_str(&self) -> Option<&str> {
-        self.req.method
+        self.method.as_deref()
     }
 
     #[inline]
     fn req_path(&self) -> String {
-        self.req.path.unwrap_or_default().into()
+        self.path.clone()
     }
 
     #[inline]
     fn req_path_bytes(&self) -> &[u8] {
-        self.req.path.unwrap_or_default().as_bytes()
+        self.path.as_bytes()
     }
 
     #[inline]
     fn req_query(&self) -> String {
-        if let Some(path) = self.req.path
-            && let Some((_, query)) = path.split_once('?')
-        {
+        if let Some((_, query)) = self.path.split_once('?') {
             return query.to_string();
         }
         String::new()
@@ -141,7 +139,7 @@ where
 
     #[inline]
     fn req_http_version(&self) -> http::Version {
-        match self.req.version {
+        match self.version {
             Some(1) => http::Version::HTTP_11,
             Some(0) => http::Version::HTTP_10,
             _ => http::Version::HTTP_09,
@@ -151,21 +149,17 @@ where
     #[inline]
     fn req_headers(&self) -> http::HeaderMap {
         let mut map = http::HeaderMap::new();
-        for h in self.req.headers.iter() {
-            if let Ok(v) = HeaderValue::from_bytes(h.value)
-                && let Ok(header_name) = HeaderName::from_str(h.name)
-            {
-                map.insert(header_name, v);
-            }
+        for (name, value) in self.headers.iter() {
+            map.insert(name.clone(), value.clone());
         }
         map
     }
 
     #[inline]
     fn req_header(&self, header: &http::HeaderName) -> Option<http::HeaderValue> {
-        for h in self.req.headers.iter() {
-            if h.name.eq_ignore_ascii_case(header.as_str()) {
-                return HeaderValue::from_bytes(h.value).ok();
+        for (name, value) in self.headers.iter() {
+            if name == header {
+                return Some(value.clone());
             }
         }
         None
@@ -173,15 +167,7 @@ where
 
     #[inline]
     fn req_body(&mut self, timeout: std::time::Duration) -> io::Result<&[u8]> {
-        let content_length = self
-            .req
-            .headers
-            .iter()
-            .find(|h| h.name.eq_ignore_ascii_case("Content-Length"))
-            .and_then(|h| std::str::from_utf8(h.value).ok())
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(0);
-
+        let content_length = self.content_length;
         if content_length == 0 {
             return Ok(&[]);
         }
@@ -710,21 +696,38 @@ where
     }
 }
 
-pub fn new_session<'header, 'buf, 'stream, S>(
-    stream: &'stream mut S,
-    peer_addr: &'stream IpAddr,
-    headers: &'header mut [MaybeUninit<httparse::Header<'buf>>; MAX_HEADERS],
-    req_buf: &'buf mut BytesMut,
-    rsp_buf: &'buf mut BytesMut,
-) -> io::Result<Option<H1Session<'buf, 'header, 'stream, S>>>
+impl<'buf, 'stream, S> H1Session<'buf, 'stream, S>
 where
     S: Read + Write,
 {
-    let mut req = httparse::Request::new(&mut []);
+    #[inline]
+    pub(crate) fn finish_request(&mut self) -> io::Result<bool> {
+        if self.content_length == 0 {
+            return Ok(false);
+        }
 
-    // SAFETY: headers is MaybeUninit, we are initializing it now
-    let buf: &[u8] = unsafe { std::mem::transmute(req_buf.chunk()) };
-    let status = match req.parse_with_uninit_headers(buf, headers) {
+        if self.req_buf.len() < self.content_length {
+            return Ok(true);
+        }
+
+        self.req_buf.advance(self.content_length);
+        self.content_length = 0;
+        Ok(false)
+    }
+}
+
+pub fn new_session<'buf, 'stream, S>(
+    stream: &'stream mut S,
+    peer_addr: &'stream IpAddr,
+    req_buf: &'buf mut BytesMut,
+    rsp_buf: &'buf mut BytesMut,
+) -> io::Result<Option<H1Session<'buf, 'stream, S>>>
+where
+    S: Read + Write,
+{
+    let mut raw_headers = [httparse::EMPTY_HEADER; MAX_HEADERS];
+    let mut req = httparse::Request::new(&mut raw_headers);
+    let status = match req.parse(req_buf.chunk()) {
         Ok(s) => s,
         Err(e) => {
             return Err(io::Error::other(format!(
@@ -737,6 +740,27 @@ where
         httparse::Status::Complete(num) => num,
         httparse::Status::Partial => return Ok(None),
     };
+
+    let method = req.method.map(str::to_owned);
+    let path = req.path.unwrap_or_default().to_owned();
+    let version = req.version;
+    let content_length = parse_content_length(req.headers)?;
+    let mut headers = Vec::with_capacity(req.headers.len());
+    for h in req.headers.iter() {
+        let name = HeaderName::from_bytes(h.name.as_bytes()).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid header name: {e}"),
+            )
+        })?;
+        let value = HeaderValue::from_bytes(h.value).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid header value: {e}"),
+            )
+        })?;
+        headers.push((name, value));
+    }
     req_buf.advance(count);
 
     // reserve rsp_buf
@@ -747,8 +771,12 @@ where
 
     Ok(Some(H1Session {
         peer_addr,
-        req,
+        method,
+        path,
+        version,
+        headers,
         req_buf,
+        content_length,
         rsp_headers_len: 0,
         rsp_buf,
         stream,
@@ -756,4 +784,29 @@ where
         status_buf: heapless::Vec::new(),
         streaming: false,
     }))
+}
+
+fn parse_content_length(headers: &[httparse::Header<'_>]) -> io::Result<usize> {
+    let mut parsed = None;
+    for h in headers
+        .iter()
+        .filter(|h| h.name.eq_ignore_ascii_case("Content-Length"))
+    {
+        let value = std::str::from_utf8(h.value)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid Content-Length"))?;
+        let len = value
+            .trim()
+            .parse::<usize>()
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid Content-Length"))?;
+        if let Some(prev) = parsed
+            && prev != len
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "conflicting Content-Length headers",
+            ));
+        }
+        parsed = Some(len);
+    }
+    Ok(parsed.unwrap_or(0))
 }

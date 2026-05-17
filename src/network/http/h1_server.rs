@@ -10,13 +10,13 @@ use std::{
 pub(crate) fn serve<T: HService>(
     stream: &mut TcpStream,
     peer_addr: &IpAddr,
-    mut service: T,
+    service: T,
 ) -> std::io::Result<()> {
     let mut req_buf = BytesMut::with_capacity(BUF_LEN);
     let mut rsp_buf = BytesMut::with_capacity(BUF_LEN);
 
     loop {
-        if read_write(stream, peer_addr, &mut req_buf, &mut rsp_buf, &mut service)? {
+        if read_write(stream, peer_addr, &mut req_buf, &mut rsp_buf, &service)? {
             #[cfg(unix)]
             {
                 use may::io::WaitIo;
@@ -33,13 +33,13 @@ pub(crate) fn serve<T: HService>(
 pub(crate) fn serve_tls<T: HService>(
     stream: &mut boring::ssl::SslStream<TcpStream>,
     peer_addr: &IpAddr,
-    mut service: T,
+    service: T,
 ) -> std::io::Result<()> {
     let mut req_buf = BytesMut::with_capacity(BUF_LEN);
     let mut rsp_buf = BytesMut::with_capacity(BUF_LEN);
 
     loop {
-        if read_write(stream, peer_addr, &mut req_buf, &mut rsp_buf, &mut service)? {
+        if read_write(stream, peer_addr, &mut req_buf, &mut rsp_buf, &service)? {
             #[cfg(unix)]
             {
                 use may::io::WaitIo;
@@ -177,7 +177,7 @@ fn read_write<S, T>(
     peer_addr: &IpAddr,
     req_buf: &mut BytesMut,
     rsp_buf: &mut BytesMut,
-    service: &mut T,
+    service: &T,
 ) -> std::io::Result<bool>
 where
     S: Read + Write,
@@ -197,19 +197,20 @@ where
     let rblocked = read(stream, req_buf)?;
     blocked |= rblocked;
 
+    let mut close_after_flush = false;
+
     // Serve as many requests as are fully buffered
     loop {
-        use std::mem::MaybeUninit;
-
         use crate::network::http::h1_session;
-        let mut headers = [MaybeUninit::uninit(); h1_session::MAX_HEADERS];
-        let mut sess =
-            match h1_session::new_session(stream, peer_addr, &mut headers, req_buf, rsp_buf)? {
-                Some(sess) => sess,
-                None => break,
-            };
+        let mut sess = match h1_session::new_session(stream, peer_addr, req_buf, rsp_buf)? {
+            Some(sess) => sess,
+            None => break,
+        };
 
-        if let Err(e) = service.call(&mut sess) {
+        let call_result = service.call(&mut sess);
+        let unread_body_remains = sess.finish_request()?;
+
+        if let Err(e) = call_result {
             if e.kind() == std::io::ErrorKind::ConnectionAborted {
                 // only abort if the service explicitly wants hard close
                 return Err(e);
@@ -217,11 +218,23 @@ where
             // Any other error just break
             break;
         }
+
+        if unread_body_remains {
+            close_after_flush = true;
+            break;
+        }
     }
 
     // final flush
     let (_, wblocked2) = write(stream, rsp_buf)?;
     blocked |= wblocked2;
+
+    if close_after_flush {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::ConnectionAborted,
+            "request body was not fully consumed",
+        ));
+    }
 
     Ok(blocked)
 }

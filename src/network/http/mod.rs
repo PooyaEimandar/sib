@@ -6,7 +6,7 @@ pub mod file;
 #[cfg(any(
     feature = "net-h1-server",
     feature = "net-h2-server",
-    feature = "net-h3-server",
+    all(feature = "net-h3-server", target_os = "linux"),
     feature = "net-ws-server",
 ))]
 pub mod session;
@@ -41,7 +41,7 @@ cfg_if::cfg_if! {
 }
 
 cfg_if::cfg_if! {
-    if #[cfg(feature = "net-h3-server")] {
+    if #[cfg(all(feature = "net-h3-server", target_os = "linux"))] {
         pub mod h3_session;
         pub mod h3_server;
     }

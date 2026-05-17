@@ -1988,7 +1988,7 @@ impl Server {
 
 #[async_trait::async_trait(?Send)]
 impl HAsyncService for Server {
-    async fn call<S: Session>(&mut self, session: &mut S) -> std::io::Result<()> {
+    async fn call<S: Session>(&self, session: &mut S) -> std::io::Result<()> {
         if !session.is_ws() {
             if let Some(index) = self.index.clone() {
                 return session
@@ -2219,10 +2219,16 @@ impl HAsyncService for Server {
 }
 
 impl HFactory for Server {
-    #[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
+    #[cfg(any(
+        feature = "net-h2-server",
+        all(feature = "net-h3-server", target_os = "linux")
+    ))]
     type HAsyncService = Self;
 
-    #[cfg(any(feature = "net-h2-server", feature = "net-h3-server"))]
+    #[cfg(any(
+        feature = "net-h2-server",
+        all(feature = "net-h3-server", target_os = "linux")
+    ))]
     fn async_service(&self, _id: usize) -> Self::HAsyncService {
         Server {
             cfg: self.cfg.clone(),

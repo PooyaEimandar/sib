@@ -27,7 +27,7 @@ impl Default for JsonMessage<'_> {
 struct Server;
 
 impl HService for Server {
-    fn call<S: Session>(&mut self, session: &mut S) -> std::io::Result<()> {
+    fn call<S: Session>(&self, session: &mut S) -> std::io::Result<()> {
         match session.req_path_bytes() {
             b"/json" => {
                 let json = serde_json::to_vec(&JsonMessage::default())?;
