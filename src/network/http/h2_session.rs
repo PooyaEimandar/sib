@@ -439,7 +439,9 @@ impl Session for H2Session {
 
     #[cfg(all(feature = "net-ws-server", feature = "net-h1-server"))]
     #[inline]
-    fn ws_read(&mut self) -> std::io::Result<(ws::OpCode, &[u8], bool)> {
+    fn ws_read(
+        &mut self,
+    ) -> std::io::Result<(crate::network::http::ws::OpCode, bytes::Bytes, bool)> {
         Err(std::io::Error::other(
             "ws_read is not supported in H2Session, use H1SessionAsync::ws_read_async instead",
         ))
@@ -456,7 +458,12 @@ impl Session for H2Session {
 
     #[cfg(all(feature = "net-ws-server", feature = "net-h1-server"))]
     #[inline]
-    fn ws_write(&mut self, _op: ws::OpCode, _payload: &[u8], _fin: bool) -> std::io::Result<()> {
+    fn ws_write(
+        &mut self,
+        _op: crate::network::http::ws::OpCode,
+        _payload: &bytes::Bytes,
+        _fin: bool,
+    ) -> std::io::Result<()> {
         Err(std::io::Error::other(
             "ws_write is not supported in H2Session, use H1SessionAsync::ws_write_async instead",
         ))
@@ -475,7 +482,7 @@ impl Session for H2Session {
     }
 
     #[cfg(all(feature = "net-ws-server", feature = "net-h1-server"))]
-    fn ws_close(&mut self, _reason: Option<&[u8]>) -> std::io::Result<()> {
+    fn ws_close(&mut self, _reason: Option<&bytes::Bytes>) -> std::io::Result<()> {
         Err(std::io::Error::other(
             "ws_close is not supported in H2Session, use H1SessionAsync::ws_close_async instead",
         ))

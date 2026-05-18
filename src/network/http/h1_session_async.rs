@@ -1,6 +1,7 @@
 use crate::network::http::session::Session;
 use bytes::Bytes;
 use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri, Version, header};
+use std::io;
 use std::net::IpAddr;
 
 #[cfg(feature = "net-ws-server")]
@@ -597,7 +598,7 @@ where
 
     #[cfg(all(feature = "net-ws-server", feature = "net-h1-server"))]
     #[inline]
-    fn ws_read(&mut self) -> io::Result<(crate::network::http::ws::OpCode, &[u8], bool)> {
+    fn ws_read(&mut self) -> io::Result<(crate::network::http::ws::OpCode, bytes::Bytes, bool)> {
         Err(std::io::Error::other(
             "ws_read is not implemented for H1SessionAsync, use ws_read_async instead",
         ))
@@ -619,7 +620,7 @@ where
     fn ws_write(
         &mut self,
         _op: crate::network::http::ws::OpCode,
-        _payload: &[u8],
+        _payload: &bytes::Bytes,
         _fin: bool,
     ) -> io::Result<()> {
         Err(std::io::Error::other(
@@ -652,7 +653,7 @@ where
     }
 
     #[cfg(all(feature = "net-ws-server", feature = "net-h1-server"))]
-    fn ws_close(&mut self, _reason: Option<&[u8]>) -> std::io::Result<()> {
+    fn ws_close(&mut self, _reason: Option<&bytes::Bytes>) -> std::io::Result<()> {
         Err(std::io::Error::other(
             "ws_close is not implemented for H1SessionAsync",
         ))

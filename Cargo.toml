@@ -30,7 +30,7 @@ cfg-if = { version = "1.0.4", default-features = false }
 crossbeam = { version = "0.8.4", optional = true, default-features = false, features = [
     "std",
 ] }
-dashmap = { version = "6.1.0", optional = true, default-features = false, features = [
+dashmap = { version = "6.2.1", optional = true, default-features = false, features = [
     "rayon",
 ] }
 flate2 = { version = "1.1.9", optional = true, default-features = false, features = [
@@ -84,12 +84,8 @@ serde = { version = "1.0.188", optional = true, default-features = false, featur
 serde_json = { version = "1.0.107", optional = true, default-features = false, features = [
     "std",
 ] }
-sha1 = { version = "0.11.0", optional = true, default-features = false, features = [
-    "std",
-] }
-sha2 = { version = "0.11.0", optional = true, default-features = false, features = [
-    "std",
-] }
+sha1 = { version = "0.11.0", optional = true, default-features = false }
+sha2 = { version = "0.11.0", optional = true }
 socket2 = { version = "0.6.3", optional = true, default-features = false, features = [
     "all",
 ] }
@@ -234,7 +230,7 @@ stm-webrtc-sender = [
 
 [dev-dependencies]
 base64 = { version = "0.22.1", default-features = false, features = ["std"] }
-dashmap = { version = "6.1.0", default-features = false, features = ["rayon"] }
+dashmap = { version = "6.2.1", default-features = false, features = ["rayon"] }
 http = { version = "1.4.0", default-features = false, features = ["std"] }
 nonzero_ext = { version = "0.3.0", default-features = false, features = [
     "std",
@@ -245,10 +241,10 @@ reqwest = { version = "0.13.3", default-features = false, features = [
     "http2",
     "http3",
 ] }
-sha2 = { version = "0.11.0", default-features = false, features = ["std"] }
+sha2 = { version = "0.11.0" }
 tungstenite = { version = "0.29.0" }
 native-tls = "0.2.18"
-tokio = { version = "1.51.1", default-features = false, features = [
+tokio = { version = "1.52.3", default-features = false, features = [
     "macros",
     "rt",
 ] }

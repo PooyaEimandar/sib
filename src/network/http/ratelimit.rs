@@ -116,7 +116,7 @@ impl<Svc> RateLimitedService<Svc> {
     }
 
     #[cfg(feature = "net-h1-server")]
-    fn stamp_429<S: super::session::Session>(sess: &mut S) -> std::io::Result<()> {
+    fn stamp_429_h1<S: super::session::Session>(sess: &mut S) -> std::io::Result<()> {
         let body = Bytes::from_static(b"Too Many Requests");
         sess.status_code(StatusCode::TOO_MANY_REQUESTS)
             .header(
@@ -135,7 +135,7 @@ impl<Svc> RateLimitedService<Svc> {
         feature = "net-h2-server",
         all(feature = "net-h3-server", target_os = "linux")
     ))]
-    async fn stamp_429<S: super::session::Session>(sess: &mut S) -> std::io::Result<()> {
+    async fn stamp_429_async<S: super::session::Session>(sess: &mut S) -> std::io::Result<()> {
         let body = Bytes::from_static(b"Too Many Requests");
         sess.status_code(StatusCode::TOO_MANY_REQUESTS)
             .header(
@@ -209,7 +209,7 @@ where
         }
 
         if !(user_ok && ip_ok) {
-            return Self::stamp_429(sess);
+            return Self::stamp_429_h1(sess);
         }
         self.inner.call(sess)
     }
@@ -244,7 +244,7 @@ where
         }
 
         if !(user_ok && ip_ok) {
-            return Self::stamp_429(sess).await;
+            return Self::stamp_429_async(sess).await;
         }
         self.inner.call(sess).await
     }
@@ -258,7 +258,6 @@ mod tests {
         server::HFactory,
         server::tests::EchoServer,
     };
-    use nonzero_ext::nonzero;
     use reqwest::{
         blocking::Client,
         header::{COOKIE, HeaderMap, HeaderValue, SET_COOKIE},
@@ -457,15 +456,17 @@ mod tests {
             signer,
         };
 
-        let (cert_pem, key_pem) =
-            crate::network::http::server::tests::create_self_signed_tls_pems();
+        let tls = crate::MtlsIdentity::generate(&[], &[], false);
+        let cert_pem = tls.server_cert_pem;
+        let key_pem = tls.server_key_pem;
+        let shutdown = tokio_util::sync::CancellationToken::new();
         let _server_thread = std::thread::spawn(move || {
             factory
                 .start_h2_tls(
                     addr,
-                    None,
                     (None, cert_pem.as_bytes(), key_pem.as_bytes()),
                     H2Config::default(),
+                    shutdown,
                 )
                 .expect("start_h2_tls rl server");
         });

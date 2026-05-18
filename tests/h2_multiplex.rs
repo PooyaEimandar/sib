@@ -7,7 +7,7 @@
 use async_trait::async_trait;
 use sib::network::http::{
     server::{H2Config, HFactory},
-    session::{HAsyncService, Session},
+    session::{HAsyncService, HService, Session},
 };
 use std::{
     net::TcpListener,
@@ -22,6 +22,15 @@ use std::{
 struct CountingService {
     in_flight: Arc<AtomicUsize>,
     max_in_flight: Arc<AtomicUsize>,
+}
+
+#[derive(Clone, Copy)]
+struct UnusedSyncService;
+
+impl HService for UnusedSyncService {
+    fn call<S: Session>(&self, _session: &mut S) -> std::io::Result<()> {
+        Err(std::io::Error::other("unused sync service in H2 test"))
+    }
 }
 
 #[async_trait(?Send)]
@@ -52,7 +61,15 @@ struct CountingFactory {
 }
 
 impl HFactory for CountingFactory {
+    #[cfg(feature = "net-h1-server")]
+    type Service = UnusedSyncService;
+
     type HAsyncService = CountingService;
+
+    #[cfg(feature = "net-h1-server")]
+    fn service(&self, _id: usize) -> Self::Service {
+        UnusedSyncService
+    }
 
     fn async_service(&self, _id: usize) -> Self::HAsyncService {
         CountingService {

@@ -694,6 +694,41 @@ where
 
         drain_nb(self.stream, self.rsp_buf)
     }
+
+    #[cfg(all(feature = "net-ws-server", feature = "net-h2-server"))]
+    async fn ws_accept_async(&mut self) -> std::io::Result<()> {
+        Err(std::io::Error::other(
+            "ws_accept_async is not supported in H1Session, use ws_accept instead",
+        ))
+    }
+
+    #[cfg(all(feature = "net-ws-server", feature = "net-h2-server"))]
+    async fn ws_read_async(
+        &mut self,
+    ) -> std::io::Result<(crate::network::http::ws::OpCode, bytes::Bytes, bool)> {
+        Err(std::io::Error::other(
+            "ws_read_async is not supported in H1Session, use ws_read instead",
+        ))
+    }
+
+    #[cfg(all(feature = "net-ws-server", feature = "net-h2-server"))]
+    async fn ws_write_async(
+        &mut self,
+        _op: crate::network::http::ws::OpCode,
+        _payload: bytes::Bytes,
+        _fin: bool,
+    ) -> std::io::Result<()> {
+        Err(std::io::Error::other(
+            "ws_write_async is not supported in H1Session, use ws_write instead",
+        ))
+    }
+
+    #[cfg(all(feature = "net-ws-server", feature = "net-h2-server"))]
+    async fn ws_close_async(&mut self, _reason: Option<bytes::Bytes>) -> std::io::Result<()> {
+        Err(std::io::Error::other(
+            "ws_close_async is not supported in H1Session, use ws_close instead",
+        ))
+    }
 }
 
 impl<'buf, 'stream, S> H1Session<'buf, 'stream, S>

@@ -2,7 +2,7 @@
 
 use sib::network::http::{
     server::{H1Config, HFactory},
-    session::{HService, Session},
+    session::{HAsyncService, HService, Session},
 };
 use std::{
     io::{Read, Write},
@@ -32,13 +32,31 @@ impl HService for EchoService {
     }
 }
 
+#[derive(Clone, Copy)]
+struct UnusedAsyncService;
+
+#[async_trait::async_trait(?Send)]
+impl HAsyncService for UnusedAsyncService {
+    async fn call<S: Session>(&self, _session: &mut S) -> std::io::Result<()> {
+        Err(std::io::Error::other("unused async service in H1 test"))
+    }
+}
+
 struct EchoFactory;
 
 impl HFactory for EchoFactory {
     type Service = EchoService;
 
+    #[cfg(feature = "net-h2-server")]
+    type HAsyncService = UnusedAsyncService;
+
     fn service(&self, _id: usize) -> Self::Service {
         EchoService
+    }
+
+    #[cfg(feature = "net-h2-server")]
+    fn async_service(&self, _id: usize) -> Self::HAsyncService {
+        UnusedAsyncService
     }
 }
 
@@ -147,8 +165,16 @@ fn h1_ignored_incomplete_body_closes_instead_of_reusing_socket() {
     impl HFactory for NoBodyFactory {
         type Service = NoBodyService;
 
+        #[cfg(feature = "net-h2-server")]
+        type HAsyncService = UnusedAsyncService;
+
         fn service(&self, _id: usize) -> Self::Service {
             NoBodyService
+        }
+
+        #[cfg(feature = "net-h2-server")]
+        fn async_service(&self, _id: usize) -> Self::HAsyncService {
+            UnusedAsyncService
         }
     }
 
