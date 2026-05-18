@@ -1,8 +1,10 @@
 #![cfg(feature = "net-h1-server")]
 
+#[cfg(feature = "net-h2-server")]
+use sib::network::http::session::HAsyncService;
 use sib::network::http::{
     server::{H1Config, HFactory},
-    session::{HAsyncService, HService, Session},
+    session::{HService, Session},
 };
 use std::{
     io::{Read, Write},
@@ -33,8 +35,10 @@ impl HService for EchoService {
 }
 
 #[derive(Clone, Copy)]
+#[cfg(feature = "net-h2-server")]
 struct UnusedAsyncService;
 
+#[cfg(feature = "net-h2-server")]
 #[async_trait::async_trait(?Send)]
 impl HAsyncService for UnusedAsyncService {
     async fn call<S: Session>(&self, _session: &mut S) -> std::io::Result<()> {

@@ -5,9 +5,11 @@
 ))]
 
 use async_trait::async_trait;
+#[cfg(feature = "net-h1-server")]
+use sib::network::http::session::HService;
 use sib::network::http::{
     server::{H2Config, HFactory},
-    session::{HAsyncService, HService, Session},
+    session::{HAsyncService, Session},
 };
 use std::{
     net::TcpListener,
@@ -25,8 +27,10 @@ struct CountingService {
 }
 
 #[derive(Clone, Copy)]
+#[cfg(feature = "net-h1-server")]
 struct UnusedSyncService;
 
+#[cfg(feature = "net-h1-server")]
 impl HService for UnusedSyncService {
     fn call<S: Session>(&self, _session: &mut S) -> std::io::Result<()> {
         Err(std::io::Error::other("unused sync service in H2 test"))
