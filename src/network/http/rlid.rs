@@ -96,10 +96,10 @@ impl RlidSigner {
     /// Returns a stable `id` and a `must_issue` flag indicating whether you should
     /// respond with a fresh `Set-Cookie` to the client.
     pub fn verify_or_new(&self, token_opt: Option<&str>) -> VerifyOutcome {
-        if let Some(token) = token_opt {
-            if let Some(ok) = self.verify_v1(token) {
-                return ok;
-            }
+        if let Some(token) = token_opt
+            && let Some(ok) = self.verify_v1(token)
+        {
+            return ok;
         }
         // create a new identity when missing or invalid
         VerifyOutcome {
@@ -186,10 +186,7 @@ impl RlidSigner {
         // Expiry check
         let now = now_unix();
         if exp < now {
-            return Some(VerifyOutcome {
-                id: id.to_string(),
-                must_issue: true, // expired — ask client to refresh
-            });
+            return None;
         }
 
         // Determine refresh threshold
@@ -225,18 +222,18 @@ impl RlidSigner {
     }
 
     fn gen_id(&self) -> String {
-        use rand::Rng;
+        use rand::TryRng;
+        use rand::rngs::SysRng;
         let mut b = [0u8; 16];
-        // Use a fast RNG; swap to a CSPRNG (rand::rngs::OsRng) if you prefer.
-        rand::rng().fill_bytes(&mut b);
+        SysRng
+            .try_fill_bytes(&mut b)
+            .expect("OS random source failed");
         B64.encode(b)
     }
 }
 
 fn parse_payload_id_exp(s: &str) -> Option<(&str, u64)> {
-    let mut it = s.rsplitn(2, '.'); // split from the right: "<id>.<exp>"
-    let exp_s = it.next()?;
-    let id = it.next()?;
+    let (id, exp_s) = s.rsplit_once('.')?;
     let exp = exp_s.parse::<u64>().ok()?;
     Some((id, exp))
 }
@@ -249,49 +246,5 @@ fn now_unix() -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::Duration;
-
-    #[test]
-    fn rlid_round_trip_issue_and_verify() {
-        let cur = [7u8; 32];
-        let old = [9u8; 32];
-        let signer = RlidSigner::new("rlid", Duration::from_secs(60), (2, cur), vec![(1, old)]);
-
-        // new id + set-cookie
-        let id = signer.gen_id();
-        let sc = signer.issue_set_cookie(&id, false, None, Some("/"));
-        assert!(sc.starts_with("rlid=v1.2."), "cookie format mismatch: {sc}");
-
-        // extract value
-        let value = sc.splitn(2, '=').nth(1).unwrap().split(';').next().unwrap();
-        let res = signer.verify_or_new(Some(value));
-        assert_eq!(res.id, id);
-        assert!(!res.must_issue, "fresh token should not require refresh");
-    }
-
-    #[test]
-    fn rlid_refresh_when_near_expiry() {
-        let cur = [1u8; 32];
-        let signer = RlidSigner::new("rlid", Duration::from_secs(3), (1, cur), vec![])
-            .with_reissue_divisor(3);
-
-        let id = signer.gen_id();
-        let val = signer.make_value_current(&id);
-
-        // Immediately valid; depending on timing, may or may not need refresh — accept both
-        let res = signer.verify_or_new(Some(&val));
-        assert_eq!(res.id, id);
-    }
-
-    #[test]
-    fn invalid_token_yields_new_id() {
-        let cur = [3u8; 32];
-        let signer = RlidSigner::new("rlid", Duration::from_secs(60), (7, cur), vec![]);
-        let res = signer.verify_or_new(Some("v1.9.notpayload.notmac"));
-        assert!(res.must_issue);
-        // id is random; just ensure it's non-empty
-        assert!(!res.id.is_empty());
-    }
-}
+#[path = "../../../tests/unit/network/http/rlid_tests.rs"]
+mod tests;

@@ -130,28 +130,5 @@ impl Drop for FDBNetwork {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::thread;
-    use std::time::Duration;
-
-    #[test]
-    fn test_fdb_network_start_and_stop() {
-        let network = FDBNetwork::new(None).expect("Failed to create FDB network");
-        let mut network_for_stop = network.clone();
-
-        let handle = thread::spawn(move || {
-            network.run().expect("Failed to run FDB network");
-        });
-
-        // Give it time to start
-        thread::sleep(Duration::from_secs(1));
-
-        // Now stop it (separate lock)
-        let result = network_for_stop.stop();
-        assert!(result.is_ok(), "Failed to stop network");
-
-        // Wait for background thread
-        handle.join().unwrap();
-    }
-}
+#[path = "../../../tests/unit/database/fdb/network_tests.rs"]
+mod tests;
