@@ -179,7 +179,9 @@ impl crate::network::http::wt::WtService for UnusedWtService {
         &mut self,
         _session: &mut crate::network::http::wt::WtSession,
     ) -> std::io::Result<()> {
-        Err(std::io::Error::other("unused wt service in file server test"))
+        Err(std::io::Error::other(
+            "unused wt service in file server test",
+        ))
     }
 }
 

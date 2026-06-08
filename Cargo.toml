@@ -18,6 +18,9 @@ crate-type = ["rlib", "staticlib", "cdylib"]
 [dependencies]
 arc-swap = { version = "1.9.1", optional = true, default-features = false }
 async-trait = { version = "0.1.89", optional = true, default-features = false }
+bytemuck = { version = "1.25", optional = true, default-features = false, features = [
+    "derive",
+] }
 base64 = { version = "0.22.1", optional = true, default-features = false, features = [
     "std",
 ] }
@@ -36,8 +39,12 @@ dashmap = { version = "6.2.1", optional = true, default-features = false, featur
 flate2 = { version = "1.1.9", optional = true, default-features = false, features = [
     "rust_backend",
 ] }
+env_logger = { version = "0.11.10", optional = true }
 futures-lite = { version = "2.6.1", optional = true, default-features = false, features = [
     "race",
+    "std",
+] }
+glam = { version = "0.33.1", optional = true, default-features = false, features = [
     "std",
 ] }
 glib = { version = "0.22.7", optional = true, default-features = false, features = [
@@ -65,6 +72,7 @@ memmap2 = { version = "0.9.10", optional = true, default-features = false }
 once_cell = { version = "1.21.4", optional = true, default-features = false, features = [
     "std",
 ] }
+pollster = { version = "0.4.0", optional = true }
 rand = { version = "0.10.1", optional = true }
 rcgen = { version = "0.14.8", optional = true }
 rdkafka = { version = "0.39.0", optional = true, features = [
@@ -109,10 +117,20 @@ tokio-rustls = { version = "0.26.4", optional = true, default-features = false, 
 
 tokio-util = { version = "0.7.18", optional = true, default-features = false }
 webrtc = { version = "0.17.1", optional = true }
+wgpu = { version = "29.0.3", optional = true }
+winit = { version = "0.30.13", optional = true }
 wtransport = { version = "0.7.1", optional = true, default-features = false, features = [
     "ring",
 ] }
 zstd = { version = "0.13.3", optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+console_error_panic_hook = { version = "0.1", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+web-sys = { version = "0.3", optional = true, features = [
+    "VisualViewport",
+    "Window",
+] }
 
 # unix (non-android/ios) only deps
 [target.'cfg(all(unix, not(target_os = "android"), not(target_os = "ios")))'.dependencies]
@@ -208,6 +226,17 @@ net-wt-server = [
 rt-glommio = ["futures-rustls", "glommio", "tokio"]
 rt-tokio = ["tokio", "tokio-rustls"]
 rt-may = ["may"]
+render = [
+    "bytemuck",
+    "console_error_panic_hook",
+    "env_logger",
+    "glam",
+    "pollster",
+    "wasm-bindgen-futures",
+    "web-sys",
+    "wgpu",
+    "winit",
+]
 
 stm-udp-sender = ["crossbeam", "glib", "gstreamer", "gstreamer-video"]
 stm-udp-receiver = ["glib", "gstreamer", "gstreamer-app", "gstreamer-video"]

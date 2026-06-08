@@ -4,6 +4,9 @@
 pub mod database;
 pub mod network;
 
+#[cfg(feature = "render")]
+pub mod render;
+
 #[cfg(any(
     feature = "stm-udp-receiver",
     feature = "stm-udp-sender",
