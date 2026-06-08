@@ -168,6 +168,21 @@ impl crate::network::http::session::HAsyncService for FileService {
     }
 }
 
+#[derive(Clone, Copy)]
+#[cfg(feature = "net-wt-server")]
+struct UnusedWtService;
+
+#[cfg(feature = "net-wt-server")]
+#[async_trait::async_trait(?Send)]
+impl crate::network::http::wt::WtService for UnusedWtService {
+    async fn call(
+        &mut self,
+        _session: &mut crate::network::http::wt::WtSession,
+    ) -> std::io::Result<()> {
+        Err(std::io::Error::other("unused wt service in file server test"))
+    }
+}
+
 impl HFactory for FileServer<FileService> {
     #[cfg(feature = "net-h1-server")]
     type Service = FileService;
@@ -177,6 +192,9 @@ impl HFactory for FileServer<FileService> {
         all(feature = "net-h3-server", target_os = "linux")
     ))]
     type HAsyncService = FileService;
+
+    #[cfg(feature = "net-wt-server")]
+    type WtService = UnusedWtService;
 
     #[cfg(feature = "net-h1-server")]
     fn service(&self, _id: usize) -> Self::Service {
@@ -189,6 +207,11 @@ impl HFactory for FileServer<FileService> {
     ))]
     fn async_service(&self, _id: usize) -> Self::HAsyncService {
         FileService
+    }
+
+    #[cfg(feature = "net-wt-server")]
+    fn wt_service(&self, _id: usize) -> Self::WtService {
+        UnusedWtService
     }
 }
 #[test]

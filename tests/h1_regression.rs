@@ -46,6 +46,21 @@ impl HAsyncService for UnusedAsyncService {
     }
 }
 
+#[derive(Clone, Copy)]
+#[cfg(feature = "net-wt-server")]
+struct UnusedWtService;
+
+#[cfg(feature = "net-wt-server")]
+#[async_trait::async_trait(?Send)]
+impl sib::network::http::wt::WtService for UnusedWtService {
+    async fn call(
+        &mut self,
+        _session: &mut sib::network::http::wt::WtSession,
+    ) -> std::io::Result<()> {
+        Err(std::io::Error::other("unused wt service in H1 test"))
+    }
+}
+
 struct EchoFactory;
 
 impl HFactory for EchoFactory {
@@ -54,6 +69,9 @@ impl HFactory for EchoFactory {
     #[cfg(feature = "net-h2-server")]
     type HAsyncService = UnusedAsyncService;
 
+    #[cfg(feature = "net-wt-server")]
+    type WtService = UnusedWtService;
+
     fn service(&self, _id: usize) -> Self::Service {
         EchoService
     }
@@ -61,6 +79,11 @@ impl HFactory for EchoFactory {
     #[cfg(feature = "net-h2-server")]
     fn async_service(&self, _id: usize) -> Self::HAsyncService {
         UnusedAsyncService
+    }
+
+    #[cfg(feature = "net-wt-server")]
+    fn wt_service(&self, _id: usize) -> Self::WtService {
+        UnusedWtService
     }
 }
 
@@ -172,6 +195,9 @@ fn h1_ignored_incomplete_body_closes_instead_of_reusing_socket() {
         #[cfg(feature = "net-h2-server")]
         type HAsyncService = UnusedAsyncService;
 
+        #[cfg(feature = "net-wt-server")]
+        type WtService = UnusedWtService;
+
         fn service(&self, _id: usize) -> Self::Service {
             NoBodyService
         }
@@ -179,6 +205,11 @@ fn h1_ignored_incomplete_body_closes_instead_of_reusing_socket() {
         #[cfg(feature = "net-h2-server")]
         fn async_service(&self, _id: usize) -> Self::HAsyncService {
             UnusedAsyncService
+        }
+
+        #[cfg(feature = "net-wt-server")]
+        fn wt_service(&self, _id: usize) -> Self::WtService {
+            UnusedWtService
         }
     }
 

@@ -37,6 +37,21 @@ impl HService for UnusedSyncService {
     }
 }
 
+#[derive(Clone, Copy)]
+#[cfg(feature = "net-wt-server")]
+struct UnusedWtService;
+
+#[cfg(feature = "net-wt-server")]
+#[async_trait(?Send)]
+impl sib::network::http::wt::WtService for UnusedWtService {
+    async fn call(
+        &mut self,
+        _session: &mut sib::network::http::wt::WtSession,
+    ) -> std::io::Result<()> {
+        Err(std::io::Error::other("unused wt service in H2 test"))
+    }
+}
+
 #[async_trait(?Send)]
 impl HAsyncService for CountingService {
     async fn call<S: Session>(&self, session: &mut S) -> std::io::Result<()> {
@@ -70,6 +85,9 @@ impl HFactory for CountingFactory {
 
     type HAsyncService = CountingService;
 
+    #[cfg(feature = "net-wt-server")]
+    type WtService = UnusedWtService;
+
     #[cfg(feature = "net-h1-server")]
     fn service(&self, _id: usize) -> Self::Service {
         UnusedSyncService
@@ -80,6 +98,11 @@ impl HFactory for CountingFactory {
             in_flight: self.in_flight.clone(),
             max_in_flight: self.max_in_flight.clone(),
         }
+    }
+
+    #[cfg(feature = "net-wt-server")]
+    fn wt_service(&self, _id: usize) -> Self::WtService {
+        UnusedWtService
     }
 }
 

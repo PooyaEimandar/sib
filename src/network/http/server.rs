@@ -1327,7 +1327,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                                 ))
                             })?;
 
-                            info!("WT shard {shard_id} listening on {bind}");
+                            tracing::info!("WT shard {shard_id} listening on {bind}");
 
                             let sem = Arc::new(Semaphore::new(wt_cfg.max_sessions));
                             let local = tokio::task::LocalSet::new();
