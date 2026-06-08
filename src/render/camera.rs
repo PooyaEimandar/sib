@@ -44,7 +44,7 @@ pub struct CameraUniform {
     pub view_projection: [[f32; 4]; 4],
 }
 
-fn wgpu_clip_matrix() -> Mat4 {
+pub fn wgpu_clip_matrix() -> Mat4 {
     Mat4::from_cols_array(&[
         1.0, 0.0, 0.0, 0.0, //
         0.0, 1.0, 0.0, 0.0, //
