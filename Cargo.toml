@@ -1,11 +1,19 @@
 [package]
 name = "sib"
-version = "0.0.17"
+version = "0.1.0"
 authors = ["mail@pooya.ai"]
 description = "A high-performance, secure, and cross-platform modules optimized for efficiency, scalability, and reliability."
 documentation = "https://docs.rs/sib"
 edition = "2024"
-keywords = ["sib", "networking", "real-time", "streaming", "web"]
+keywords = [
+    "sib",
+    "networking",
+    "real-time",
+    "streaming",
+    "web",
+    "graphics",
+    "rendering",
+]
 license = "Apache-2.0"
 repository = "https://github.com/PooyaEimandar/sib"
 categories = ["development-tools"]
@@ -18,14 +26,14 @@ crate-type = ["rlib", "staticlib", "cdylib"]
 [dependencies]
 arc-swap = { version = "1.9.1", optional = true, default-features = false }
 async-trait = { version = "0.1.89", optional = true, default-features = false }
-bytemuck = { version = "1.25", optional = true, default-features = false, features = [
+bytemuck = { version = "1.25.0", optional = true, default-features = false, features = [
     "derive",
 ] }
 base64 = { version = "0.22.1", optional = true, default-features = false, features = [
     "std",
 ] }
 boring = { version = "5.1.0", optional = true }
-brotli = { version = "8.0.2", optional = true, default-features = false, features = [
+brotli = { version = "8.0.3", optional = true, default-features = false, features = [
     "std",
 ] }
 bytes = { version = "1.11.1", optional = true, default-features = false }
@@ -57,7 +65,7 @@ gstreamer-video = { version = "0.25.2", optional = true }
 h2 = { version = "0.4.14", optional = true, default-features = false }
 heapless = { version = "0.9.3", optional = true, default-features = false }
 hex = { version = "0.4.3", optional = true }
-http = { version = "1.4.0", optional = true, default-features = false, features = [
+http = { version = "1.4.1", optional = true, default-features = false, features = [
     "std",
 ] }
 hmac = { version = "0.13.0", optional = true, default-features = false }
@@ -86,15 +94,15 @@ rustls = { version = "0.23.40", optional = true, default-features = false, featu
     "tls12",
 ] }
 rustls-pki-types = { version = "1.14.1", optional = true, default-features = false }
-serde = { version = "1.0.188", optional = true, default-features = false, features = [
+serde = { version = "1.0.228", optional = true, default-features = false, features = [
     "std",
 ] }
-serde_json = { version = "1.0.107", optional = true, default-features = false, features = [
+serde_json = { version = "1.0.150", optional = true, default-features = false, features = [
     "std",
 ] }
 sha1 = { version = "0.11.0", optional = true, default-features = false }
 sha2 = { version = "0.11.0", optional = true }
-socket2 = { version = "0.6.3", optional = true, default-features = false, features = [
+socket2 = { version = "0.6.4", optional = true, default-features = false, features = [
     "all",
 ] }
 tracing = { version = "0.1.44", default-features = false, features = [
@@ -125,9 +133,9 @@ wtransport = { version = "0.7.1", optional = true, default-features = false, fea
 zstd = { version = "0.13.3", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-console_error_panic_hook = { version = "0.1", optional = true }
-wasm-bindgen-futures = { version = "0.4", optional = true }
-web-sys = { version = "0.3", optional = true, features = [
+console_error_panic_hook = { version = "0.1.7", optional = true }
+wasm-bindgen-futures = { version = "0.4.72", optional = true }
+web-sys = { version = "0.3.99", optional = true, features = [
     "VisualViewport",
     "Window",
 ] }
@@ -260,12 +268,12 @@ stm-webrtc-sender = [
 [dev-dependencies]
 base64 = { version = "0.22.1", default-features = false, features = ["std"] }
 dashmap = { version = "6.2.1", default-features = false, features = ["rayon"] }
-http = { version = "1.4.0", default-features = false, features = ["std"] }
+http = { version = "1.4.1", default-features = false, features = ["std"] }
 nonzero_ext = { version = "0.3.0", default-features = false, features = [
     "std",
 ] }
 num_cpus = { version = "1.17.0" }
-reqwest = { version = "0.13.3", default-features = false, features = [
+reqwest = { version = "0.13.4", default-features = false, features = [
     "blocking",
     "http2",
     "http3",
@@ -279,4 +287,4 @@ tokio = { version = "1.52.3", default-features = false, features = [
 ] }
 
 [build-dependencies]
-chrono = { version = "0.4.44" }
+chrono = { version = "0.4.45" }
