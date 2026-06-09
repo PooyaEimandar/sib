@@ -151,6 +151,17 @@ impl RenderContext {
         self.surface_config.width as f32 / self.surface_config.height.max(1) as f32
     }
 
+    pub fn gpu_device_info(&self) -> String {
+        let info = self.adapter.get_info();
+        let name = if info.name.trim().is_empty() {
+            "unknown GPU"
+        } else {
+            info.name.as_str()
+        };
+
+        format!("{name} ({:?}, {:?})", info.backend, info.device_type)
+    }
+
     pub fn resize(&mut self, new_size: PhysicalSize<u32>) {
         #[cfg(target_arch = "wasm32")]
         let new_size = {

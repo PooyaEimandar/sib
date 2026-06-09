@@ -1,5 +1,41 @@
 use crate::render::texture::Texture;
 
+pub fn uniform_layout(
+    device: &wgpu::Device,
+    label: impl Into<Option<&'static str>>,
+    visibility: wgpu::ShaderStages,
+) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: label.into(),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }],
+    })
+}
+
+pub fn uniform_bind_group(
+    device: &wgpu::Device,
+    label: impl Into<Option<&'static str>>,
+    layout: &wgpu::BindGroupLayout,
+    uniform_buffer: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: label.into(),
+        layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: uniform_buffer.as_entire_binding(),
+        }],
+    })
+}
+
 pub fn uniform_texture_sampler_layout(
     device: &wgpu::Device,
     label: impl Into<Option<&'static str>>,

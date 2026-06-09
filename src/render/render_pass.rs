@@ -32,3 +32,26 @@ pub fn begin_color_depth<'encoder>(
         multiview_mask: None,
     })
 }
+
+pub fn begin_color_load<'encoder>(
+    encoder: &'encoder mut wgpu::CommandEncoder,
+    label: impl Into<Option<&'static str>>,
+    color_view: &'encoder wgpu::TextureView,
+) -> wgpu::RenderPass<'encoder> {
+    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: label.into(),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: color_view,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Load,
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    })
+}
