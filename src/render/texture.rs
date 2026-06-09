@@ -28,6 +28,29 @@ pub struct Texture {
     pub format: wgpu::TextureFormat,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct TextureSamplerOptions {
+    pub address_mode_u: wgpu::AddressMode,
+    pub address_mode_v: wgpu::AddressMode,
+    pub address_mode_w: wgpu::AddressMode,
+    pub mag_filter: wgpu::FilterMode,
+    pub min_filter: wgpu::FilterMode,
+    pub mipmap_filter: wgpu::MipmapFilterMode,
+}
+
+impl Default for TextureSamplerOptions {
+    fn default() -> Self {
+        Self {
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+        }
+    }
+}
+
 impl Texture {
     pub fn depth(device: &wgpu::Device, config: &wgpu::SurfaceConfiguration) -> Self {
         let size = wgpu::Extent3d {
@@ -73,6 +96,22 @@ impl Texture {
         label: impl Into<Option<&'static str>>,
         image: &ImageRgba8,
     ) -> RenderResult<Self> {
+        Self::from_rgba8_2d_with_sampler(
+            device,
+            queue,
+            label,
+            image,
+            TextureSamplerOptions::default(),
+        )
+    }
+
+    pub fn from_rgba8_2d_with_sampler(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        label: impl Into<Option<&'static str>>,
+        image: &ImageRgba8,
+        sampler_options: TextureSamplerOptions,
+    ) -> RenderResult<Self> {
         Self::from_rgba8_layers(
             device,
             queue,
@@ -81,6 +120,7 @@ impl Texture {
             image.height,
             &[image.rgba.as_slice()],
             wgpu::TextureViewDimension::D2,
+            sampler_options,
         )
     }
 
@@ -111,6 +151,7 @@ impl Texture {
             height,
             &layers,
             wgpu::TextureViewDimension::Cube,
+            TextureSamplerOptions::default(),
         )
     }
 
@@ -134,6 +175,7 @@ impl Texture {
             height,
             &layers,
             wgpu::TextureViewDimension::D2Array,
+            TextureSamplerOptions::default(),
         )
     }
 
@@ -145,6 +187,7 @@ impl Texture {
         height: u32,
         layers: &[&[u8]],
         view_dimension: wgpu::TextureViewDimension,
+        sampler_options: TextureSamplerOptions,
     ) -> RenderResult<Self> {
         if layers.is_empty() {
             return Err(RenderError::message("texture has no RGBA layers"));
@@ -214,12 +257,12 @@ impl Texture {
         });
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label,
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            address_mode_u: sampler_options.address_mode_u,
+            address_mode_v: sampler_options.address_mode_v,
+            address_mode_w: sampler_options.address_mode_w,
+            mag_filter: sampler_options.mag_filter,
+            min_filter: sampler_options.min_filter,
+            mipmap_filter: sampler_options.mipmap_filter,
             ..Default::default()
         });
 
