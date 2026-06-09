@@ -7,6 +7,7 @@ pub mod runner;
 pub mod shader;
 pub mod stats;
 pub mod text;
+pub mod text_mesh;
 pub mod texture;
 
 #[cfg(target_arch = "wasm32")]
