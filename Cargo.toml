@@ -33,10 +33,10 @@ base64 = { version = "0.22.1", optional = true, default-features = false, featur
     "std",
 ] }
 boring = { version = "5.1.0", optional = true }
-brotli = { version = "8.0.3", optional = true, default-features = false, features = [
+brotli = { version = "8.0.4", optional = true, default-features = false, features = [
     "std",
 ] }
-bytes = { version = "1.11.1", optional = true, default-features = false }
+bytes = { version = "1.12.0", optional = true, default-features = false }
 cfg-if = { version = "1.0.4", default-features = false }
 crossbeam = { version = "0.8.4", optional = true, default-features = false, features = [
     "std",
@@ -63,7 +63,7 @@ gstreamer = { version = "0.25.2", optional = true }
 gstreamer-app = { version = "0.25.2", optional = true }
 gstreamer-video = { version = "0.25.2", optional = true }
 glyphon = { version = "0.11.0", optional = true }
-h2 = { version = "0.4.14", optional = true, default-features = false }
+h2 = { version = "0.4.15", optional = true, default-features = false }
 heapless = { version = "0.9.3", optional = true, default-features = false }
 hex = { version = "0.4.3", optional = true }
 http = { version = "1.4.2", optional = true, default-features = false, features = [
@@ -136,8 +136,8 @@ zstd = { version = "0.13.3", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 console_error_panic_hook = { version = "0.1.7", optional = true }
-wasm-bindgen-futures = { version = "0.4.73", optional = true }
-web-sys = { version = "0.3.100", optional = true, features = [
+wasm-bindgen-futures = { version = "0.4.75", optional = true }
+web-sys = { version = "0.3.102", optional = true, features = [
     "VisualViewport",
     "Window",
 ] }

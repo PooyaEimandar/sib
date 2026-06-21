@@ -1,7 +1,11 @@
 use super::*;
-use std::num::NonZeroU64;
+use std::{num::NonZeroU64, sync::MutexGuard};
 
 pub fn default_fdb_cluster_path() -> String {
+    if let Ok(path) = std::env::var("SIB_FDB_CLUSTER_FILE") {
+        return path;
+    }
+
     // OS defaults
     #[cfg(target_os = "macos")]
     {
@@ -20,6 +24,37 @@ pub fn default_fdb_cluster_path() -> String {
 fn fdb_cluster_available() -> bool {
     let path = default_fdb_cluster_path();
     !path.is_empty() && std::path::Path::new(&path).exists()
+}
+
+fn start_fdb_network_if_available() -> Option<MutexGuard<'static, ()>> {
+    if !fdb_cluster_available() {
+        return None;
+    }
+
+    let guard = crate::database::fdb::test_shared::fdb_test_lock();
+    crate::database::fdb::test_shared::fdb_test_network_start().ok()?;
+    Some(guard)
+}
+
+#[test]
+fn fdb_raw_handles_are_send_sync() {
+    fn assert_send_sync<T: Send + Sync>() {}
+
+    assert_send_sync::<crate::database::fdb::future::FDBFuture>();
+    assert_send_sync::<crate::database::fdb::trans::FDBTransaction>();
+}
+
+#[cfg(feature = "rt-tokio")]
+#[tokio::test]
+async fn fdb_raw_handles_can_move_into_tokio_spawn() {
+    let future = None::<crate::database::fdb::future::FDBFuture>;
+    let transaction = None::<crate::database::fdb::trans::FDBTransaction>;
+
+    tokio::spawn(async move {
+        let _ = (future, transaction);
+    })
+    .await
+    .expect("spawned task");
 }
 
 #[test]
@@ -203,13 +238,14 @@ async fn test_fdb_pool_timeout_when_all_held() {
 
 #[test]
 fn test_fdb_run_transaction_set_and_get() {
-    if !fdb_cluster_available() {
-        return;
-    }
-
     use crate::database::fdb::trans::FDBTransaction;
 
-    let fdb_guard = crate::fdb_network_start!();
+    let Some(_guard) = start_fdb_network_if_available() else {
+        if cfg!(feature = "db-fdb") {
+            panic!("live FoundationDB test requested, but no usable cluster was found");
+        }
+        return;
+    };
 
     // give it time to start
     std::thread::sleep(Duration::from_secs(1));
@@ -236,18 +272,16 @@ fn test_fdb_run_transaction_set_and_get() {
         let result = fut.get_value().expect("get failed");
         assert_eq!(result.iter().as_slice(), value.as_slice(), "value mismatch");
     }
-
-    // Now stop FDB network
-    crate::fdb_network_stop!(fdb_guard);
 }
 
 #[test]
 fn test_fdb_run_transaction_set_and_get_with_run() {
-    if !fdb_cluster_available() {
+    let Some(_guard) = start_fdb_network_if_available() else {
+        if cfg!(feature = "db-fdb") {
+            panic!("live FoundationDB test requested, but no usable cluster was found");
+        }
         return;
-    }
-
-    let fdb_guard = crate::fdb_network_start!();
+    };
 
     // give it time to start
     std::thread::sleep(Duration::from_secs(1));
@@ -276,17 +310,10 @@ fn test_fdb_run_transaction_set_and_get_with_run() {
             })
     })
     .expect("commit failed");
-
-    // Now stop FDB network
-    crate::fdb_network_stop!(fdb_guard);
 }
 
 #[test]
 fn test_fdb_run_transaction_retries_on_conflict_increment() {
-    if !fdb_cluster_available() {
-        return;
-    }
-
     use crate::database::fdb::pool::FDBPool;
     use crate::database::fdb::trans::{self, FDBTransactionOutcome};
 
@@ -298,7 +325,12 @@ fn test_fdb_run_transaction_retries_on_conflict_increment() {
     use std::thread;
     use std::time::Duration;
 
-    let fdb_guard = crate::fdb_network_start!();
+    let Some(_guard) = start_fdb_network_if_available() else {
+        if cfg!(feature = "db-fdb") {
+            panic!("live FoundationDB test requested, but no usable cluster was found");
+        }
+        return;
+    };
 
     // give it time to start
     thread::sleep(Duration::from_secs(1));
@@ -406,17 +438,10 @@ fn test_fdb_run_transaction_retries_on_conflict_increment() {
         attempts_a.load(Ordering::Relaxed),
         attempts_b.load(Ordering::Relaxed),
     );
-
-    // Stop FDB network
-    crate::fdb_network_stop!(fdb_guard);
 }
 
 #[test]
 fn test_fdb_run_transaction_retry_branch_is_executed() {
-    if !fdb_cluster_available() {
-        return;
-    }
-
     use crate::database::fdb::pool::FDBPool;
     use crate::database::fdb::trans::{self, FDBTransactionOutcome};
     use std::num::NonZeroU64;
@@ -426,8 +451,12 @@ fn test_fdb_run_transaction_retry_branch_is_executed() {
     };
     use std::time::Duration;
 
-    // Start FDB network
-    let fdb_guard = crate::fdb_network_start!();
+    let Some(_guard) = start_fdb_network_if_available() else {
+        if cfg!(feature = "db-fdb") {
+            panic!("live FoundationDB test requested, but no usable cluster was found");
+        }
+        return;
+    };
 
     std::thread::sleep(Duration::from_secs(1));
 
@@ -472,7 +501,4 @@ fn test_fdb_run_transaction_retry_branch_is_executed() {
         Ok(FDBTransactionOutcome::Ok(()))
     })
     .expect("verify commit failed");
-
-    // Stop network
-    crate::fdb_network_stop!(fdb_guard);
 }

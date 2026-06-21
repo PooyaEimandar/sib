@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 # bash/fdb.sh
 # FoundationDB install/uninstall script for macOS and Linux
 # Supports:
@@ -6,9 +7,9 @@
 # Usage:
 #   ./fdb.sh install        # Install FoundationDB (default)
 #   ./fdb.sh uninstall      # Uninstall FoundationDB
+#   ./fdb.sh docker         # Start FoundationDB in Docker for local tests
 #   ./fdb.sh help           # Show help
 
-#!/usr/bin/env bash
 set -euo pipefail
 IFS=$'\n\t'
 
@@ -20,6 +21,12 @@ COLOR_OFF="${COLOR_OFF:-\033[0m}"
 
 FDB_VERSION="7.3.69"
 FDB_BASE_URL="https://github.com/apple/foundationdb/releases/download/${FDB_VERSION}"
+FDB_IMAGE="${FDB_IMAGE:-foundationdb/foundationdb:${FDB_VERSION}}"
+FDB_CONTAINER="${FDB_CONTAINER:-sib-fdb}"
+FDB_PORT="${FDB_PORT:-4500}"
+FDB_DIR="${FDB_DIR:-.fdb}"
+FDB_CLUSTER_FILE="${FDB_CLUSTER_FILE:-${FDB_DIR}/fdb.cluster}"
+FDB_DOCKER_PLATFORM="${FDB_DOCKER_PLATFORM:-linux/amd64}"
 
 ARCH="$(uname -m)"
 PLATFORM="$(uname -s)"
@@ -40,6 +47,11 @@ usage() {
 Usage:
   $0 install        Install FoundationDB (default)
   $0 uninstall      Uninstall FoundationDB
+  $0 docker         Start local FoundationDB in Docker
+  $0 docker start   Start local FoundationDB in Docker
+  $0 docker stop    Stop and remove the Docker FoundationDB server
+  $0 docker restart Restart the Docker FoundationDB server
+  $0 docker status  Show Docker FoundationDB status
   $0 help           Show this help
 
 Notes:
@@ -47,6 +59,11 @@ Notes:
   - Linux: this script supports Debian/Ubuntu (apt) on amd64 only.
   - To keep macOS env exports in your current shell, run:
       source $0 install
+  - Docker local test cluster writes:
+      ${FDB_CLUSTER_FILE}
+
+Run Docker-backed tests with:
+  SIB_FDB_CLUSTER_FILE=${FDB_CLUSTER_FILE} cargo test --no-default-features --features "rt-tokio db-fdb" database::fdb -- --test-threads=1
 EOF
 }
 
@@ -78,6 +95,103 @@ verify_fdb() {
     echo -e "${COLOR_RED}Error: Installed FoundationDB version does not match expected ${FDB_VERSION}.${COLOR_OFF}"
     exit 1
   fi
+}
+
+configure_fdb() {
+  echo -e "${COLOR_GREEN}Configuring FoundationDB local database...${COLOR_OFF}"
+  for _ in $(seq 1 30); do
+    if fdbcli --exec status >/dev/null 2>&1; then
+      echo -e "${COLOR_GREEN}FoundationDB local database is ready.${COLOR_OFF}"
+      return
+    fi
+    if fdbcli --exec "configure new single memory" >/dev/null 2>&1; then
+      echo -e "${COLOR_GREEN}FoundationDB local database is configured.${COLOR_OFF}"
+      return
+    fi
+    sleep 1
+  done
+
+  echo -e "${COLOR_RED}Error: FoundationDB did not become configurable in time.${COLOR_OFF}"
+  exit 1
+}
+
+require_docker() {
+  if ! is_command_exists docker; then
+    echo -e "${COLOR_RED}Error: docker is required.${COLOR_OFF}"
+    exit 1
+  fi
+}
+
+write_docker_cluster_file() {
+  mkdir -p "${FDB_DIR}"
+  printf 'docker:docker@127.0.0.1:%s\n' "${FDB_PORT}" >"${FDB_CLUSTER_FILE}"
+}
+
+docker_start_fdb() {
+  require_docker
+  write_docker_cluster_file
+
+  if docker ps --format '{{.Names}}' | grep -qx "${FDB_CONTAINER}"; then
+    echo -e "${COLOR_YELLOW}FoundationDB container is already running:${COLOR_OFF} ${FDB_CONTAINER}"
+  else
+    docker rm -f "${FDB_CONTAINER}" >/dev/null 2>&1 || true
+    docker run \
+      --detach \
+      --name "${FDB_CONTAINER}" \
+      --platform "${FDB_DOCKER_PLATFORM}" \
+      --env FDB_NETWORKING_MODE=host \
+      --env "FDB_CLUSTER_FILE_CONTENTS=docker:docker@127.0.0.1:${FDB_PORT}" \
+      --publish "127.0.0.1:${FDB_PORT}:4500" \
+      "${FDB_IMAGE}" >/dev/null
+  fi
+
+  echo -e "${COLOR_GREEN}Waiting for FoundationDB Docker server...${COLOR_OFF}"
+  for _ in $(seq 1 60); do
+    if docker exec "${FDB_CONTAINER}" timeout 5 fdbcli --exec status >/dev/null 2>&1; then
+      echo -e "${COLOR_GREEN}FoundationDB Docker server is ready.${COLOR_OFF}"
+      echo "Cluster file: ${FDB_CLUSTER_FILE}"
+      return
+    fi
+    if docker exec "${FDB_CONTAINER}" timeout 5 fdbcli --exec "configure new single memory" >/dev/null 2>&1; then
+      echo -e "${COLOR_GREEN}FoundationDB Docker server is ready.${COLOR_OFF}"
+      echo "Cluster file: ${FDB_CLUSTER_FILE}"
+      return
+    fi
+    sleep 1
+  done
+
+  echo -e "${COLOR_RED}Error: FoundationDB Docker server did not become ready in time.${COLOR_OFF}" >&2
+  docker logs "${FDB_CONTAINER}" >&2 || true
+  exit 1
+}
+
+docker_stop_fdb() {
+  require_docker
+  docker rm -f "${FDB_CONTAINER}" >/dev/null 2>&1 || true
+}
+
+docker_status_fdb() {
+  require_docker
+  docker ps --filter "name=^/${FDB_CONTAINER}$" --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'
+}
+
+do_docker() {
+  local docker_action="${1:-start}"
+  case "$docker_action" in
+    start) docker_start_fdb ;;
+    stop) docker_stop_fdb ;;
+    restart)
+      docker_stop_fdb
+      docker_start_fdb
+      ;;
+    status) docker_status_fdb ;;
+    help|-h|--help) usage ;;
+    *)
+      echo -e "${COLOR_RED}Unknown docker action: ${docker_action}${COLOR_OFF}"
+      usage
+      exit 1
+      ;;
+  esac
 }
 
 export_macos_link_env() {
@@ -115,6 +229,7 @@ install_fdb_macos_arm64() {
 
   export_macos_link_env
   verify_fdb
+  configure_fdb
 }
 
 install_fdb_linux_amd64() {
@@ -167,6 +282,7 @@ install_fdb_linux_amd64() {
   fi
 
   verify_fdb
+  configure_fdb
 }
 
 uninstall_fdb_macos_arm64() {
@@ -253,6 +369,7 @@ do_install() {
     if [[ "$PLATFORM" == Darwin* ]]; then
       export_macos_link_env
     fi
+    configure_fdb
     exit 0
   fi
 
@@ -292,6 +409,7 @@ main() {
   case "$action" in
     install)   do_install ;;
     uninstall) do_uninstall ;;
+    docker)    shift; do_docker "${1:-start}" ;;
     help|-h|--help) usage ;;
     *)
       echo -e "${COLOR_RED}Unknown action: $action${COLOR_OFF}"

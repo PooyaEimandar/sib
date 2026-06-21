@@ -5,6 +5,10 @@ pub mod network;
 pub mod pool;
 pub mod trans;
 
+#[cfg(test)]
+#[path = "../../../tests/unit/database/fdb/shared.rs"]
+pub(crate) mod test_shared;
+
 #[macro_export]
 macro_rules! fdb_network_start {
     () => {{

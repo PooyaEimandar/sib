@@ -9,6 +9,16 @@ pub struct FDBFuture {
     pub fut: *mut FDB_future,
 }
 
+// SAFETY: FoundationDB futures are reference-counted client objects whose C API
+// supports waiting, cancellation, and destruction from arbitrary client threads.
+// The wrapper owns exactly one future pointer and only exposes operations that
+// delegate to the FoundationDB C API.
+unsafe impl Send for FDBFuture {}
+// SAFETY: Shared references only allow C API operations that FoundationDB
+// documents as safe on a future handle; mutation-like operations require
+// `&mut self`.
+unsafe impl Sync for FDBFuture {}
+
 impl FDBFuture {
     pub fn new(fut: *mut FDB_future) -> std::io::Result<Self> {
         if fut.is_null() {

@@ -108,6 +108,130 @@ pub struct FDBRange<'a> {
     pub reverse: bool,
 }
 
+pub type FDBKeyValue = (Vec<u8>, Vec<u8>);
+pub type FDBRangeResult = (Vec<FDBKeyValue>, bool);
+
+#[inline]
+pub fn prefix_end(prefix: &[u8]) -> Option<Vec<u8>> {
+    let mut end = prefix.to_vec();
+    while let Some(last) = end.last_mut() {
+        if *last != 0xFF {
+            *last += 1;
+            return Some(end);
+        }
+        end.pop();
+    }
+    None
+}
+
+impl<'a> FDBRange<'a> {
+    pub fn between(begin: &'a [u8], end: &'a [u8], limit: i32) -> Self {
+        Self {
+            begin_key: begin,
+            begin_or_equal: true,
+            begin_offset: 0,
+            end_key: end,
+            end_or_equal: false,
+            end_offset: 0,
+            limit,
+            target_bytes: 1 << 20,
+            mode: FDBStreamingMode::WantAll,
+            iteration: 0,
+            snapshot: true,
+            reverse: false,
+        }
+    }
+
+    pub fn exact_prefix(prefix: &'a [u8], end: &'a [u8], limit: i32) -> Self {
+        Self::between(prefix, end, limit)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FDBOwnedRange {
+    pub begin_key: Vec<u8>,
+    pub begin_or_equal: bool,
+    pub begin_offset: i32,
+    pub end_key: Vec<u8>,
+    pub end_or_equal: bool,
+    pub end_offset: i32,
+    pub limit: i32,
+    pub target_bytes: i32,
+    pub mode: FDBStreamingMode,
+    pub iteration: i32,
+    pub snapshot: bool,
+    pub reverse: bool,
+}
+
+impl FDBOwnedRange {
+    pub fn between(begin: impl Into<Vec<u8>>, end: impl Into<Vec<u8>>, limit: i32) -> Self {
+        Self {
+            begin_key: begin.into(),
+            begin_or_equal: true,
+            begin_offset: 0,
+            end_key: end.into(),
+            end_or_equal: false,
+            end_offset: 0,
+            limit,
+            target_bytes: 1 << 20,
+            mode: FDBStreamingMode::WantAll,
+            iteration: 0,
+            snapshot: true,
+            reverse: false,
+        }
+    }
+
+    pub fn prefix(prefix: &[u8], limit: i32) -> Option<Self> {
+        Some(Self::between(prefix.to_vec(), prefix_end(prefix)?, limit))
+    }
+
+    pub fn as_range(&self) -> FDBRange<'_> {
+        FDBRange {
+            begin_key: &self.begin_key,
+            begin_or_equal: self.begin_or_equal,
+            begin_offset: self.begin_offset,
+            end_key: &self.end_key,
+            end_or_equal: self.end_or_equal,
+            end_offset: self.end_offset,
+            limit: self.limit,
+            target_bytes: self.target_bytes,
+            mode: self.mode,
+            iteration: self.iteration,
+            snapshot: self.snapshot,
+            reverse: self.reverse,
+        }
+    }
+
+    pub fn after_key(mut self, key: &[u8]) -> Self {
+        self.begin_key.clear();
+        self.begin_key.extend_from_slice(key);
+        self.begin_or_equal = false;
+        self.begin_offset = 1;
+        self.iteration = self.iteration.saturating_add(1);
+        self
+    }
+
+    pub fn with_limit(mut self, limit: i32) -> Self {
+        self.limit = limit;
+        self
+    }
+
+    pub fn with_target_bytes(mut self, target_bytes: i32) -> Self {
+        self.target_bytes = target_bytes;
+        self
+    }
+
+    pub fn with_streaming_mode(mut self, mode: FDBStreamingMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    pub fn snapshot(mut self, snapshot: bool) -> Self {
+        self.snapshot = snapshot;
+        self
+    }
+}
+
 pub enum FDBTransactionOutcome<R> {
     Ok(R),
     Retry(i32), // FDB error code
@@ -117,13 +241,22 @@ pub struct FDBTransaction {
     pub trs: *mut foundationdb_sys::FDBTransaction,
 }
 
+// SAFETY: FoundationDB transactions are client API handles that may be moved
+// between threads. This wrapper owns one transaction pointer and destroys it
+// exactly once in Drop.
+unsafe impl Send for FDBTransaction {}
+// SAFETY: The C API serializes access to transaction handles. Methods on this
+// wrapper take `&self`, matching the C handle model; callers are still
+// responsible for FoundationDB's transaction semantics.
+unsafe impl Sync for FDBTransaction {}
+
 #[inline]
 fn fdb_err(code: i32) -> std::io::Error {
     let cstr = unsafe { foundationdb_sys::fdb_get_error(code) };
     let s = unsafe { CStr::from_ptr(cstr) }
         .to_string_lossy()
         .into_owned();
-    std::io::Error::new(std::io::ErrorKind::Other, format!("FDB error {code}: {s}"))
+    std::io::Error::other(format!("FDB error {code}: {s}"))
 }
 
 impl FDBTransaction {
@@ -243,10 +376,7 @@ impl FDBTransaction {
     }
 
     #[inline]
-    pub fn get_range_blocking<'a>(
-        &self,
-        range: &FDBRange<'a>,
-    ) -> std::io::Result<(Vec<(Vec<u8>, Vec<u8>)>, bool)> {
+    pub fn get_range_blocking<'a>(&self, range: &FDBRange<'a>) -> std::io::Result<FDBRangeResult> {
         let fut = self.get_range(range)?;
         fut.block_until_ready();
 
@@ -292,13 +422,63 @@ impl FDBTransaction {
             let klen = kv.key_length as usize;
             let vlen = kv.value_length as usize;
 
-            let key = unsafe { copy_bytes(kv.key as *const u8, klen) };
-            let val = unsafe { copy_bytes(kv.value as *const u8, vlen) };
+            let key = unsafe { copy_bytes(kv.key, klen) };
+            let val = unsafe { copy_bytes(kv.value, vlen) };
 
             out.push((key, val));
         }
 
         Ok((out, more != 0))
+    }
+
+    #[inline]
+    pub fn get_owned_range_blocking(
+        &self,
+        range: &FDBOwnedRange,
+    ) -> std::io::Result<FDBRangeResult> {
+        self.get_range_blocking(&range.as_range())
+    }
+
+    pub fn scan_prefix_blocking<F>(
+        &self,
+        prefix: &[u8],
+        batch_size: i32,
+        mut visit: F,
+    ) -> std::io::Result<()>
+    where
+        F: FnMut(&[FDBKeyValue]) -> std::io::Result<()>,
+    {
+        if batch_size <= 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "batch_size must be positive",
+            ));
+        }
+
+        let mut range = FDBOwnedRange::prefix(prefix, batch_size).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "prefix range has no finite end",
+            )
+        })?;
+
+        loop {
+            let (batch, more) = self.get_owned_range_blocking(&range)?;
+            if batch.is_empty() {
+                return Ok(());
+            }
+
+            visit(&batch)?;
+
+            if !more || batch.len() < batch_size as usize {
+                return Ok(());
+            }
+
+            let Some((last_key, _)) = batch.last() else {
+                return Ok(());
+            };
+            range = range.after_key(last_key);
+        }
     }
 
     #[inline]
@@ -375,3 +555,7 @@ where
         trx.on_error_blocking(code)?;
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/database/fdb/trans_tests.rs"]
+mod tests;

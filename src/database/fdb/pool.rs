@@ -210,7 +210,7 @@ impl FDBPool {
         f: F,
     ) -> std::io::Result<R> {
         let loan = self.loan_blocking(timeout)?;
-        Ok(f(&*loan))
+        Ok(f(&loan))
     }
 
     /// loan fdb connection (mutable)
@@ -221,7 +221,7 @@ impl FDBPool {
         f: F,
     ) -> std::io::Result<R> {
         let mut loan = self.loan_blocking(timeout)?;
-        Ok(f(&mut *loan))
+        Ok(f(&mut loan))
     }
 
     /// Async loan with timeout (immutable)
@@ -232,7 +232,7 @@ impl FDBPool {
         Fut: std::future::Future<Output = R>,
     {
         let loan = self.loan(timeout).await?;
-        Ok(f(&*loan).await)
+        Ok(f(&loan).await)
     }
 
     /// Async loan with timeout (mutable)
@@ -247,7 +247,7 @@ impl FDBPool {
         Fut: std::future::Future<Output = R>,
     {
         let mut loan = self.loan(timeout).await?;
-        Ok(f(&mut *loan).await)
+        Ok(f(&mut loan).await)
     }
 }
 
