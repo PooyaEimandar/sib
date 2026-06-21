@@ -1,9 +1,9 @@
 use super::*;
 use crate::database::fdb::pool::FDBPool;
-use std::{num::NonZeroU64, sync::MutexGuard, time::Duration};
+use std::{num::NonZeroU64, time::Duration};
 
 /// Start the FDB network.
-fn start_network_and_pool() -> Option<(MutexGuard<'static, ()>, FDBPool)> {
+fn start_network_and_pool() -> Option<FDBPool> {
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         return None;
@@ -26,12 +26,11 @@ fn start_network_and_pool() -> Option<(MutexGuard<'static, ()>, FDBPool)> {
             return None;
         }
 
-        let guard = crate::database::fdb::test_shared::fdb_test_lock();
         crate::database::fdb::test_shared::fdb_test_network_start().ok()?;
 
         let pool = FDBPool::new(cluster, NonZeroU64::new(4).unwrap()).ok()?;
 
-        Some((guard, pool))
+        Some(pool)
     }
 }
 
@@ -88,7 +87,7 @@ fn ttl_key_parser_rejects_wrong_bucket_and_malformed_lengths() {
 #[cfg(feature = "rt-tokio")]
 #[tokio::test]
 async fn cache_set_get_lazy_expire_and_gc() {
-    let Some((_guard, pool)) = start_network_and_pool() else {
+    let Some(pool) = start_network_and_pool() else {
         if cfg!(feature = "db-fdb") {
             panic!("live FoundationDB test requested, but no usable cluster was found");
         }
@@ -136,7 +135,7 @@ async fn cache_set_get_lazy_expire_and_gc() {
 #[cfg(feature = "rt-tokio")]
 #[tokio::test]
 async fn cache_delete_removes_row() {
-    let Some((_guard, pool)) = start_network_and_pool() else {
+    let Some(pool) = start_network_and_pool() else {
         if cfg!(feature = "db-fdb") {
             panic!("live FoundationDB test requested, but no usable cluster was found");
         }
@@ -157,7 +156,7 @@ async fn cache_delete_removes_row() {
 #[cfg(feature = "rt-may")]
 #[test]
 fn cache_set_get_lazy_expire_and_gc() {
-    let Some((_guard, pool)) = start_network_and_pool() else {
+    let Some(pool) = start_network_and_pool() else {
         if cfg!(feature = "db-fdb") {
             panic!("live FoundationDB test requested, but no usable cluster was found");
         }
@@ -203,7 +202,7 @@ fn cache_set_get_lazy_expire_and_gc() {
 #[cfg(feature = "rt-may")]
 #[test]
 fn cache_delete_removes_row() {
-    let Some((_guard, pool)) = start_network_and_pool() else {
+    let Some(pool) = start_network_and_pool() else {
         if cfg!(feature = "db-fdb") {
             panic!("live FoundationDB test requested, but no usable cluster was found");
         }

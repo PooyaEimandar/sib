@@ -1,8 +1,3 @@
-pub fn fdb_test_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
 pub fn fdb_test_network_start() -> Result<(), String> {
     static NETWORK: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
     NETWORK

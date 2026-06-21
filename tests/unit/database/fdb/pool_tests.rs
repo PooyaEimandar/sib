@@ -1,5 +1,5 @@
 use super::*;
-use std::{num::NonZeroU64, sync::MutexGuard};
+use std::num::NonZeroU64;
 
 pub fn default_fdb_cluster_path() -> String {
     if let Ok(path) = std::env::var("SIB_FDB_CLUSTER_FILE") {
@@ -26,14 +26,13 @@ fn fdb_cluster_available() -> bool {
     !path.is_empty() && std::path::Path::new(&path).exists()
 }
 
-fn start_fdb_network_if_available() -> Option<MutexGuard<'static, ()>> {
+fn start_fdb_network_if_available() -> Option<()> {
     if !fdb_cluster_available() {
         return None;
     }
 
-    let guard = crate::database::fdb::test_shared::fdb_test_lock();
     crate::database::fdb::test_shared::fdb_test_network_start().ok()?;
-    Some(guard)
+    Some(())
 }
 
 #[test]
@@ -240,7 +239,7 @@ async fn test_fdb_pool_timeout_when_all_held() {
 fn test_fdb_run_transaction_set_and_get() {
     use crate::database::fdb::trans::FDBTransaction;
 
-    let Some(_guard) = start_fdb_network_if_available() else {
+    let Some(()) = start_fdb_network_if_available() else {
         if cfg!(feature = "db-fdb") {
             panic!("live FoundationDB test requested, but no usable cluster was found");
         }
@@ -259,14 +258,14 @@ fn test_fdb_run_transaction_set_and_get() {
 
     {
         // set
-        let tr = FDBTransaction::new(&*lease).expect("new transaction failed");
+        let tr = FDBTransaction::new(&lease).expect("new transaction failed");
         tr.set(key, value);
         tr.commit_blocking().expect("commit failed");
     }
 
     {
         // get
-        let tr = FDBTransaction::new(&*lease).expect("new transaction failed");
+        let tr = FDBTransaction::new(&lease).expect("new transaction failed");
         let fut: crate::database::fdb::future::FDBFuture = tr.get(key, false).unwrap();
         fut.block_until_ready();
         let result = fut.get_value().expect("get failed");
@@ -276,7 +275,7 @@ fn test_fdb_run_transaction_set_and_get() {
 
 #[test]
 fn test_fdb_run_transaction_set_and_get_with_run() {
-    let Some(_guard) = start_fdb_network_if_available() else {
+    let Some(()) = start_fdb_network_if_available() else {
         if cfg!(feature = "db-fdb") {
             panic!("live FoundationDB test requested, but no usable cluster was found");
         }
@@ -294,20 +293,19 @@ fn test_fdb_run_transaction_set_and_get_with_run() {
     let value = b"hello";
 
     // set
-    crate::database::fdb::trans::run(&*lease, |tr| {
+    crate::database::fdb::trans::run(&lease, |tr| {
         tr.set(key, value);
         Ok(crate::database::fdb::trans::FDBTransactionOutcome::Ok(()))
     })
     .expect("commit failed");
 
     // get
-    crate::database::fdb::trans::run(&*lease, |tr| {
-        tr.get_blocking_value_optional(key, false)
-            .and_then(|res_opt| {
-                let res = res_opt.expect("key missing");
-                assert_eq!(res.iter().as_slice(), value.as_slice(), "value mismatch");
-                Ok(crate::database::fdb::trans::FDBTransactionOutcome::Ok(()))
-            })
+    crate::database::fdb::trans::run(&lease, |tr| {
+        tr.get_blocking_value_optional(key, false).map(|res_opt| {
+            let res = res_opt.expect("key missing");
+            assert_eq!(res.iter().as_slice(), value.as_slice(), "value mismatch");
+            crate::database::fdb::trans::FDBTransactionOutcome::Ok(())
+        })
     })
     .expect("commit failed");
 }
@@ -325,7 +323,7 @@ fn test_fdb_run_transaction_retries_on_conflict_increment() {
     use std::thread;
     use std::time::Duration;
 
-    let Some(_guard) = start_fdb_network_if_available() else {
+    let Some(()) = start_fdb_network_if_available() else {
         if cfg!(feature = "db-fdb") {
             panic!("live FoundationDB test requested, but no usable cluster was found");
         }
@@ -353,7 +351,7 @@ fn test_fdb_run_transaction_retries_on_conflict_increment() {
     // Initialize key = "0"
     {
         let lease = pool.try_loan().expect("acquire init lease");
-        trans::run(&*lease, |tr| {
+        trans::run(&lease, |tr| {
             tr.set(key.as_bytes(), b"0");
             Ok(FDBTransactionOutcome::Ok(()))
         })
@@ -369,7 +367,7 @@ fn test_fdb_run_transaction_retries_on_conflict_increment() {
     let a_ctr = Arc::clone(&attempts_a);
     let t1 = thread::spawn(move || {
         let lease = pool_a.try_loan().expect("acquire lease A");
-        trans::run(&*lease, |tr| {
+        trans::run(&lease, |tr| {
             a_ctr.fetch_add(1, Ordering::Relaxed);
 
             // Read-modify-write (conflicts with other thread)
@@ -394,7 +392,7 @@ fn test_fdb_run_transaction_retries_on_conflict_increment() {
     let b_ctr = Arc::clone(&attempts_b);
     let t2 = thread::spawn(move || {
         let lease = pool_b.try_loan().expect("acquire lease B");
-        trans::run(&*lease, |tr| {
+        trans::run(&lease, |tr| {
             b_ctr.fetch_add(1, Ordering::Relaxed);
 
             let cur = tr
@@ -417,7 +415,7 @@ fn test_fdb_run_transaction_retries_on_conflict_increment() {
     // Final value must be 2 if both increments committed (with retries)
     {
         let lease = pool.try_loan().expect("acquire final lease");
-        trans::run(&*lease, |tr| {
+        trans::run(&lease, |tr| {
             let final_val = tr
                 .get_blocking_value_optional(key.as_bytes(), false)?
                 .expect("key missing");
@@ -451,7 +449,7 @@ fn test_fdb_run_transaction_retry_branch_is_executed() {
     };
     use std::time::Duration;
 
-    let Some(_guard) = start_fdb_network_if_available() else {
+    let Some(()) = start_fdb_network_if_available() else {
         if cfg!(feature = "db-fdb") {
             panic!("live FoundationDB test requested, but no usable cluster was found");
         }
@@ -474,7 +472,7 @@ fn test_fdb_run_transaction_retry_branch_is_executed() {
     let value = b"ok";
 
     // Run: first attempt returns Retry, second attempt does the write and commits.
-    let res = trans::run(&*lease, move |tr| {
+    let res = trans::run(&lease, move |tr| {
         let n = calls_cl.fetch_add(1, Ordering::SeqCst);
 
         if n == 0 {
@@ -493,7 +491,7 @@ fn test_fdb_run_transaction_retry_branch_is_executed() {
     );
 
     // Verify the write landed
-    trans::run(&*lease, |tr| {
+    trans::run(&lease, |tr| {
         let got = tr
             .get_blocking_value_optional(key.as_bytes(), false)?
             .expect("key missing");
