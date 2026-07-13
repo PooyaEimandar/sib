@@ -35,9 +35,9 @@ path = "src/lib.rs"
 crate-type = ["rlib", "staticlib", "cdylib"]
 
 [dependencies]
-arc-swap = { version = "1.9.1", optional = true, default-features = false }
+arc-swap = { version = "1.9.2", optional = true, default-features = false }
 async-trait = { version = "0.1.89", optional = true, default-features = false }
-bytemuck = { version = "1.25.0", optional = true, default-features = false, features = [
+bytemuck = { version = "1.25.1", optional = true, default-features = false, features = [
     "derive",
 ] }
 base64 = { version = "0.22.1", optional = true, default-features = false, features = [
@@ -47,7 +47,7 @@ boring = { version = "5.1.0", optional = true }
 brotli = { version = "8.0.4", optional = true, default-features = false, features = [
     "std",
 ] }
-bytes = { version = "1.12.0", optional = true, default-features = false }
+bytes = { version = "1.12.1", optional = true, default-features = false }
 cfg-if = { version = "1.0.4", default-features = false }
 crossbeam = { version = "0.8.4", optional = true, default-features = false, features = [
     "std",
@@ -58,7 +58,7 @@ dashmap = { version = "6.2.1", optional = true, default-features = false, featur
 flate2 = { version = "1.1.9", optional = true, default-features = false, features = [
     "rust_backend",
 ] }
-env_logger = { version = "0.11.10", optional = true }
+env_logger = { version = "0.11.11", optional = true }
 futures-lite = { version = "2.6.1", optional = true, default-features = false, features = [
     "race",
     "std",
@@ -66,14 +66,14 @@ futures-lite = { version = "2.6.1", optional = true, default-features = false, f
 glam = { version = "0.33.2", optional = true, default-features = false, features = [
     "std",
 ] }
-glib = { version = "0.22.7", optional = true, default-features = false, features = [
+glib = { version = "0.22.8", optional = true, default-features = false, features = [
     "gio",
 ] }
 governor = { version = "0.10.4", optional = true }
-gstreamer = { version = "0.25.2", optional = true }
+gstreamer = { version = "0.25.3", optional = true }
 gstreamer-app = { version = "0.25.2", optional = true }
-gstreamer-video = { version = "0.25.2", optional = true }
-glyphon = { version = "0.11.0", optional = true }
+gstreamer-video = { version = "0.25.3", optional = true }
+glyphon = { version = "0.12.0", optional = true }
 h2 = { version = "0.4.15", optional = true, default-features = false }
 heapless = { version = "0.9.3", optional = true, default-features = false }
 hex = { version = "0.4.3", optional = true }
@@ -88,24 +88,24 @@ itoa = { version = "1.0.18", default-features = false, optional = true }
 may = { version = "0.3.51", optional = true }
 mime = { version = "0.3.17", optional = true }
 mime_guess = { version = "2.0.5", optional = true }
-memmap2 = { version = "0.9.10", optional = true, default-features = false }
+memmap2 = { version = "0.9.11", optional = true, default-features = false }
 once_cell = { version = "1.21.4", optional = true, default-features = false, features = [
     "std",
 ] }
-pollster = { version = "0.4.0", optional = true }
-rand = { version = "0.10.1", optional = true }
+pollster = { version = "1.0.1", optional = true }
+rand = { version = "0.10.2", optional = true }
 rcgen = { version = "0.14.8", optional = true }
 rdkafka = { version = "0.39.0", optional = true, features = [
     "cmake-build",
     "ssl",
 ] }
-rustls = { version = "0.23.40", optional = true, default-features = false, features = [
+rustls = { version = "0.23.42", optional = true, default-features = false, features = [
     "aws_lc_rs",
     "prefer-post-quantum",
     "std",
     "tls12",
 ] }
-rustls-pki-types = { version = "1.14.1", optional = true, default-features = false }
+rustls-pki-types = { version = "1.15.0", optional = true, default-features = false }
 serde = { version = "1.0.228", optional = true, default-features = false, features = [
     "std",
 ] }
@@ -138,7 +138,7 @@ tokio-rustls = { version = "0.26.4", optional = true, default-features = false, 
 tokio-util = { version = "0.7.18", optional = true, default-features = false }
 webrtc = { version = "0.17.1", optional = true }
 web-time = { version = "1.1.0", optional = true }
-wgpu = { version = "29.0.3", optional = true }
+wgpu = { version = "30.0.0", optional = true }
 winit = { version = "0.30.13", optional = true }
 wtransport = { version = "0.7.1", optional = true, default-features = false, features = [
     "ring",
@@ -147,15 +147,15 @@ zstd = { version = "0.13.3", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 console_error_panic_hook = { version = "0.1.7", optional = true }
-wasm-bindgen-futures = { version = "0.4.75", optional = true }
-web-sys = { version = "0.3.102", optional = true, features = [
+wasm-bindgen-futures = { version = "0.4.76", optional = true }
+web-sys = { version = "0.3.103", optional = true, features = [
     "VisualViewport",
     "Window",
 ] }
 
 # unix (non-android/ios) only deps
 [target.'cfg(all(unix, not(target_os = "android"), not(target_os = "ios")))'.dependencies]
-foundationdb-sys = { version = "0.10.0", optional = true, default-features = false, features = [
+foundationdb-sys = { version = "0.11.0", optional = true, default-features = false, features = [
     "fdb-7_3",
 ] }
 
@@ -168,7 +168,7 @@ futures-rustls = { version = "0.26.0", optional = true, default-features = false
 glommio = { version = "0.9.0", optional = true, default-features = false }
 h3 = { version = "0.0.8", optional = true, default-features = false }
 h3-quinn = { version = "0.0.10", optional = true, default-features = false }
-quinn = { version = "0.11.9", optional = true, default-features = false, features = [
+quinn = { version = "0.11.11", optional = true, default-features = false, features = [
     "runtime-async-std",
     "rustls",
 ] }
@@ -284,7 +284,7 @@ stm-webrtc-sender = [
 [dev-dependencies]
 base64 = { version = "0.22.1", default-features = false, features = ["std"] }
 dashmap = { version = "6.2.1", default-features = false, features = ["rayon"] }
-http = { version = "1.4.1", default-features = false, features = ["std"] }
+http = { version = "1.4.2", default-features = false, features = ["std"] }
 nonzero_ext = { version = "0.3.0", default-features = false, features = [
     "std",
 ] }
@@ -295,7 +295,7 @@ reqwest = { version = "0.13.4", default-features = false, features = [
     "http3",
 ] }
 sha2 = { version = "0.11.0" }
-tungstenite = { version = "0.29.0" }
+tungstenite = { version = "0.30.0" }
 native-tls = "0.2.18"
 tokio = { version = "1.52.3", default-features = false, features = [
     "macros",
