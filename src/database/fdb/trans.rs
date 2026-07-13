@@ -128,11 +128,11 @@ impl<'a> FDBRange<'a> {
     pub fn between(begin: &'a [u8], end: &'a [u8], limit: i32) -> Self {
         Self {
             begin_key: begin,
-            begin_or_equal: true,
-            begin_offset: 0,
+            begin_or_equal: false,
+            begin_offset: 1,
             end_key: end,
             end_or_equal: false,
-            end_offset: 0,
+            end_offset: 1,
             limit,
             target_bytes: 1 << 20,
             mode: FDBStreamingMode::WantAll,
@@ -167,11 +167,11 @@ impl FDBOwnedRange {
     pub fn between(begin: impl Into<Vec<u8>>, end: impl Into<Vec<u8>>, limit: i32) -> Self {
         Self {
             begin_key: begin.into(),
-            begin_or_equal: true,
-            begin_offset: 0,
+            begin_or_equal: false,
+            begin_offset: 1,
             end_key: end.into(),
             end_or_equal: false,
-            end_offset: 0,
+            end_offset: 1,
             limit,
             target_bytes: 1 << 20,
             mode: FDBStreamingMode::WantAll,
@@ -205,7 +205,7 @@ impl FDBOwnedRange {
     pub fn after_key(mut self, key: &[u8]) -> Self {
         self.begin_key.clear();
         self.begin_key.extend_from_slice(key);
-        self.begin_or_equal = false;
+        self.begin_or_equal = true;
         self.begin_offset = 1;
         self.iteration = self.iteration.saturating_add(1);
         self
@@ -470,7 +470,8 @@ impl FDBTransaction {
 
             visit(&batch)?;
 
-            if !more || batch.len() < batch_size as usize {
+            // Keying off the short batch would silently drop the rest of the prefix.
+            if !more {
                 return Ok(());
             }
 

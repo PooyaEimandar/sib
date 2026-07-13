@@ -24,9 +24,14 @@ fn owned_range_can_advance_to_next_page() {
     let borrowed = range.as_range();
 
     assert_eq!(borrowed.begin_key, b"mid");
-    assert!(!borrowed.begin_or_equal);
+    // after_key => FIRST_GREATER_THAN(mid) = (or_equal=true, offset=1), so the
+    // next page starts strictly after "mid" rather than re-reading it.
+    assert!(borrowed.begin_or_equal);
     assert_eq!(borrowed.begin_offset, 1);
     assert_eq!(borrowed.end_key, b"z");
+    // end selector is FIRST_GREATER_OR_EQUAL(end) = (or_equal=false, offset=1).
+    assert!(!borrowed.end_or_equal);
+    assert_eq!(borrowed.end_offset, 1);
     assert_eq!(borrowed.limit, 50);
     assert_eq!(borrowed.iteration, 1);
 }
