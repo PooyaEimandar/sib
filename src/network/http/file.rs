@@ -1270,7 +1270,8 @@ fn parse_byte_range(header: &HeaderValue, total_size: u64) -> Option<Range<u64>>
     match (start_str.parse::<u64>().ok(), end_str.parse::<u64>().ok()) {
         // "bytes=0-1445"
         (Some(start), Some(end)) if start < total_size && start <= end => {
-            Some(start..(end + 1).min(total_size))
+            // the end is clamped to total_size regardless
+            Some(start..end.saturating_add(1).min(total_size))
         }
         // "bytes=6008766-"
         (Some(start), None) if start < total_size => Some(start..total_size),

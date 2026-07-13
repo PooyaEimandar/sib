@@ -297,3 +297,32 @@ fn file_server() {
         handle.join().expect("Thread panicked");
     }
 }
+
+#[test]
+fn parse_byte_range_clamps_and_never_overflows() {
+    use http::HeaderValue;
+    let total = 1000u64;
+
+    // end == u64::MAX must not overflow (was a debug panic / release wrap to 0..0);
+    // the end clamps to total_size.
+    let h = HeaderValue::from_static("bytes=0-18446744073709551615");
+    assert_eq!(super::parse_byte_range(&h, total), Some(0..1000));
+
+    // normal inclusive range -> exclusive end (+1).
+    let h = HeaderValue::from_static("bytes=10-20");
+    assert_eq!(super::parse_byte_range(&h, total), Some(10..21));
+
+    // end beyond EOF clamps to total_size.
+    let h = HeaderValue::from_static("bytes=0-5000");
+    assert_eq!(super::parse_byte_range(&h, total), Some(0..1000));
+
+    // open-ended and suffix forms.
+    let h = HeaderValue::from_static("bytes=990-");
+    assert_eq!(super::parse_byte_range(&h, total), Some(990..1000));
+    let h = HeaderValue::from_static("bytes=-500");
+    assert_eq!(super::parse_byte_range(&h, total), Some(500..1000));
+
+    // start past EOF is rejected.
+    let h = HeaderValue::from_static("bytes=1000-1001");
+    assert_eq!(super::parse_byte_range(&h, total), None);
+}
