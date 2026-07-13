@@ -138,6 +138,13 @@ impl Texture {
         }
 
         let (width, height) = shared_extent("cubemap", faces)?;
+        // wgpu requires square layers for a cube view; a non-square face set passes
+        // shared_extent but panics later in create_view. Reject it cleanly here.
+        if width != height {
+            return Err(RenderError::message(format!(
+                "cubemap faces must be square, got {width}x{height}"
+            )));
+        }
         let layers = faces
             .iter()
             .map(|face| face.rgba.as_slice())
@@ -296,6 +303,14 @@ fn shared_extent(label: &str, images: &[ImageRgba8]) -> RenderResult<(u32, u32)>
 }
 
 fn validate_rgba_len(width: u32, height: u32, actual_len: usize) -> RenderResult<()> {
+    // wgpu rejects zero-extent textures with an uncaptured device error (a panic).
+    // Reject here so an empty/degenerate image returns a clean RenderError instead.
+    if width == 0 || height == 0 {
+        return Err(RenderError::message(format!(
+            "RGBA image has zero dimension: {width}x{height}"
+        )));
+    }
+
     let expected_len = width
         .checked_mul(height)
         .and_then(|pixels| pixels.checked_mul(4))
