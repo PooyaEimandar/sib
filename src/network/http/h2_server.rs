@@ -310,6 +310,14 @@ cfg_if::cfg_if! {
                 let body_bytes = if is_ws {
                     Bytes::new()
                 } else {
+                    // Reject Transfer-Encoding: this fallback frames bodies solely by
+                    // Content-Length and does not decode chunked request bodies, so
+                    // accepting TE would enable CL/TE request smuggling (RFC 7230 §3.3.3).
+                    if req_headers.contains_key(header::TRANSFER_ENCODING) {
+                        return Err(std::io::Error::other(
+                            "Transfer-Encoding is not supported on requests",
+                        ));
+                    }
                     let content_length = parse_content_length(&req_headers)?;
 
                     if content_length > config.max_frame_size as usize {

@@ -779,6 +779,11 @@ where
     let method = req.method.map(str::to_owned);
     let path = req.path.unwrap_or_default().to_owned();
     let version = req.version;
+    // Reject Transfer-Encoding: this sync H1 path frames bodies solely by
+    // Content-Length and does not decode chunked request bodies. Accepting a
+    // request that carries Transfer-Encoding would let its body be re-parsed as a
+    // second, pipelined request (request smuggling). See RFC 7230 §3.3.3.
+    reject_transfer_encoding(req.headers)?;
     let content_length = parse_content_length(req.headers)?;
     let mut headers = Vec::with_capacity(req.headers.len());
     for h in req.headers.iter() {
@@ -819,6 +824,26 @@ where
         status_buf: heapless::Vec::new(),
         streaming: false,
     }))
+}
+
+/// Reject any request that carries a `Transfer-Encoding` header.
+///
+/// This server frames request bodies exclusively by `Content-Length`; it does not
+/// implement chunked (or any other) transfer-coding on the request side. Silently
+/// ignoring `Transfer-Encoding` would leave the chunk framing in the buffer to be
+/// misread as a second pipelined request — the classic CL/TE request-smuggling
+/// desync. Rejecting is the safe behavior and also covers the TE+CL conflict.
+fn reject_transfer_encoding(headers: &[httparse::Header<'_>]) -> io::Result<()> {
+    if headers
+        .iter()
+        .any(|h| h.name.eq_ignore_ascii_case("Transfer-Encoding"))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Transfer-Encoding is not supported on requests",
+        ));
+    }
+    Ok(())
 }
 
 fn parse_content_length(headers: &[httparse::Header<'_>]) -> io::Result<usize> {
