@@ -160,14 +160,6 @@ jobs:
       - name: Install tools
         run: brew install ninja
 
-      - name: Install GStreamer
-        run: |
-          curl -O https://gstreamer.freedesktop.org/data/pkg/osx/1.26.2/gstreamer-1.0-1.26.2-universal.pkg
-          curl -O https://gstreamer.freedesktop.org/data/pkg/osx/1.26.2/gstreamer-1.0-devel-1.26.2-universal.pkg
-          sudo installer -pkg gstreamer-1.0-1.26.2-universal.pkg -target /
-          sudo installer -pkg gstreamer-1.0-devel-1.26.2-universal.pkg -target /
-          echo "PATH=/Library/Frameworks/GStreamer.framework/Versions/1.0/bin:$PATH" >> $GITHUB_ENV
-
       - name: Run FoundationDB setup
         run: |
           bash ./bash/fdb.sh
