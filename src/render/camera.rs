@@ -26,8 +26,17 @@ impl Camera {
     }
 
     pub fn view_projection_matrix(&self) -> Mat4 {
-        Mat4::perspective_rh(self.fovy_radians, self.aspect, self.znear, self.zfar)
-            * Mat4::look_at_rh(self.eye, self.target, self.up)
+        // Right-handed view * projection. The `directx` projection variant has NDC Z in
+        // [0, 1] — the depth range wgpu/Metal/D3D expect — so no extra OpenGL->wgpu clip
+        // remap is needed (the old clip matrix double-remapped depth into [0.5, 1.0]).
+        let proj = glam::camera::rh::proj::directx::perspective(
+            self.fovy_radians,
+            self.aspect,
+            self.znear,
+            self.zfar,
+        );
+        let view = glam::camera::rh::view::look_at_mat4(self.eye, self.target, self.up);
+        proj * view
     }
 
     pub fn uniform(&self) -> CameraUniform {
