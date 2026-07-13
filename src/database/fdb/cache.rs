@@ -350,7 +350,21 @@ impl BucketTtlCache {
             let trx = FDBTransaction::new(&loan)?;
             for (k_ttl, _) in &batch {
                 if let Some(kd) = data_key_from_ttl_key(&self.ns, candidate, k_ttl) {
-                    trx.clear(&kd);
+                    // Only delete the data record if it is genuinely expired.
+                    match trx.get_blocking_value_optional(&kd, false)? {
+                        Some(raw) if raw.len() >= 8 => {
+                            let mut be = [0u8; 8];
+                            be.copy_from_slice(&raw[..8]);
+                            if now >= u64::from_be_bytes(be) {
+                                trx.clear(&kd);
+                            }
+                        }
+                        // Malformed record ,too short to carry an expiry, reclaim it.
+                        Some(_) => {
+                            trx.clear(&kd);
+                        }
+                        None => {}
+                    }
                 }
                 trx.clear(k_ttl);
             }
@@ -426,7 +440,21 @@ impl BucketTtlCache {
                 let trx = FDBTransaction::new(&loan)?;
                 for (k_ttl, _) in &batch {
                     if let Some(kd) = data_key_from_ttl_key(&ns, candidate, k_ttl) {
-                        trx.clear(&kd);
+                        // Only delete the data record if it is genuinely expired.
+                        match trx.get_blocking_value_optional(&kd, false)? {
+                            Some(raw) if raw.len() >= 8 => {
+                                let mut be = [0u8; 8];
+                                be.copy_from_slice(&raw[..8]);
+                                if now >= u64::from_be_bytes(be) {
+                                    trx.clear(&kd);
+                                }
+                            }
+                            // Malformed record, too short to carry an expiry, reclaim it.
+                            Some(_) => {
+                                trx.clear(&kd);
+                            }
+                            None => {}
+                        }
                     }
                     trx.clear(k_ttl);
                 }
