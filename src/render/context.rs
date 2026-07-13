@@ -113,6 +113,7 @@ impl RenderContext {
                 power_preference: settings.power_preference,
                 compatible_surface: Some(&surface),
                 force_fallback_adapter: settings.force_fallback_adapter,
+                ..Default::default()
             })
             .await?;
 

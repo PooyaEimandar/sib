@@ -338,7 +338,7 @@ impl ApplicationHandler<RenderEvent> for Application {
                 }
 
                 context.submit(encoder);
-                frame.surface_texture.present();
+                context.queue.present(frame.surface_texture);
                 context.window.request_redraw();
             }
             WindowEvent::Destroyed => {

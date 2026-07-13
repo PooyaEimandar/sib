@@ -86,13 +86,11 @@ impl TextItem {
         let metrics = glyphon::Metrics::new(style.font_size, style.line_height);
         let mut buffer = glyphon::Buffer::new(font_system, metrics);
         buffer.set_size(
-            font_system,
             Some(placement.width.max(1.0)),
             Some(placement.height.max(1.0)),
         );
-        buffer.set_wrap(font_system, glyphon::Wrap::Word);
+        buffer.set_wrap(glyphon::Wrap::Word);
         buffer.set_text(
-            font_system,
             text,
             &glyphon::Attrs::new().family(style.family.to_glyphon()),
             style.shaping,

@@ -1,7 +1,11 @@
 use crate::render::{RenderError, RenderResult};
 use bytemuck::{Pod, Zeroable};
 use glyphon::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping, Wrap, cosmic_text::Align};
-use ttf_parser::{Face, GlyphId, OutlineBuilder};
+use skrifa::{
+    FontRef, GlyphId, MetadataProvider,
+    instance::{LocationRef, Size},
+    outline::{DrawSettings, OutlinePen},
+};
 
 #[derive(Clone, Copy, Debug)]
 pub enum TextMeshFamily {
@@ -120,22 +124,24 @@ impl TextMesh {
         color: [f32; 4],
         options: TextMeshOptions,
     ) -> RenderResult<Self> {
-        let face = Face::parse(font_data, 0).map_err(RenderError::source)?;
-        let units_per_em = face.units_per_em() as f32;
+        let font =
+            FontRef::new(font_data).map_err(|e| RenderError::message(format!("invalid font: {e}")))?;
+        let units_per_em = font
+            .metrics(Size::unscaled(), LocationRef::default())
+            .units_per_em as f32;
+        if units_per_em <= 0.0 {
+            return Err(RenderError::message("font has invalid units_per_em"));
+        }
+        let outline_glyphs = font.outline_glyphs();
         let mut font_system = FontSystem::new_with_fonts(std::iter::empty());
         font_system.db_mut().load_font_data(font_data.to_vec());
 
         let font_size = options.font_size.max(0.001);
         let line_height = options.line_height.max(font_size);
         let mut buffer = Buffer::new(&mut font_system, Metrics::new(font_size, line_height));
-        buffer.set_size(
-            &mut font_system,
-            options.layout_width,
-            options.layout_height,
-        );
-        buffer.set_wrap(&mut font_system, options.wrap);
+        buffer.set_size(options.layout_width, options.layout_height);
+        buffer.set_wrap(options.wrap);
         buffer.set_text(
-            &mut font_system,
             text,
             &Attrs::new().family(options.family.to_glyphon()),
             options.shaping,
@@ -150,10 +156,16 @@ impl TextMesh {
 
         for run in buffer.layout_runs() {
             for glyph in run.glyphs {
+                let Some(outline) = outline_glyphs.get(GlyphId::from(glyph.glyph_id)) else {
+                    continue;
+                };
                 let mut collector = OutlineCollector::new(curve_steps);
-                if face
-                    .outline_glyph(GlyphId(glyph.glyph_id), &mut collector)
-                    .is_none()
+                if outline
+                    .draw(
+                        DrawSettings::unhinted(Size::unscaled(), LocationRef::default()),
+                        &mut collector,
+                    )
+                    .is_err()
                 {
                     continue;
                 }
@@ -304,7 +316,7 @@ impl OutlineCollector {
     }
 }
 
-impl OutlineBuilder for OutlineCollector {
+impl OutlinePen for OutlineCollector {
     fn move_to(&mut self, x: f32, y: f32) {
         self.finish_current();
         let point = Point2 { x, y };
