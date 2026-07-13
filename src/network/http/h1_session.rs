@@ -14,6 +14,7 @@ const CRLF: &[u8] = b"\r\n";
 pub(crate) const BUF_LEN: usize = 8 * 4096;
 pub(crate) const MAX_HEADERS: usize = 32;
 pub(crate) const MAX_REQUEST_BODY_LEN: usize = 64 * 1024 * 1024;
+pub(crate) const MAX_REQUEST_HEADER_LEN: usize = 64 * 1024;
 
 #[cfg(feature = "net-ws-server")]
 #[inline]
@@ -774,7 +775,17 @@ where
 
     let count = match status {
         httparse::Status::Complete(num) => num,
-        httparse::Status::Partial => return Ok(None),
+        httparse::Status::Partial => {
+            // Headers not yet complete: bound how much we will buffer waiting for the
+            // terminating CRLFCRLF, so a slowloris cannot grow req_buf without limit.
+            if req_buf.chunk().len() > MAX_REQUEST_HEADER_LEN {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "request header exceeds maximum size",
+                ));
+            }
+            return Ok(None);
+        }
     };
 
     let method = req.method.map(str::to_owned);

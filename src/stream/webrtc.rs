@@ -504,6 +504,14 @@ fn build_capture_pipeline(
         {
             warn!("RTMP requested but missing encoder/parse/mux/sink; RTMP disabled.");
             "".to_string()
+        } else if !crate::stream::is_gst_launch_safe(&r.ingest_url)
+            || !crate::stream::is_gst_launch_safe(&r.stream_key)
+        {
+            warn!(
+                "RTMP ingest_url/stream_key contains characters unsafe for a GStreamer \
+                 pipeline description; RTMP disabled."
+            );
+            "".to_string()
         } else {
             let kbps = r.bitrate_kbps.unwrap_or(4500).max(300);
             let gop_s = r.gop_seconds.unwrap_or(2).max(1);

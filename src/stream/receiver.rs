@@ -26,6 +26,14 @@ impl Receiver {
     }
 
     fn build_pipeline(&self) -> std::io::Result<gst::Pipeline> {
+        if matches!(self.config.protocol, Protocol::SRT)
+            && !crate::stream::is_gst_launch_safe(&self.config.host)
+        {
+            return Err(std::io::Error::other(
+                "receiver host contains characters unsafe for a GStreamer pipeline description",
+            ));
+        }
+
         let srcsink = match self.config.protocol {
             Protocol::UDP => {
                 let decode = match self.config.codec {

@@ -3,7 +3,12 @@ use bytes::Bytes;
 use dashmap::DashMap;
 use http::{HeaderMap, HeaderValue, StatusCode, header};
 use mime::Mime;
-use std::{fs::Metadata, ops::Range, path::PathBuf, time::SystemTime};
+use std::{
+    fs::Metadata,
+    ops::Range,
+    path::{Component, Path, PathBuf},
+    time::SystemTime,
+};
 use tracing::error;
 
 macro_rules! get_error_headers {
@@ -404,13 +409,14 @@ async fn serve_fn_async<S: Session>(
                     && file_info.size <= max_bytes_on_the_fly_size
                     && !range_requested
                 {
-                    let (status, body) = compress_then_respond(
+                    let (status, body) = compress_then_respond_async(
                         &mut rsp_headers,
                         &file_info,
                         "br",
                         disable_content_length,
-                        |b| encode_brotli(b, buffer_size, quality, lgwindow),
-                    )?;
+                        move |b| encode_brotli(b, buffer_size, quality, lgwindow),
+                    )
+                    .await?;
 
                     return session
                         .status_code(status)
@@ -436,13 +442,14 @@ async fn serve_fn_async<S: Session>(
                 && !range_requested
             {
                 // On-the-fly only if size is within [min,max] AND not a Range request
-                let (status, body) = compress_then_respond(
+                let (status, body) = compress_then_respond_async(
                     &mut rsp_headers,
                     &file_info,
                     "gzip",
                     disable_content_length,
-                    |b| encode_gzip(b, level),
-                )?;
+                    move |b| encode_gzip(b, level),
+                )
+                .await?;
 
                 return session
                     .status_code(status)
@@ -466,13 +473,14 @@ async fn serve_fn_async<S: Session>(
                 && file_info.size <= max_bytes_on_the_fly_size
                 && !range_requested
             {
-                let (status, body) = compress_then_respond(
+                let (status, body) = compress_then_respond_async(
                     &mut rsp_headers,
                     &file_info,
                     "zstd",
                     disable_content_length,
-                    |b| encode_zstd(b, level),
-                )?;
+                    move |b| encode_zstd(b, level),
+                )
+                .await?;
 
                 return session
                     .status_code(status)
@@ -1141,6 +1149,15 @@ pub fn load_file_cache(capacity: usize) -> FileCache {
     DashMap::with_capacity(capacity)
 }
 
+fn compress_file_blocking(
+    path: &std::path::Path,
+    compress_fn: impl Fn(&[u8]) -> std::io::Result<Bytes>,
+) -> std::io::Result<Bytes> {
+    let f = std::fs::File::open(path)?;
+    let mmap = unsafe { memmap2::Mmap::map(&f) }.map_err(std::io::Error::other)?;
+    compress_fn(&mmap[..])
+}
+
 fn compress_then_respond(
     headers: &mut HeaderMap,
     file_info: &FileInfo,
@@ -1148,12 +1165,50 @@ fn compress_then_respond(
     disable_content_length: bool,
     compress_fn: impl Fn(&[u8]) -> std::io::Result<Bytes>,
 ) -> std::io::Result<(StatusCode, Bytes)> {
-    let res = (|| {
-        let f = std::fs::File::open(&file_info.path)?;
-        let mmap = unsafe { memmap2::Mmap::map(&f) }.map_err(std::io::Error::other)?;
-        compress_fn(&mmap[..])
-    })();
+    let res = compress_file_blocking(&file_info.path, compress_fn);
+    apply_compressed_headers(
+        headers,
+        file_info,
+        encoding_name,
+        disable_content_length,
+        res,
+    )
+}
 
+#[cfg(any(feature = "rt-tokio", all(feature = "rt-glommio", target_os = "linux")))]
+async fn compress_then_respond_async(
+    headers: &mut HeaderMap,
+    file_info: &FileInfo,
+    encoding_name: &str,
+    disable_content_length: bool,
+    compress_fn: impl Fn(&[u8]) -> std::io::Result<Bytes> + Send + 'static,
+) -> std::io::Result<(StatusCode, Bytes)> {
+    let path = file_info.path.clone();
+
+    #[cfg(all(feature = "rt-tokio", not(feature = "rt-glommio")))]
+    let res = tokio::task::spawn_blocking(move || compress_file_blocking(&path, compress_fn))
+        .await
+        .map_err(|e| std::io::Error::other(format!("spawn_blocking join error: {e}")))?;
+
+    #[cfg(all(target_os = "linux", feature = "rt-glommio", not(feature = "rt-tokio")))]
+    let res = compress_file_blocking(&path, compress_fn);
+
+    apply_compressed_headers(
+        headers,
+        file_info,
+        encoding_name,
+        disable_content_length,
+        res,
+    )
+}
+
+fn apply_compressed_headers(
+    headers: &mut HeaderMap,
+    file_info: &FileInfo,
+    encoding_name: &str,
+    disable_content_length: bool,
+    res: std::io::Result<Bytes>,
+) -> std::io::Result<(StatusCode, Bytes)> {
     match res {
         Ok(compressed) => {
             let etag_val = rep_etag(&file_info.etag, Some(encoding_name));
@@ -1281,6 +1336,46 @@ fn parse_byte_range(header: &HeaderValue, total_size: u64) -> Option<Range<u64>>
         }
         _ => None,
     }
+}
+
+/// Safely map a request path (e.g. from `Session::req_path()`) to a filesystem path
+/// confined under `root`, or `None` if it would escape the root.
+///
+/// The input must already be percent-decoded
+pub fn safe_join(root: &Path, req_path: &str) -> Option<PathBuf> {
+    // Defensive: ignore any query/fragment if a raw target was passed in.
+    let path = req_path.split(['?', '#']).next().unwrap_or("");
+
+    let mut out = root.to_path_buf();
+    let mut depth: usize = 0;
+
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => continue,
+            ".." => {
+                // Never allow climbing above the confinement root.
+                depth = depth.checked_sub(1)?;
+                out.pop();
+            }
+            seg => {
+                if seg.contains('\0') {
+                    return None;
+                }
+                // Accept only a single "normal" path component; anything the OS would
+                // treat as a root, prefix (e.g. `C:`), or separator is rejected.
+                let mut comps = Path::new(seg).components();
+                match (comps.next(), comps.next()) {
+                    (Some(Component::Normal(c)), None) => {
+                        out.push(c);
+                        depth += 1;
+                    }
+                    _ => return None,
+                }
+            }
+        }
+    }
+
+    Some(out)
 }
 
 fn choose_encoding(accept: &HeaderValue, mime: &Mime, order: &[EncodingType]) -> EncodingType {

@@ -351,7 +351,11 @@ fn make_quinn_server(
 ) -> std::io::Result<quinn::ServerConfig> {
     // create server config
     let alpn_protocols = vec![b"h3".to_vec()];
-    let cfg = make_rustls_config(chain_cert_key, alpn_protocols)?;
+    let cfg = make_rustls_config(
+        chain_cert_key,
+        alpn_protocols,
+        h3_cfg.client_ca_pem.as_deref(),
+    )?;
 
     // create transport config
     let mut transport = quinn::TransportConfig::default();
@@ -612,7 +616,11 @@ pub trait HFactory: Send + Sync + Sized + 'static {
 
         // create tls acceptor
         let tls_acceptor = futures_rustls::TlsAcceptor::from(std::sync::Arc::new(
-            make_rustls_config(&chain_cert_key, h2_cfg.alpn_protocols.clone())?,
+            make_rustls_config(
+                &chain_cert_key,
+                h2_cfg.alpn_protocols.clone(),
+                h2_cfg.client_ca_pem.as_deref(),
+            )?,
         ));
 
         let factory = std::sync::Arc::new(self);

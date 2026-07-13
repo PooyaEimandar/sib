@@ -532,9 +532,9 @@ pub fn run<R, F>(db: &FDB, mut f: F) -> std::io::Result<R>
 where
     F: FnMut(&FDBTransaction) -> std::io::Result<FDBTransactionOutcome<R>>,
 {
+    // Create the transaction ONCE and reuse it across retries
+    let trx = FDBTransaction::new(db)?;
     loop {
-        let trx = FDBTransaction::new(db)?;
-
         // user logic
         let out = match f(&trx)? {
             FDBTransactionOutcome::Ok(v) => v,

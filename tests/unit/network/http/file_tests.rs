@@ -326,3 +326,25 @@ fn parse_byte_range_clamps_and_never_overflows() {
     let h = HeaderValue::from_static("bytes=1000-1001");
     assert_eq!(super::parse_byte_range(&h, total), None);
 }
+
+#[test]
+fn safe_join_confines_to_root() {
+    use crate::network::http::file::safe_join;
+    use std::path::{Path, PathBuf};
+
+    let root = Path::new("/srv/www");
+
+    assert_eq!(safe_join(root, "/index.html"), Some(PathBuf::from("/srv/www/index.html")));
+    assert_eq!(safe_join(root, "a/b/c.txt"), Some(PathBuf::from("/srv/www/a/b/c.txt")));
+    assert_eq!(safe_join(root, "/a/./b"), Some(PathBuf::from("/srv/www/a/b")));
+    // Descend then come back up within root is fine.
+    assert_eq!(safe_join(root, "/a/b/../c"), Some(PathBuf::from("/srv/www/a/c")));
+
+    // Traversal above root is rejected.
+    assert_eq!(safe_join(root, "/../etc/passwd"), None);
+    assert_eq!(safe_join(root, "a/../../etc/passwd"), None);
+    // Absolute component cannot replace the root.
+    assert_eq!(safe_join(root, "/a//etc"), Some(PathBuf::from("/srv/www/a/etc")));
+    // NUL byte rejected.
+    assert_eq!(safe_join(root, "a\0b"), None);
+}

@@ -109,7 +109,7 @@ cfg_if::cfg_if! {
         pub(crate) async fn serve_h1<S, T>(
             mut stream: S,
             _service: T,
-            config: &H2Config,
+            _config: &H2Config,
             _peer_addr: std::net::IpAddr,
         ) -> std::io::Result<()>
         where
@@ -117,89 +117,39 @@ cfg_if::cfg_if! {
             T: crate::network::http::session::HAsyncService + Send + 'static,
         {
             use futures_lite::{AsyncReadExt, AsyncWriteExt};
-            use std::str;
 
+            // Full HTTP/1.1 request serving is NOT implemented on the glommio runtime.
+            // This fallback previously echoed the request back — which both reflected
+            // client input and bypassed the service (and therefore any auth / rate
+            // limiting wrapped around it). Until a real glommio H1 session is wired to
+            // `service`, refuse http/1.1 with 501 rather than serve an unauthenticated
+            // echo. Clients should negotiate h2 (the default ALPN protocol) instead.
+            //
+            // Drain up to the end of headers (bounded) so the peer's write completes,
+            // then close. We do not parse or reflect any request content.
             let mut buf = vec![0u8; 8192];
             let mut read = 0usize;
-
+            const MAX_HEADER_BYTES: usize = 64 * 1024;
             loop {
                 let n = stream.read(&mut buf[read..]).await?;
                 if n == 0 {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::UnexpectedEof,
-                        "connection closed before full request",
-                    ));
+                    break;
                 }
                 read += n;
                 if buf[..read].windows(4).any(|w| w == b"\r\n\r\n") {
                     break;
                 }
-                if read == buf.len() {
-                    buf.resize(buf.len() * 2, 0);
-                }
-            }
-
-            // Parse request line + headers (minimal)
-            let mut headers = [httparse::EMPTY_HEADER; 32];
-            let mut req = httparse::Request::new(&mut headers);
-            let status = req.parse(&buf[..read]).map_err(|e| {
-                std::io::Error::other(format!("httparse error: {e}"))
-            })?;
-
-            let header_len = match status {
-                httparse::Status::Complete(len) => len,
-                httparse::Status::Partial => {
-                    return Err(std::io::Error::other("partial HTTP request"));
-                }
-            };
-
-            let method = req.method.unwrap_or("GET");
-            let path = req.path.unwrap_or("/");
-            let version_dbg = match req.version {
-                Some(0) => "HTTP/1.0",
-                _ => "HTTP/1.1",
-            };
-
-            let host = req
-                .headers
-                .iter()
-                .find(|h| h.name.eq_ignore_ascii_case("host"))
-                .and_then(|h| str::from_utf8(h.value).ok())
-                .unwrap_or("");
-
-            let content_length = req
-                .headers
-                .iter()
-                .find(|h| h.name.eq_ignore_ascii_case("content-length"))
-                .and_then(|h| str::from_utf8(h.value).ok())
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(0);
-
-            // Read body if present
-            let mut body = buf[header_len..read].to_vec();
-            while body.len() < content_length {
-                let mut chunk = vec![0u8; content_length - body.len()];
-                let n = stream.read(&mut chunk).await?;
-                if n == 0 {
+                if read >= MAX_HEADER_BYTES {
                     break;
                 }
-                body.extend_from_slice(&chunk[..n]);
+                if read == buf.len() {
+                    buf.resize((buf.len() * 2).min(MAX_HEADER_BYTES), 0);
+                }
             }
 
-            let body_str = String::from_utf8_lossy(&body);
-
-            let response_body = format!(
-                "Http version: {version_dbg:?}, Echo: {method:?} {host:?} {path:?}\r\nBody: {body_str:?}"
-            );
-
-            let headers = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: {}\r\n\r\n",
-                response_body.len(),
-                if config.keep_alive { "keep-alive" } else { "close" },
-            );
-
-            stream.write_all(headers.as_bytes()).await?;
-            stream.write_all(response_body.as_bytes()).await?;
+            let response =
+                b"HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            stream.write_all(response).await?;
             stream.flush().await?;
 
             Ok(())

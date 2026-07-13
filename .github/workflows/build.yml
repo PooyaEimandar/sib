@@ -8,7 +8,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: --cfg reqwest_unstable
+  RUSTFLAGS: --cfg reqwest_unstable -D warnings
 
 jobs:
   linux:
@@ -87,6 +87,13 @@ jobs:
 
       - name: Build
         run: cargo build --release --target=${{ matrix.target }} --no-default-features --features "rt-tokio net-h1-server net-h2-server"
+
+      - name: Check render module (native + wasm)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          cargo check --no-default-features --features render
+          rustup target add wasm32-unknown-unknown
+          cargo check --target wasm32-unknown-unknown --no-default-features --features render
 
       - name: Test
         run: cargo test --release --no-default-features --features "rt-tokio net-h2-server db-fdb"

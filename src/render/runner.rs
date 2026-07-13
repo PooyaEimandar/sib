@@ -154,6 +154,7 @@ impl Application {
     }
 
     fn fail(&mut self, event_loop: &ActiveEventLoop, error: RenderError) {
+        tracing::error!("render application failed: {error}");
         self.error = Some(error);
         self.state = AppState::Failed;
         event_loop.exit();

@@ -10,6 +10,18 @@ pub enum Protocol {
     SRT,
 }
 
+#[cfg(any(
+    feature = "stm-udp-receiver",
+    feature = "stm-udp-sender",
+    feature = "stm-webrtc-sender"
+))]
+pub(crate) fn is_gst_launch_safe(s: &str) -> bool {
+    !s.is_empty()
+        && !s
+            .chars()
+            .any(|c| c.is_control() || c.is_whitespace() || matches!(c, '"' | '\\' | '!'))
+}
+
 #[cfg(any(feature = "stm-udp-receiver", feature = "stm-udp-sender"))]
 pub(crate) fn set_pipeline_state(
     pipeline: &gstreamer::Pipeline,

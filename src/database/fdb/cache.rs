@@ -213,7 +213,8 @@ impl BucketTtlCache {
         let kd = self.k_data(key);
         let trx = FDBTransaction::new(&loan)?;
 
-        let val = trx.get_blocking_value_optional(&kd, true)?;
+        // Non-snapshot read: for a live key the txn is dropped read-only
+        let val = trx.get_blocking_value_optional(&kd, false)?;
         if let Some(raw) = val {
             if raw.len() < 8 {
                 return Ok(None);
@@ -222,7 +223,6 @@ impl BucketTtlCache {
             be.copy_from_slice(&raw[..8]);
             let exp = u64::from_be_bytes(be);
             if now_ms() >= exp {
-                // best-effort scrub
                 trx.clear(&kd);
                 let _ = trx.commit_blocking();
                 return Ok(None);
@@ -245,7 +245,7 @@ impl BucketTtlCache {
                 .ok_or_else(|| std::io::Error::other("no FDB handle in pool"))?;
             let trx = FDBTransaction::new(&loan)?;
 
-            let val = trx.get_blocking_value_optional(&kd, true)?;
+            let val = trx.get_blocking_value_optional(&kd, false)?;
             if let Some(raw) = val {
                 if raw.len() < 8 {
                     return Ok(None);

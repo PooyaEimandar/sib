@@ -178,12 +178,20 @@ impl Sender {
             .lock()
             .map_err(|e| std::io::Error::other(format!("could not lock gstreamer config: {e}")))?;
 
+        if !crate::stream::is_gst_launch_safe(&cfg.host) {
+            return Err(std::io::Error::other(
+                "sender host contains characters unsafe for a GStreamer pipeline description",
+            ));
+        }
+
         let video_src = if cfg!(target_os = "macos") {
             "avfvideosrc capture-screen=true"
         } else if cfg!(target_os = "windows") {
             "d3d11screencapturesrc"
         } else {
-            panic!("Unsupported platform");
+            return Err(std::io::Error::other(
+                "unsupported platform for screen capture (need macOS or Windows)",
+            ));
         };
 
         let pipeline_str = if cfg.codec == Codec::AV1 {

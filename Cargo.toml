@@ -14,10 +14,21 @@ keywords = [
     "graphics",
     "rendering",
 ]
-license = "Apache-2.0"
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/PooyaEimandar/sib"
-categories = ["development-tools"]
+categories = ["network-programming", "multimedia", "rendering"]
 readme = "README.md"
+exclude = [
+    ".cargo/config.toml",
+    ".github/",
+    ".vscode/",
+    "bash/",
+    "bench/",
+    "sib.png",
+    "tune.sh",
+    "coverage.sh",
+    "**/.DS_Store",
+]
 
 [lib]
 path = "src/lib.rs"
