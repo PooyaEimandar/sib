@@ -13,6 +13,7 @@ const CRLF: &[u8] = b"\r\n";
 
 pub(crate) const BUF_LEN: usize = 8 * 4096;
 pub(crate) const MAX_HEADERS: usize = 32;
+pub(crate) const MAX_REQUEST_BODY_LEN: usize = 64 * 1024 * 1024;
 
 #[cfg(feature = "net-ws-server")]
 #[inline]
@@ -785,6 +786,13 @@ where
     // second, pipelined request (request smuggling). See RFC 7230 §3.3.3.
     reject_transfer_encoding(req.headers)?;
     let content_length = parse_content_length(req.headers)?;
+    // Bound the declared body size before it can drive an allocation and reject oversized requests at parse time.
+    if content_length > MAX_REQUEST_BODY_LEN {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Content-Length exceeds maximum request body size",
+        ));
+    }
     let mut headers = Vec::with_capacity(req.headers.len());
     for h in req.headers.iter() {
         let name = HeaderName::from_bytes(h.name.as_bytes()).map_err(|e| {
