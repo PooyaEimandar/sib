@@ -18,8 +18,10 @@ struct PoolInner<T> {
     notify: Notify, // wake async waiters
 }
 
+// SAFETY: sending the pool to another thread moves the owned `T`s, so `T: Send`.
 unsafe impl<T: Send> Send for PoolInner<T> {}
-unsafe impl<T: Send> Sync for PoolInner<T> {}
+// SAFETY: sharing `&PoolInner` lets threads concurrently acquire distinct loans
+unsafe impl<T: Send + Sync> Sync for PoolInner<T> {}
 
 /// Zero-copy guard
 pub struct Loan<'a, T> {
