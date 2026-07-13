@@ -226,8 +226,11 @@
 
             function wsUrl() {
                 const proto = (location.protocol === "https:") ? "wss" : "ws";
-                // your server serves this html on same host/port; WS upgrade is same URL
-                return `${proto}://${location.host}${location.pathname}`;
+                // Forward a `token` query param (if this page was opened with one) so the
+                // server can authorize the signaling upgrade.
+                const token = new URLSearchParams(location.search).get("token");
+                const qs = token ? `?token=${encodeURIComponent(token)}` : "";
+                return `${proto}://${location.host}${location.pathname}${qs}`;
             }
 
             function setUiConnected(connected) {

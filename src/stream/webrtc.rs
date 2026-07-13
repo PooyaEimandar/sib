@@ -40,6 +40,17 @@ pub struct ServerConfig {
     pub udp_max: u16,
     /// STUN servers.
     pub stun_urls: Vec<String>,
+
+    /// Optional shared secret for WS signaling. When `Some`, every WS upgrade must
+    /// present a matching `token` — either the `?token=...` query parameter or the
+    /// `Sec-WebSocket-Protocol` header. When `None`, no token is required.
+    pub auth_token: Option<String>,
+
+    /// Allowed `Origin` header values (exact match)
+    pub allowed_origins: Vec<String>,
+
+    /// Maximum number of concurrent WS sessions. `0` means unlimited.
+    pub max_sessions: u64,
 }
 
 impl Default for ServerConfig {
@@ -48,8 +59,37 @@ impl Default for ServerConfig {
             udp_min: 50000,
             udp_max: 50100,
             stun_urls: vec!["stun:stun.l.google.com:19302".into()],
+            auth_token: None,
+            allowed_origins: Vec::new(),
+            max_sessions: 0,
         }
     }
+}
+
+/// Extract the WS auth token from the `?token=` query parameter or the
+/// `Sec-WebSocket-Protocol` header (the two channels a browser `WebSocket` can use).
+fn ws_token_from_request<S: Session>(session: &S) -> Option<String> {
+    let query = session.req_query();
+    for pair in query.trim_start_matches('?').split('&') {
+        if let Some(v) = pair.strip_prefix("token=") {
+            return Some(v.to_owned());
+        }
+    }
+    session
+        .req_header(&http::HeaderName::from_static("sec-websocket-protocol"))
+        .and_then(|v| v.to_str().ok().map(|s| s.trim().to_owned()))
+}
+
+/// Constant-time byte comparison, to avoid leaking the secret via timing.
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 #[derive(Debug, Clone)]
@@ -1964,6 +2004,14 @@ impl Server {
         index: Option<Bytes>,
         rtmp: Option<RtmpBroadcaster>,
     ) -> Self {
+        if cfg.auth_token.is_none() && cfg.allowed_origins.is_empty() {
+            warn!(
+                "WebRTC signaling is UNAUTHENTICATED (no auth_token, no allowed_origins): \
+                 any client that can reach this port can start live screen/audio capture, \
+                 and any web page can open a cross-site WebSocket to it. Set \
+                 ServerConfig.auth_token and/or allowed_origins before exposing beyond loopback."
+            );
+        }
         Self {
             cfg,
             initial_ctrl,
@@ -1975,6 +2023,55 @@ impl Server {
             on_event: None,
             rtmp: rtmp.map(Arc::new),
         }
+    }
+
+    /// Authorize a WS signaling upgrade before it can start capture.
+    ///
+    /// Enforces (in order) the `Origin` allow-list, the shared-secret token, and the
+    /// concurrent-session cap. Returns `Err((status, reason))` on rejection.
+    fn authorize_ws<S: Session>(&self, session: &S) -> Result<(), (http::StatusCode, String)> {
+        // 1) Origin allow-list — blocks cross-site WebSocket hijacking.
+        if !self.cfg.allowed_origins.is_empty() {
+            match session
+                .req_header(&http::header::ORIGIN)
+                .and_then(|v| v.to_str().ok().map(str::to_owned))
+            {
+                Some(o) if self.cfg.allowed_origins.iter().any(|a| a == &o) => {}
+                Some(o) => {
+                    return Err((
+                        http::StatusCode::FORBIDDEN,
+                        format!("origin not allowed: {o}"),
+                    ));
+                }
+                None => {
+                    return Err((http::StatusCode::FORBIDDEN, "missing Origin header".into()));
+                }
+            }
+        }
+
+        // 2) Shared-secret token (constant-time compare).
+        if let Some(expected) = self.cfg.auth_token.as_deref() {
+            match ws_token_from_request(session) {
+                Some(tok) if ct_eq(tok.as_bytes(), expected.as_bytes()) => {}
+                _ => {
+                    return Err((
+                        http::StatusCode::UNAUTHORIZED,
+                        "invalid or missing token".into(),
+                    ));
+                }
+            }
+        }
+
+        // 3) Concurrent-session cap.
+        let max = self.cfg.max_sessions;
+        if max != 0 && active_ws().load(Ordering::Relaxed) >= max {
+            return Err((
+                http::StatusCode::SERVICE_UNAVAILABLE,
+                format!("session limit reached ({max})"),
+            ));
+        }
+
+        Ok(())
     }
 
     pub fn set_on_dc_message(&mut self, cb: DataChannelMessageCallback) {
@@ -2005,6 +2102,19 @@ impl HAsyncService for Server {
             session
                 .status_code(http::StatusCode::NOT_FOUND)
                 .body(bytes::Bytes::from_static(b"WebRTC index page not found"))
+                .eom()?;
+            return Ok(());
+        }
+
+        // Authorize the signaling upgrade before accepting: this channel can start
+        // live screen/audio capture, so an unauthorized upgrade must never reach it.
+        if let Err((status, reason)) = self.authorize_ws(session) {
+            let peer = *session.peer_addr();
+            warn!("rejected WS signaling upgrade from {peer}: {reason}");
+            session
+                .status_code(status)
+                .header_str("Connection", "close")?
+                .body(Bytes::from_static(b"forbidden"))
                 .eom()?;
             return Ok(());
         }
