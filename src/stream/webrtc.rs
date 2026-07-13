@@ -2186,6 +2186,11 @@ impl HAsyncService for Server {
         let err_unexpected = Bytes::from_static(b"unexpected continue");
         let err_utf8 = Bytes::from_static(b"invalid utf8");
 
+        // Wrap the loop so the cleanup below runs on EVERY exit path, including the
+        // `?` early-returns on abnormal disconnect / write errors. Without this,
+        // active_ws() is never decremented and the shared capture hub is never torn
+        // down — the host's screen keeps being captured after the client vanishes.
+        let loop_result: std::io::Result<()> = async {
         loop {
             tokio::select! {
                 incoming = session.ws_read_async() => {
@@ -2289,8 +2294,11 @@ impl HAsyncService for Server {
                 }
             }
         }
+        Ok(())
+        }
+        .await;
 
-        // WS loop ended
+        // WS loop ended — the cleanup below runs on every exit path
         if let Some(cb) = on_event.as_ref() {
             cb(SessionEvent::WsClosed {
                 ws_id,
@@ -2324,7 +2332,8 @@ impl HAsyncService for Server {
             maybe_stop_capture_hub().await;
         }
 
-        Ok(())
+        // Surface any error the loop exited with, now that teardown has completed.
+        loop_result
     }
 }
 
