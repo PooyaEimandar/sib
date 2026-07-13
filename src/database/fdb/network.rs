@@ -55,9 +55,15 @@ pub struct FDBNetworkOptionValue {
     pub value: String,
 }
 
-#[derive(Default, Clone, Debug)]
+/// Process-global FoundationDB network handle.
+///
+/// There is exactly one network per process. This type is **not** `Clone`:
+/// `Drop` calls `fdb_stop_network()`, so duplicating an owning value would stop
+/// the singleton network twice. Share it across the run/stop threads with
+/// `Arc<FDBNetwork>` instead.
+#[derive(Default, Debug)]
 pub struct FDBNetwork {
-    init: bool,
+    init: std::sync::atomic::AtomicBool,
 }
 
 impl FDBNetwork {
@@ -88,7 +94,9 @@ impl FDBNetwork {
                 "Failed to setup FoundationDB network: {res}"
             )));
         }
-        Ok(Self { init: true })
+        Ok(Self {
+            init: std::sync::atomic::AtomicBool::new(true),
+        })
     }
 
     pub fn run(&self) -> std::io::Result<()> {
@@ -101,28 +109,28 @@ impl FDBNetwork {
         Ok(())
     }
 
-    pub fn stop(&mut self) -> std::io::Result<()> {
-        if !self.init {
+    /// Stop the process-global network. Idempotent: only the first caller
+    /// (across all `Arc` clones and `Drop`) actually calls `fdb_stop_network()`.
+    pub fn stop(&self) -> std::io::Result<()> {
+        if !self.init.swap(false, std::sync::atomic::Ordering::SeqCst) {
             return Err(std::io::Error::other("FoundationDB network is not started"));
         }
         // stop the foundationdb network
         let res = unsafe { foundationdb_sys::fdb_stop_network() };
         if res != 0 {
+            // Restore the flag so the network can be stopped again on Drop.
+            self.init.store(true, std::sync::atomic::Ordering::SeqCst);
             return Err(std::io::Error::other(format!(
                 "Failed to stop FoundationDB network: {res}"
             )));
         }
-        self.init = false;
         Ok(())
     }
 }
 
 impl Drop for FDBNetwork {
     fn drop(&mut self) {
-        if !self.init {
-            return;
-        }
-
+        // `stop()` is idempotent; if it was already called this is a no-op.
         if let Err(_e) = self.stop() {
             //s_error!!("Error stopping FoundationDB network: {}", e);
         }

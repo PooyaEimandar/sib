@@ -65,9 +65,18 @@ impl<'a, T> fmt::Debug for Loan<'a, T> {
 }
 
 /// The pool itself (generic)
-#[derive(Clone)]
 struct Pool<T> {
     inner: Arc<PoolInner<T>>,
+}
+
+// Manual `Clone`: the pool is just a shared handle (`Arc`), so cloning bumps the
+// refcount and does not require `T: Clone`.
+impl<T> Clone for Pool<T> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
 }
 
 impl<T> Pool<T> {

@@ -1,6 +1,6 @@
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct FDB {
-    pub db: *mut foundationdb_sys::FDBDatabase,
+    pub(crate) db: *mut foundationdb_sys::FDBDatabase,
 }
 
 // SAFETY: FoundationDB's FDBDatabase handle is thread-safe to use across threads.
