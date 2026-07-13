@@ -26,8 +26,7 @@ impl Camera {
     }
 
     pub fn view_projection_matrix(&self) -> Mat4 {
-        wgpu_clip_matrix()
-            * Mat4::perspective_rh(self.fovy_radians, self.aspect, self.znear, self.zfar)
+        Mat4::perspective_rh(self.fovy_radians, self.aspect, self.znear, self.zfar)
             * Mat4::look_at_rh(self.eye, self.target, self.up)
     }
 
@@ -42,13 +41,4 @@ impl Camera {
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct CameraUniform {
     pub view_projection: [[f32; 4]; 4],
-}
-
-pub fn wgpu_clip_matrix() -> Mat4 {
-    Mat4::from_cols_array(&[
-        1.0, 0.0, 0.0, 0.0, //
-        0.0, 1.0, 0.0, 0.0, //
-        0.0, 0.0, 0.5, 0.0, //
-        0.0, 0.0, 0.5, 1.0,
-    ])
 }
