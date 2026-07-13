@@ -108,6 +108,7 @@ fn create_producer_client_config(cfg: &KafkaSettings) -> ClientConfig {
 fn create_consumer_client_config(cfg: &KafkaSettings) -> ClientConfig {
     let mut cc = base_client_config(cfg);
     cc.set("group.id", &cfg.group_id)
+        .set("enable.auto.commit", "false")
         .set("auto.offset.reset", &cfg.auto_offset_reset)
         .set(
             "partition.assignment.strategy",
