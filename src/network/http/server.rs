@@ -615,13 +615,12 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         let socket_addr = resolve_addr!(addr)?;
 
         // create tls acceptor
-        let tls_acceptor = futures_rustls::TlsAcceptor::from(std::sync::Arc::new(
-            make_rustls_config(
+        let tls_acceptor =
+            futures_rustls::TlsAcceptor::from(std::sync::Arc::new(make_rustls_config(
                 &chain_cert_key,
                 h2_cfg.alpn_protocols.clone(),
                 h2_cfg.client_ca_pem.as_deref(),
-            )?,
-        ));
+            )?));
 
         let factory = std::sync::Arc::new(self);
 

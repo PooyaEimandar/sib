@@ -25,8 +25,16 @@ pub struct ExampleSettings {
     pub power_preference: wgpu::PowerPreference,
     pub force_fallback_adapter: bool,
     pub required_features: wgpu::Features,
+    /// Features enabled when the selected adapter exposes them. Unlike
+    /// `required_features`, absence does not prevent device creation, allowing
+    /// applications to retain a portable fallback path.
+    pub optional_features: wgpu::Features,
     pub required_limits: wgpu::Limits,
     pub memory_hints: wgpu::MemoryHints,
+    /// Continue calling `Example::render` against a temporary texture while the
+    /// window surface is unavailable (for example, when macOS reports it as
+    /// occluded). This is useful for opt-in GPU capture and test workloads.
+    pub render_when_surface_unavailable: bool,
 }
 
 impl Default for ExampleSettings {
@@ -37,8 +45,10 @@ impl Default for ExampleSettings {
             power_preference: wgpu::PowerPreference::HighPerformance,
             force_fallback_adapter: false,
             required_features: wgpu::Features::empty(),
+            optional_features: wgpu::Features::empty(),
             required_limits: wgpu::Limits::downlevel_defaults(),
             memory_hints: wgpu::MemoryHints::MemoryUsage,
+            render_when_surface_unavailable: false,
         }
     }
 }
@@ -321,6 +331,33 @@ impl ApplicationHandler<RenderEvent> for Application {
                         return;
                     }
                 }) else {
+                    if self.settings.render_when_surface_unavailable {
+                        let texture = context.device.create_texture(&wgpu::TextureDescriptor {
+                            label: Some("sib unavailable-surface render target"),
+                            size: wgpu::Extent3d {
+                                width: context.surface_config.width,
+                                height: context.surface_config.height,
+                                depth_or_array_layers: 1,
+                            },
+                            mip_level_count: 1,
+                            sample_count: 1,
+                            dimension: wgpu::TextureDimension::D2,
+                            format: context.surface_config.format,
+                            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                            view_formats: &[],
+                        });
+                        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+                        let mut encoder = context.device.create_command_encoder(
+                            &wgpu::CommandEncoderDescriptor {
+                                label: Some("sib unavailable-surface frame encoder"),
+                            },
+                        );
+                        if let Err(error) = example.render(context, &view, &mut encoder) {
+                            self.fail(event_loop, error);
+                            return;
+                        }
+                        context.submit(encoder);
+                    }
                     context.window.request_redraw();
                     return;
                 };

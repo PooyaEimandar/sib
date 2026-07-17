@@ -124,8 +124,8 @@ impl TextMesh {
         color: [f32; 4],
         options: TextMeshOptions,
     ) -> RenderResult<Self> {
-        let font =
-            FontRef::new(font_data).map_err(|e| RenderError::message(format!("invalid font: {e}")))?;
+        let font = FontRef::new(font_data)
+            .map_err(|e| RenderError::message(format!("invalid font: {e}")))?;
         let units_per_em = font
             .metrics(Size::unscaled(), LocationRef::default())
             .units_per_em as f32;

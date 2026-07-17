@@ -1175,7 +1175,6 @@ fn compress_then_respond(
     )
 }
 
-#[cfg(any(feature = "rt-tokio", all(feature = "rt-glommio", target_os = "linux")))]
 async fn compress_then_respond_async(
     headers: &mut HeaderMap,
     file_info: &FileInfo,
@@ -1185,12 +1184,23 @@ async fn compress_then_respond_async(
 ) -> std::io::Result<(StatusCode, Bytes)> {
     let path = file_info.path.clone();
 
-    #[cfg(all(feature = "rt-tokio", not(feature = "rt-glommio")))]
+    #[cfg(feature = "rt-tokio")]
     let res = tokio::task::spawn_blocking(move || compress_file_blocking(&path, compress_fn))
         .await
         .map_err(|e| std::io::Error::other(format!("spawn_blocking join error: {e}")))?;
 
-    #[cfg(all(target_os = "linux", feature = "rt-glommio", not(feature = "rt-tokio")))]
+    #[cfg(all(
+        not(feature = "rt-tokio"),
+        feature = "rt-glommio",
+        target_os = "linux"
+    ))]
+    let res = compress_file_blocking(&path, compress_fn);
+
+    // No async runtime to offload to: compress inline on the driving thread.
+    #[cfg(not(any(
+        feature = "rt-tokio",
+        all(feature = "rt-glommio", target_os = "linux")
+    )))]
     let res = compress_file_blocking(&path, compress_fn);
 
     apply_compressed_headers(
@@ -1263,9 +1273,7 @@ fn generate_file_info(
         .unwrap_or_default();
 
     let etag = format!("\"{}-{}\"", duration.as_secs(), meta.len());
-    let mime_type = mime_guess::from_path(path)
-        .first()
-        .unwrap_or(mime::APPLICATION_OCTET_STREAM);
+    let mime_type = mime_for_path(path);
 
     // Precompute Last-Modified string once
     let last_modified_str = httpdate::HttpDate::from(modified).to_string();
@@ -1304,6 +1312,22 @@ fn generate_file_info(
 
     cache.insert(path.to_string_lossy().to_string(), info.clone());
     info
+}
+
+fn mime_for_path(path: &Path) -> Mime {
+    if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("ktx2"))
+    {
+        "image/ktx2"
+            .parse()
+            .expect("image/ktx2 is a valid static MIME type")
+    } else {
+        mime_guess::from_path(path)
+            .first()
+            .unwrap_or(mime::APPLICATION_OCTET_STREAM)
+    }
 }
 
 fn parse_byte_range(header: &HeaderValue, total_size: u64) -> Option<Range<u64>> {

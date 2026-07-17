@@ -120,7 +120,8 @@ impl RenderContext {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("sib render device"),
-                required_features: settings.required_features,
+                required_features: settings.required_features
+                    | (settings.optional_features & adapter.features()),
                 required_limits: settings
                     .required_limits
                     .clone()

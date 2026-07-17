@@ -17,6 +17,12 @@ fn get_cache() -> &'static DashMap<String, FileInfo> {
     FILE_CACHE.get_or_init(|| DashMap::with_capacity(128))
 }
 
+#[test]
+fn ktx2_uses_the_registered_image_media_type() {
+    let mime = super::mime_for_path(std::path::Path::new("runtime/sky.KTX2"));
+    assert_eq!(mime.essence_str(), "image/ktx2");
+}
+
 #[cfg(feature = "net-h1-server")]
 impl crate::network::http::session::HService for FileService {
     fn call<S: Session>(&self, session: &mut S) -> std::io::Result<()> {
@@ -334,17 +340,32 @@ fn safe_join_confines_to_root() {
 
     let root = Path::new("/srv/www");
 
-    assert_eq!(safe_join(root, "/index.html"), Some(PathBuf::from("/srv/www/index.html")));
-    assert_eq!(safe_join(root, "a/b/c.txt"), Some(PathBuf::from("/srv/www/a/b/c.txt")));
-    assert_eq!(safe_join(root, "/a/./b"), Some(PathBuf::from("/srv/www/a/b")));
+    assert_eq!(
+        safe_join(root, "/index.html"),
+        Some(PathBuf::from("/srv/www/index.html"))
+    );
+    assert_eq!(
+        safe_join(root, "a/b/c.txt"),
+        Some(PathBuf::from("/srv/www/a/b/c.txt"))
+    );
+    assert_eq!(
+        safe_join(root, "/a/./b"),
+        Some(PathBuf::from("/srv/www/a/b"))
+    );
     // Descend then come back up within root is fine.
-    assert_eq!(safe_join(root, "/a/b/../c"), Some(PathBuf::from("/srv/www/a/c")));
+    assert_eq!(
+        safe_join(root, "/a/b/../c"),
+        Some(PathBuf::from("/srv/www/a/c"))
+    );
 
     // Traversal above root is rejected.
     assert_eq!(safe_join(root, "/../etc/passwd"), None);
     assert_eq!(safe_join(root, "a/../../etc/passwd"), None);
     // Absolute component cannot replace the root.
-    assert_eq!(safe_join(root, "/a//etc"), Some(PathBuf::from("/srv/www/a/etc")));
+    assert_eq!(
+        safe_join(root, "/a//etc"),
+        Some(PathBuf::from("/srv/www/a/etc"))
+    );
     // NUL byte rejected.
     assert_eq!(safe_join(root, "a\0b"), None);
 }
