@@ -2,8 +2,8 @@ use super::*;
 use crate::database::fdb::pool::FDBPool;
 use std::{num::NonZeroU64, time::Duration};
 
-/// Start the FDB network.
-fn start_network_and_pool() -> Option<FDBPool> {
+#[allow(unused_variables)]
+fn start_network_and_pool_sized(pool_size: u64) -> Option<FDBPool> {
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         return None;
@@ -28,10 +28,16 @@ fn start_network_and_pool() -> Option<FDBPool> {
 
         crate::database::fdb::test_shared::fdb_test_network_start().ok()?;
 
-        let pool = FDBPool::new(cluster, NonZeroU64::new(4).unwrap()).ok()?;
+        let size = NonZeroU64::new(pool_size.max(1)).unwrap();
+        let pool = FDBPool::new(cluster, size).ok()?;
 
         Some(pool)
     }
+}
+
+/// Start the FDB network with a small default pool (4 handles).
+fn start_network_and_pool() -> Option<FDBPool> {
+    start_network_and_pool_sized(4)
 }
 
 #[test]
@@ -219,18 +225,11 @@ fn cache_delete_removes_row() {
     assert!(cache.get(b"delkey").expect("get after delete").is_none());
 }
 
-// --- Native-async coverage (tokio) ----------------------------------------------
-//
-// These exercise the callback-driven `FDBFuture` path (no spawn_blocking): many
-// in-flight futures at once, and futures dropped mid-flight.
-
-/// Many concurrent set/get on a shared cache. The FDB completion callbacks fire on
-/// the FDB network thread and must wake many tokio tasks in parallel — this is what
-/// native async buys over the old one-thread-per-op `spawn_blocking`.
 #[cfg(feature = "rt-tokio")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cache_concurrent_async_ops() {
-    let Some(pool) = start_network_and_pool() else {
+    const CONCURRENCY: u32 = 32;
+    let Some(pool) = start_network_and_pool_sized(CONCURRENCY as u64 + 8) else {
         if cfg!(feature = "db-fdb") {
             panic!("live FoundationDB test requested, but no usable cluster was found");
         }
@@ -239,7 +238,7 @@ async fn cache_concurrent_async_ops() {
     let cache = BucketTtlCache::new(pool, "test_concurrent");
 
     let mut writers = Vec::new();
-    for i in 0..64u32 {
+    for i in 0..CONCURRENCY {
         let c = cache.clone();
         writers.push(tokio::spawn(async move {
             let k = format!("ck{i}");
@@ -254,7 +253,7 @@ async fn cache_concurrent_async_ops() {
     }
 
     let mut readers = Vec::new();
-    for i in 0..64u32 {
+    for i in 0..CONCURRENCY {
         let c = cache.clone();
         readers.push(tokio::spawn(async move {
             let k = format!("ck{i}");
@@ -267,7 +266,7 @@ async fn cache_concurrent_async_ops() {
         r.await.expect("reader task");
     }
 
-    for i in 0..64u32 {
+    for i in 0..CONCURRENCY {
         let k = format!("ck{i}");
         cache.delete(k.as_bytes()).await.expect("cleanup delete");
     }
@@ -303,11 +302,6 @@ async fn cache_async_op_is_cancel_safe() {
     assert_eq!(v.as_deref(), Some(&b"cy"[..]));
     cache.delete(b"cx").await.expect("cleanup");
 }
-
-// --- Native-async coverage (glommio) --------------------------------------------
-//
-// Runs the same async cache ops on glommio's thread-per-core reactor, validating
-// that FDB callbacks waking a glommio task from the FDB network thread work.
 
 #[cfg(feature = "rt-glommio")]
 #[test]
