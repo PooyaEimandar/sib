@@ -26,7 +26,7 @@ fn tls_settings(group_id: &str) -> KafkaSettings {
 #[test]
 fn kafka_cli_may_pub_sub() -> std::io::Result<()> {
     const NUMBER_OF_WORKERS: usize = 2;
-    const STACK_SIZE: usize = 1 * 1024 * 1024;
+    const STACK_SIZE: usize = 1024 * 1024;
     crate::init_global_poller(NUMBER_OF_WORKERS, STACK_SIZE);
 
     let settings = tls_settings("topic-test");

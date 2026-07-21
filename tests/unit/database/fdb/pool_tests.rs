@@ -1,5 +1,6 @@
 use super::*;
 use std::num::NonZeroU64;
+use std::time::Duration;
 
 pub fn default_fdb_cluster_path() -> String {
     if let Ok(path) = std::env::var("SIB_FDB_CLUSTER_FILE") {
@@ -121,7 +122,7 @@ fn test_fdb_pool_concurrent_acquire_and_increment() {
     }
 
     const NUMBER_OF_WORKERS: usize = 1;
-    crate::init_global_poller(NUMBER_OF_WORKERS, 1 * 1024 * 1024);
+    crate::init_global_poller(NUMBER_OF_WORKERS, 1024 * 1024);
 
     let pool = std::sync::Arc::new(
         Pool::new_with(NonZeroU64::new(3).unwrap(), |_i| Ok(Counter::default())).unwrap(),
@@ -200,7 +201,7 @@ async fn test_fdb_pool_concurrent_acquire_and_increment() {
 fn test_fdb_pool_timeout_when_all_held() {
     const TIME: Duration = Duration::from_millis(5);
     const NUMBER_OF_WORKERS: usize = 1;
-    crate::init_global_poller(NUMBER_OF_WORKERS, 1 * 1024 * 1024);
+    crate::init_global_poller(NUMBER_OF_WORKERS, 1024 * 1024);
 
     let pool = Pool::new_with(NonZeroU64::new(1).unwrap(), |_| Ok(123u32)).unwrap();
 
@@ -321,7 +322,6 @@ fn test_fdb_run_transaction_retries_on_conflict_increment() {
         atomic::{AtomicUsize, Ordering},
     };
     use std::thread;
-    use std::time::Duration;
 
     let Some(()) = start_fdb_network_if_available() else {
         if cfg!(feature = "db-fdb") {
@@ -447,7 +447,6 @@ fn test_fdb_run_transaction_retry_branch_is_executed() {
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
-    use std::time::Duration;
 
     let Some(()) = start_fdb_network_if_available() else {
         if cfg!(feature = "db-fdb") {
