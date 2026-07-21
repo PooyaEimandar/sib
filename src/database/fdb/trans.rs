@@ -375,11 +375,7 @@ impl FDBTransaction {
         })
     }
 
-    #[inline]
-    pub fn get_range_blocking<'a>(&self, range: &FDBRange<'a>) -> std::io::Result<FDBRangeResult> {
-        let fut = self.get_range(range)?;
-        fut.block_until_ready();
-
+    fn parse_range_result(fut: &FDBFuture) -> std::io::Result<FDBRangeResult> {
         let code = fut.get_error_code();
         if code != 0 {
             return Err(fdb_err(code)); // use your FDB error mapper
@@ -429,6 +425,13 @@ impl FDBTransaction {
         }
 
         Ok((out, more != 0))
+    }
+
+    #[inline]
+    pub fn get_range_blocking<'a>(&self, range: &FDBRange<'a>) -> std::io::Result<FDBRangeResult> {
+        let fut = self.get_range(range)?;
+        fut.block_until_ready();
+        Self::parse_range_result(&fut)
     }
 
     #[inline]
@@ -511,6 +514,70 @@ impl FDBTransaction {
         let fut =
             FDBFuture::new(unsafe { foundationdb_sys::fdb_transaction_on_error(self.trs, code) })?;
         fut.block_until_ready();
+        let rc = fut.get_error_code();
+        if rc != 0 {
+            return Err(fdb_err(rc));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(any(feature = "rt-tokio", feature = "rt-glommio"))]
+impl FDBTransaction {
+    /// Async get with `on_error` retry. `Ok(Some(value))` / `Ok(None)`.
+    pub async fn get_async_value_optional(
+        &self,
+        key: &[u8],
+        snapshot: bool,
+    ) -> std::io::Result<Option<Vec<u8>>> {
+        loop {
+            let fut = self.get(key, snapshot)?;
+            fut.ready().await;
+            let code = fut.get_error_code();
+            if code == 0 {
+                match fut.get_value() {
+                    Ok(v) => return Ok(Some(v.to_vec())),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                    Err(e) => return Err(e),
+                }
+            }
+            self.on_error_async(code).await?;
+        }
+    }
+
+    /// Async range read (single batch).
+    pub async fn get_range_async<'a>(
+        &self,
+        range: &FDBRange<'a>,
+    ) -> std::io::Result<FDBRangeResult> {
+        let fut = self.get_range(range)?;
+        fut.ready().await;
+        Self::parse_range_result(&fut)
+    }
+
+    #[inline]
+    pub async fn get_owned_range_async(
+        &self,
+        range: &FDBOwnedRange,
+    ) -> std::io::Result<FDBRangeResult> {
+        self.get_range_async(&range.as_range()).await
+    }
+
+    /// Async commit (no replay; the caller drives retries).
+    pub async fn commit_async(&self) -> std::io::Result<()> {
+        let fut = self.commit()?;
+        fut.ready().await;
+        let code = fut.get_error_code();
+        if code != 0 {
+            return Err(fdb_err(code));
+        }
+        Ok(())
+    }
+
+    async fn on_error_async(&self, code: i32) -> std::io::Result<()> {
+        let fut =
+            FDBFuture::new(unsafe { foundationdb_sys::fdb_transaction_on_error(self.trs, code) })?;
+        fut.ready().await;
         let rc = fut.get_error_code();
         if rc != 0 {
             return Err(fdb_err(rc));

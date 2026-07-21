@@ -146,36 +146,27 @@ impl BucketTtlCache {
         k_gc_checkpoint_for(&self.ns)
     }
 
-    #[cfg(feature = "rt-tokio")]
+    #[cfg(any(feature = "rt-tokio", feature = "rt-glommio"))]
     pub async fn set(&self, key: &[u8], value: &[u8], ttl: Duration) -> std::io::Result<()> {
-        let pool = self.pool.clone();
-        let ns = self.ns.clone();
-        let bucket_ms = self.bucket_ms;
-        let key = key.to_vec();
-        let value = value.to_vec();
+        use crate::database::fdb::trans::FDBTransaction;
 
-        tokio::task::spawn_blocking(move || {
-            use crate::database::fdb::trans::FDBTransaction;
+        let loan = self
+            .pool
+            .try_loan()
+            .ok_or_else(|| std::io::Error::other("no FDB handle in pool"))?;
+        let exp_ms = now_ms().saturating_add(ttl.as_millis() as u64);
+        let bucket = bucket_of(exp_ms, self.bucket_ms);
+        let kd = k_data_for(&self.ns, key);
+        let kt = k_ttl_for(&self.ns, bucket, key);
 
-            let loan = pool
-                .try_loan()
-                .ok_or_else(|| std::io::Error::other("no FDB handle in pool"))?;
-            let exp_ms = now_ms().saturating_add(ttl.as_millis() as u64);
-            let bucket = bucket_of(exp_ms, bucket_ms);
-            let kd = k_data_for(&ns, &key);
-            let kt = k_ttl_for(&ns, bucket, &key);
+        let mut payload = Vec::with_capacity(8 + value.len());
+        payload.extend_from_slice(&exp_ms.to_be_bytes());
+        payload.extend_from_slice(value);
 
-            let mut payload = Vec::with_capacity(8 + value.len());
-            payload.extend_from_slice(&exp_ms.to_be_bytes());
-            payload.extend_from_slice(&value);
-
-            let trx = FDBTransaction::new(&loan)?;
-            trx.set(&kd, &payload);
-            trx.set(&kt, b"");
-            trx.commit_blocking()
-        })
-        .await
-        .map_err(std::io::Error::from)?
+        let trx = FDBTransaction::new(&loan)?;
+        trx.set(&kd, &payload);
+        trx.set(&kt, b"");
+        trx.commit_async().await
     }
 
     #[cfg(feature = "rt-may")]
@@ -232,39 +223,34 @@ impl BucketTtlCache {
         Ok(None)
     }
 
-    #[cfg(feature = "rt-tokio")]
+    #[cfg(any(feature = "rt-tokio", feature = "rt-glommio"))]
     pub async fn get(&self, key: &[u8]) -> std::io::Result<Option<Vec<u8>>> {
-        let pool = self.pool.clone();
+        use crate::database::fdb::trans::FDBTransaction;
+
+        let loan = self
+            .pool
+            .try_loan()
+            .ok_or_else(|| std::io::Error::other("no FDB handle in pool"))?;
         let kd = self.k_data(key);
+        let trx = FDBTransaction::new(&loan)?;
 
-        tokio::task::spawn_blocking(move || {
-            use crate::database::fdb::trans::FDBTransaction;
-
-            let loan = pool
-                .try_loan()
-                .ok_or_else(|| std::io::Error::other("no FDB handle in pool"))?;
-            let trx = FDBTransaction::new(&loan)?;
-
-            let val = trx.get_blocking_value_optional(&kd, false)?;
-            if let Some(raw) = val {
-                if raw.len() < 8 {
-                    return Ok(None);
-                }
-                let mut be = [0u8; 8];
-                be.copy_from_slice(&raw[..8]);
-                let exp = u64::from_be_bytes(be);
-                if now_ms() >= exp {
-                    // best-effort scrub; ttl index will be removed by GC
-                    trx.clear(&kd);
-                    let _ = trx.commit_blocking();
-                    return Ok(None);
-                }
-                return Ok(Some(raw[8..].to_vec()));
+        let val = trx.get_async_value_optional(&kd, false).await?;
+        if let Some(raw) = val {
+            if raw.len() < 8 {
+                return Ok(None);
             }
-            Ok(None)
-        })
-        .await
-        .map_err(std::io::Error::from)?
+            let mut be = [0u8; 8];
+            be.copy_from_slice(&raw[..8]);
+            let exp = u64::from_be_bytes(be);
+            if now_ms() >= exp {
+                // best-effort scrub; ttl index will be removed by GC
+                trx.clear(&kd);
+                let _ = trx.commit_async().await;
+                return Ok(None);
+            }
+            return Ok(Some(raw[8..].to_vec()));
+        }
+        Ok(None)
     }
 
     #[cfg(feature = "rt-may")]
@@ -281,23 +267,18 @@ impl BucketTtlCache {
         trx.commit_blocking()
     }
 
-    #[cfg(feature = "rt-tokio")]
+    #[cfg(any(feature = "rt-tokio", feature = "rt-glommio"))]
     pub async fn delete(&self, key: &[u8]) -> std::io::Result<()> {
-        let pool = self.pool.clone();
+        use crate::database::fdb::trans::FDBTransaction;
+
+        let loan = self
+            .pool
+            .try_loan()
+            .ok_or_else(|| std::io::Error::other("no FDB handle in pool"))?;
         let kd = self.k_data(key);
-
-        tokio::task::spawn_blocking(move || {
-            use crate::database::fdb::trans::FDBTransaction;
-
-            let loan = pool
-                .try_loan()
-                .ok_or_else(|| std::io::Error::other("no FDB handle in pool"))?;
-            let trx = FDBTransaction::new(&loan)?;
-            trx.clear(&kd);
-            trx.commit_blocking()
-        })
-        .await
-        .map_err(std::io::Error::from)?
+        let trx = FDBTransaction::new(&loan)?;
+        trx.clear(&kd);
+        trx.commit_async().await
     }
 
     #[cfg(feature = "rt-may")]
@@ -378,98 +359,89 @@ impl BucketTtlCache {
         Ok(true)
     }
 
-    #[cfg(feature = "rt-tokio")]
+    #[cfg(any(feature = "rt-tokio", feature = "rt-glommio"))]
     pub async fn gc_once(&self) -> std::io::Result<bool> {
-        let pool = self.pool.clone();
-        let ns = self.ns.clone();
-        let bucket_ms = self.bucket_ms;
-        let lazy_expiration_ms = self.lazy_expiration_ms;
-        let gc_batch = self.gc_batch;
+        use crate::database::fdb::trans::{FDBRange, FDBTransaction};
 
-        tokio::task::spawn_blocking(move || {
-            use crate::database::fdb::trans::FDBTransaction;
+        let ns = &self.ns;
+        let loan = self
+            .pool
+            .try_loan()
+            .ok_or_else(|| std::io::Error::other("no FDB handle in pool"))?;
+        let now = now_ms();
+        let limit = bucket_of(now.saturating_sub(self.lazy_expiration_ms), self.bucket_ms);
 
-            let loan = pool
-                .try_loan()
-                .ok_or_else(|| std::io::Error::other("no FDB handle in pool"))?;
-            let now = now_ms();
-            let limit = bucket_of(now.saturating_sub(lazy_expiration_ms), bucket_ms);
+        // load checkpoint
+        let k_gc = k_gc_checkpoint_for(ns);
+        let trx = FDBTransaction::new(&loan)?;
+        let last = trx.get_async_value_optional(&k_gc, true).await?; // retry-safe
+        drop(trx);
 
-            // load checkpoint
-            let k_gc = k_gc_checkpoint_for(&ns);
+        let start_bucket = match last {
+            Some(b) if b.len() == 8 => {
+                u64::from_be_bytes(b.as_slice().try_into().unwrap()).saturating_add(self.bucket_ms)
+            }
+            _ => 0,
+        };
+        let candidate = if start_bucket == 0 {
+            bucket_of(
+                now.saturating_sub(self.lazy_expiration_ms + self.bucket_ms),
+                self.bucket_ms,
+            )
+        } else {
+            start_bucket
+        };
+
+        if candidate == 0 || candidate >= limit {
+            return Ok(false);
+        }
+
+        // stream-delete bucket in batches
+        let Some((start, end)) = pfx_bucket_for(ns, candidate) else {
+            return Ok(false);
+        };
+
+        loop {
             let trx = FDBTransaction::new(&loan)?;
-            let last = trx.get_blocking_value_optional(&k_gc, true)?; // retry-safe
+            let range = FDBRange::exact_prefix(&start, &end, self.gc_batch as i32);
+            let (batch, _more) = trx.get_range_async(&range).await?;
+            // Drop before write txn
             drop(trx);
 
-            let start_bucket = match last {
-                Some(b) if b.len() == 8 => {
-                    u64::from_be_bytes(b.as_slice().try_into().unwrap()).saturating_add(bucket_ms)
-                }
-                _ => 0,
-            };
-            let candidate = if start_bucket == 0 {
-                bucket_of(
-                    now.saturating_sub(lazy_expiration_ms + bucket_ms),
-                    bucket_ms,
-                )
-            } else {
-                start_bucket
-            };
-
-            if candidate == 0 || candidate >= limit {
-                return Ok(false);
+            if batch.is_empty() {
+                break;
             }
 
-            // stream-delete bucket in batches
-            let Some((start, end)) = pfx_bucket_for(&ns, candidate) else {
-                return Ok(false);
-            };
-
-            loop {
-                use crate::database::fdb::trans::FDBRange;
-                let trx = FDBTransaction::new(&loan)?;
-                let range = FDBRange::exact_prefix(&start, &end, gc_batch as i32);
-                let (batch, _more) = trx.get_range_blocking(&range)?;
-                // Drop before write txn
-                drop(trx);
-
-                if batch.is_empty() {
-                    break;
-                }
-
-                let trx = FDBTransaction::new(&loan)?;
-                for (k_ttl, _) in &batch {
-                    if let Some(kd) = data_key_from_ttl_key(&ns, candidate, k_ttl) {
-                        // Only delete the data record if it is genuinely expired.
-                        match trx.get_blocking_value_optional(&kd, false)? {
-                            Some(raw) if raw.len() >= 8 => {
-                                let mut be = [0u8; 8];
-                                be.copy_from_slice(&raw[..8]);
-                                if now >= u64::from_be_bytes(be) {
-                                    trx.clear(&kd);
-                                }
-                            }
-                            // Malformed record, too short to carry an expiry, reclaim it.
-                            Some(_) => {
+            let trx = FDBTransaction::new(&loan)?;
+            for (k_ttl, _) in &batch {
+                if let Some(kd) = data_key_from_ttl_key(ns, candidate, k_ttl) {
+                    // Only delete the data record if it is genuinely expired.
+                    match trx.get_async_value_optional(&kd, false).await? {
+                        Some(raw) if raw.len() >= 8 => {
+                            let mut be = [0u8; 8];
+                            be.copy_from_slice(&raw[..8]);
+                            if now >= u64::from_be_bytes(be) {
                                 trx.clear(&kd);
                             }
-                            None => {}
                         }
+                        // Malformed record, too short to carry an expiry, reclaim it.
+                        Some(_) => {
+                            trx.clear(&kd);
+                        }
+                        None => {}
                     }
-                    trx.clear(k_ttl);
                 }
-                trx.commit_blocking()?;
+                trx.clear(k_ttl);
             }
+            trx.commit_async().await?;
+        }
 
-            // tidy + checkpoint
-            let trx = FDBTransaction::new(&loan)?;
-            trx.clear_range(&start, &end);
-            trx.set(&k_gc, &candidate.to_be_bytes());
-            trx.commit_blocking()?;
-            Ok(true)
-        })
-        .await
-        .map_err(std::io::Error::from)?
+        // tidy + checkpoint
+        let trx = FDBTransaction::new(&loan)?;
+        trx.clear_range(&start, &end);
+        trx.set(&k_gc, &candidate.to_be_bytes());
+        trx.commit_async().await?;
+        Ok(true)
     }
 
     #[cfg(feature = "rt-may")]
@@ -480,11 +452,15 @@ impl BucketTtlCache {
         }
     }
 
-    #[cfg(feature = "rt-tokio")]
+    #[cfg(any(feature = "rt-tokio", feature = "rt-glommio"))]
     pub async fn run_gc_loop(&self, interval: Duration) -> std::io::Result<()> {
         loop {
             let _ = self.gc_once().await?;
+            // Runtime-specific sleep (glommio has no tokio reactor).
+            #[cfg(all(feature = "rt-tokio", not(feature = "rt-glommio")))]
             tokio::time::sleep(interval).await;
+            #[cfg(all(feature = "rt-glommio", target_os = "linux"))]
+            glommio::timer::sleep(interval).await;
         }
     }
 }

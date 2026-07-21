@@ -95,8 +95,20 @@ jobs:
           rustup target add wasm32-unknown-unknown
           cargo check --target wasm32-unknown-unknown --no-default-features --features render
 
-      - name: Test
+      - name: Test (tokio runtime + FDB)
         run: cargo test --release --no-default-features --features "rt-tokio net-h2-server db-fdb"
+
+      # Exercise the FDB layer on the other two runtimes against the same live cluster.
+      # The async cache/futures path is shared by tokio + glommio; `may` uses the
+      # blocking path. Run once on the host (x86_64); the aarch64 matrix entry
+      # cross-compiles and cannot run these.
+      - name: Test (may runtime + FDB)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: cargo test --release --no-default-features --features "rt-may db-fdb"
+
+      - name: Test (glommio runtime + FDB)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: cargo test --release --no-default-features --features "rt-glommio db-fdb"
 
   windows:
     name: Windows x86_64

@@ -218,3 +218,152 @@ fn cache_delete_removes_row() {
     cache.delete(b"delkey").expect("delete");
     assert!(cache.get(b"delkey").expect("get after delete").is_none());
 }
+
+// --- Native-async coverage (tokio) ----------------------------------------------
+//
+// These exercise the callback-driven `FDBFuture` path (no spawn_blocking): many
+// in-flight futures at once, and futures dropped mid-flight.
+
+/// Many concurrent set/get on a shared cache. The FDB completion callbacks fire on
+/// the FDB network thread and must wake many tokio tasks in parallel — this is what
+/// native async buys over the old one-thread-per-op `spawn_blocking`.
+#[cfg(feature = "rt-tokio")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cache_concurrent_async_ops() {
+    let Some(pool) = start_network_and_pool() else {
+        if cfg!(feature = "db-fdb") {
+            panic!("live FoundationDB test requested, but no usable cluster was found");
+        }
+        return;
+    };
+    let cache = BucketTtlCache::new(pool, "test_concurrent");
+
+    let mut writers = Vec::new();
+    for i in 0..64u32 {
+        let c = cache.clone();
+        writers.push(tokio::spawn(async move {
+            let k = format!("ck{i}");
+            let v = format!("cv{i}");
+            c.set(k.as_bytes(), v.as_bytes(), Duration::from_secs(30))
+                .await
+                .expect("concurrent set");
+        }));
+    }
+    for w in writers {
+        w.await.expect("writer task");
+    }
+
+    let mut readers = Vec::new();
+    for i in 0..64u32 {
+        let c = cache.clone();
+        readers.push(tokio::spawn(async move {
+            let k = format!("ck{i}");
+            let want = format!("cv{i}");
+            let got = c.get(k.as_bytes()).await.expect("concurrent get");
+            assert_eq!(got.as_deref(), Some(want.as_bytes()));
+        }));
+    }
+    for r in readers {
+        r.await.expect("reader task");
+    }
+
+    for i in 0..64u32 {
+        let k = format!("ck{i}");
+        cache.delete(k.as_bytes()).await.expect("cleanup delete");
+    }
+}
+
+/// Drop `get` futures while they are still pending, then keep using the cache. This
+/// stresses the drop-while-pending path: the FDB callback may fire after the `Ready`
+/// future and its `FDBFuture` have been dropped. It must never crash or corrupt state.
+#[cfg(feature = "rt-tokio")]
+#[tokio::test]
+async fn cache_async_op_is_cancel_safe() {
+    let Some(pool) = start_network_and_pool() else {
+        if cfg!(feature = "db-fdb") {
+            panic!("live FoundationDB test requested, but no usable cluster was found");
+        }
+        return;
+    };
+    let cache = BucketTtlCache::new(pool, "test_cancel");
+    cache
+        .set(b"cx", b"cy", Duration::from_secs(30))
+        .await
+        .expect("set");
+
+    // A 1ns timeout almost always fires before the FDB round-trip completes, so the
+    // `get` future is dropped mid-flight.
+    for _ in 0..256 {
+        let fut = cache.get(b"cx");
+        let _ = tokio::time::timeout(Duration::from_nanos(1), fut).await;
+    }
+
+    // The cache must still be fully usable.
+    let v = cache.get(b"cx").await.expect("get after cancels");
+    assert_eq!(v.as_deref(), Some(&b"cy"[..]));
+    cache.delete(b"cx").await.expect("cleanup");
+}
+
+// --- Native-async coverage (glommio) --------------------------------------------
+//
+// Runs the same async cache ops on glommio's thread-per-core reactor, validating
+// that FDB callbacks waking a glommio task from the FDB network thread work.
+
+#[cfg(feature = "rt-glommio")]
+#[test]
+fn cache_async_roundtrip_glommio() {
+    let Some(pool) = start_network_and_pool() else {
+        if cfg!(feature = "db-fdb") {
+            panic!("live FoundationDB test requested, but no usable cluster was found");
+        }
+        return;
+    };
+    glommio::LocalExecutor::default().run(async move {
+        let cache = BucketTtlCache::new(pool, "test_glommio");
+        cache
+            .set(b"gk", b"gv", Duration::from_secs(30))
+            .await
+            .expect("set");
+        let v = cache.get(b"gk").await.expect("get");
+        assert_eq!(v.as_deref(), Some(&b"gv"[..]));
+        cache.delete(b"gk").await.expect("delete");
+        assert!(cache.get(b"gk").await.expect("get after delete").is_none());
+    });
+}
+
+#[cfg(feature = "rt-glommio")]
+#[test]
+fn cache_gc_glommio() {
+    let Some(pool) = start_network_and_pool() else {
+        if cfg!(feature = "db-fdb") {
+            panic!("live FoundationDB test requested, but no usable cluster was found");
+        }
+        return;
+    };
+    glommio::LocalExecutor::default().run(async move {
+        let mut cache = BucketTtlCache::new(pool, "test_glommio_gc");
+        cache.bucket_ms = 200;
+        cache.lazy_expiration_ms = 400;
+        cache.gc_batch = 512;
+
+        for i in 0..8u8 {
+            let k = [b'g', i];
+            let val = [b'v', i];
+            cache
+                .set(&k, &val, Duration::from_millis(150))
+                .await
+                .expect("set batch");
+        }
+
+        glommio::timer::sleep(Duration::from_millis(700)).await;
+
+        let cleaned = cache.gc_once().await.expect("gc_once");
+        assert!(cleaned, "expected to clean one expired bucket");
+
+        for i in 0..8u8 {
+            let k = [b'g', i];
+            let v = cache.get(&k).await.expect("get after gc");
+            assert!(v.is_none(), "post-GC value should be None for key {:?}", k);
+        }
+    });
+}
