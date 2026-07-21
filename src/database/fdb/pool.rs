@@ -1,5 +1,5 @@
 use crossbeam::queue::ArrayQueue;
-use std::{cell::UnsafeCell, fmt, num::NonZeroU64, sync::Arc, time::Duration};
+use std::{cell::UnsafeCell, fmt, num::NonZeroU64, sync::Arc};
 
 #[cfg(feature = "rt-tokio")]
 use tokio::{sync::Notify, time};
@@ -123,7 +123,7 @@ impl<T> Pool<T> {
 
     /// Blocking acquire with timeout
     #[cfg(feature = "rt-may")]
-    fn acquire_blocking(&self, timeout: Duration) -> std::io::Result<Loan<'_, T>> {
+    fn acquire_blocking(&self, timeout: std::time::Duration) -> std::io::Result<Loan<'_, T>> {
         if let Some(loan) = self.try_acquire() {
             return Ok(loan);
         }
@@ -144,7 +144,7 @@ impl<T> Pool<T> {
             coroutine::yield_now();
             // short sleep after a few spins
             if backoff < 2000 {
-                coroutine::sleep(Duration::from_micros(backoff));
+                coroutine::sleep(std::time::Duration::from_micros(backoff));
                 backoff = (backoff * 2).min(2000);
             }
         }
@@ -152,7 +152,7 @@ impl<T> Pool<T> {
 
     /// Async acquire with timeout (using Notify)
     #[cfg(feature = "rt-tokio")]
-    async fn acquire(&self, timeout: Duration) -> std::io::Result<Loan<'_, T>> {
+    async fn acquire(&self, timeout: std::time::Duration) -> std::io::Result<Loan<'_, T>> {
         // Fast path
         if let Some(loan) = self.try_acquire() {
             return Ok(loan);
@@ -203,13 +203,13 @@ impl FDBPool {
 
     /// blocking loan with timeout
     #[cfg(feature = "rt-may")]
-    pub fn loan_blocking(&self, timeout: Duration) -> std::io::Result<Loan<'_, FDB>> {
+    pub fn loan_blocking(&self, timeout: std::time::Duration) -> std::io::Result<Loan<'_, FDB>> {
         self.pool.acquire_blocking(timeout)
     }
 
     /// async loan with timeout
     #[cfg(feature = "rt-tokio")]
-    pub async fn loan(&self, timeout: Duration) -> std::io::Result<Loan<'_, FDB>> {
+    pub async fn loan(&self, timeout: std::time::Duration) -> std::io::Result<Loan<'_, FDB>> {
         self.pool.acquire(timeout).await
     }
 
@@ -217,7 +217,7 @@ impl FDBPool {
     #[cfg(feature = "rt-may")]
     pub fn with_loan<R, F: FnOnce(&FDB) -> R>(
         &self,
-        timeout: Duration,
+        timeout: std::time::Duration,
         f: F,
     ) -> std::io::Result<R> {
         let loan = self.loan_blocking(timeout)?;
@@ -228,7 +228,7 @@ impl FDBPool {
     #[cfg(feature = "rt-may")]
     pub fn with_loan_mut<R, F: FnOnce(&mut FDB) -> R>(
         &self,
-        timeout: Duration,
+        timeout: std::time::Duration,
         f: F,
     ) -> std::io::Result<R> {
         let mut loan = self.loan_blocking(timeout)?;
@@ -237,7 +237,11 @@ impl FDBPool {
 
     /// Async loan with timeout (immutable)
     #[cfg(feature = "rt-tokio")]
-    pub async fn with_loan_async<R, Fut, F>(&self, timeout: Duration, f: F) -> std::io::Result<R>
+    pub async fn with_loan_async<R, Fut, F>(
+        &self,
+        timeout: std::time::Duration,
+        f: F,
+    ) -> std::io::Result<R>
     where
         F: for<'a> FnOnce(&'a FDB) -> Fut,
         Fut: std::future::Future<Output = R>,
@@ -250,7 +254,7 @@ impl FDBPool {
     #[cfg(feature = "rt-tokio")]
     pub async fn with_loan_mut_async<R, Fut, F>(
         &self,
-        timeout: Duration,
+        timeout: std::time::Duration,
         f: F,
     ) -> std::io::Result<R>
     where
