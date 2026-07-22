@@ -610,6 +610,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         addr: L,
         chain_cert_key: (Option<&[u8]>, &[u8], &[u8]),
         h2_cfg: H2Config,
+        shutdown: tokio_util::sync::CancellationToken,
     ) -> std::io::Result<()> {
         // get socket address
         let socket_addr = resolve_addr!(addr)?;
@@ -633,6 +634,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
             let tls_acceptor = tls_acceptor.clone();
             let factory = factory.clone();
             let h2_cfg = h2_cfg.clone();
+            let shutdown = shutdown.clone();
 
             async move {
                 let shard_id = glommio::executor().id();
@@ -656,6 +658,14 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                 let sem = std::rc::Rc::new(glommio::sync::Semaphore::new(h2_cfg.max_sessions));
 
                 loop {
+                    // Graceful shutdown: stop accepting once cancelled. (Takes effect
+                    // between connections; a shard blocked in accept() exits on the next
+                    // one — matches the tokio variant's shutdown parameter.)
+                    if shutdown.is_cancelled() {
+                        tracing::info!("Shard {shard_id} shutting down (cancelled)");
+                        break;
+                    }
+
                     // Accept from listener
                     let stream = match listener.accept().await {
                         Ok(s) => s,
