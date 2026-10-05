@@ -3,7 +3,7 @@
 **SIB** is a high-performance, secure, and cross-platform modules optimized for efficiency, scalability, and reliability.
 it is designed for **real-time rendering**, **real-time streaming**, **low-latency networking**, and **scalable services**.
 
-> 🏷️ _"Sib" means **apple** in Persian (سیب). Sib was the name of my first dog, a companion through the years._
+> 🏷️ _"Sib" means **apple** in Persian (سیب). Sib was the name of my dog, a companion through the years._
 <img src="https://raw.githubusercontent.com/PooyaEimandar/sib/main/sib.png" width="256" height="256" alt="Sib">
 
 
