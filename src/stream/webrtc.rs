@@ -14,22 +14,38 @@ use gst::prelude::*;
 use gstreamer as gst;
 use gstreamer_app as gst_app;
 use gstreamer_video as gst_video;
-use serde::{Deserialize, Serialize};
-use std::sync::{
-    Arc, OnceLock,
-    atomic::{AtomicU64, Ordering},
+use rtc::{
+    media::Sample,
+    rtp_transceiver::rtp_sender::{
+        RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,
+        RtpCodecKind,
+    },
 };
-use tokio::sync::{RwLock, broadcast, mpsc};
+use serde::{Deserialize, Serialize};
+use std::{
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, Instant},
+};
+use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use webrtc::{
-    api::{APIBuilder, media_engine::MediaEngine},
-    data_channel::data_channel_message::DataChannelMessage,
-    ice_transport::ice_server::RTCIceServer,
-    interceptor::registry::Registry,
-    peer_connection::{RTCPeerConnection, configuration::RTCConfiguration},
-    rtp_transceiver::rtp_codec::{RTCRtpCodecCapability, RTCRtpCodecParameters, RTPCodecType},
-    track::track_local::track_local_static_sample::TrackLocalStaticSample,
+    data_channel::{DataChannel, DataChannelEvent},
+    media_stream::{
+        MediaStreamTrack,
+        track_local::{TrackLocal, static_sample::TrackLocalStaticSample},
+    },
+    peer_connection::{
+        MediaEngine, PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler,
+        RTCConfigurationBuilder, RTCIceCandidateInit, RTCIceConnectionState, RTCIceGatheringState,
+        RTCIceServer, RTCPeerConnectionIceEvent, RTCPeerConnectionState, RTCSessionDescription,
+        Registry, register_default_interceptors,
+    },
+    rtp_transceiver::RtpSender,
 };
 
 /// Public webRTC server config
@@ -327,9 +343,9 @@ fn find_fmtp_in_offer(offer_sdp: &str, pt: u8) -> Option<String> {
     None
 }
 
-fn codec_cap(codec: Codec, fmtp_from_offer: Option<&str>) -> RTCRtpCodecCapability {
+fn codec_cap(codec: Codec, fmtp_from_offer: Option<&str>) -> RTCRtpCodec {
     match codec {
-        Codec::H264 => RTCRtpCodecCapability {
+        Codec::H264 => RTCRtpCodec {
             mime_type: codec.mime().to_string(),
             clock_rate: 90000,
             channels: 0,
@@ -338,7 +354,7 @@ fn codec_cap(codec: Codec, fmtp_from_offer: Option<&str>) -> RTCRtpCodecCapabili
                 .to_string(),
             rtcp_feedback: vec![],
         },
-        Codec::Opus => RTCRtpCodecCapability {
+        Codec::Opus => RTCRtpCodec {
             mime_type: codec.mime().to_string(),
             clock_rate: 48000,
             channels: 2,
@@ -1078,10 +1094,75 @@ fn build_pipeline_opus() -> std::io::Result<(GstStream, mpsc::Receiver<gst::Samp
     ))
 }
 
+/// A local track and the RTP identity its samples are sent with.
+#[derive(Clone)]
+struct SampleTrack {
+    track: Arc<TrackLocalStaticSample>,
+    ssrc: u32,
+    payload_type: u8,
+}
+
+impl SampleTrack {
+    fn new(
+        codec: RTCRtpCodec,
+        kind: RtpCodecKind,
+        track_id: &str,
+        stream_id: &str,
+        payload_type: u8,
+    ) -> std::io::Result<Self> {
+        let ssrc = rand::random::<u32>();
+        let track = TrackLocalStaticSample::new(
+            Instant::now(),
+            MediaStreamTrack::new(
+                stream_id.to_owned(),
+                track_id.to_owned(),
+                track_id.to_owned(),
+                kind,
+                vec![RTCRtpEncodingParameters {
+                    rtp_coding_parameters: RTCRtpCodingParameters {
+                        ssrc: Some(ssrc),
+                        ..Default::default()
+                    },
+                    codec,
+                    ..Default::default()
+                }],
+            ),
+        )
+        .map_err(|e| std::io::Error::other(format!("{track_id} track: {e}")))?;
+        Ok(Self {
+            track: Arc::new(track),
+            ssrc,
+            payload_type,
+        })
+    }
+
+    /// Sends one encoded frame. Returns `false` once the track can no longer
+    /// send. Until ICE connects the track is unbound; those frames are dropped,
+    /// as a browser would drop them, rather than ending the stream.
+    async fn write(&self, data: &[u8], duration: Duration) -> bool {
+        let sample = Sample {
+            data: Bytes::copy_from_slice(data),
+            duration,
+            ..Sample::new(Instant::now())
+        };
+        match self
+            .track
+            .write_sample(self.ssrc, self.payload_type, &sample, &[])
+            .await
+        {
+            Ok(()) | Err(webrtc::error::Error::ErrBindFailed) => true,
+            Err(e) => {
+                warn!("write_sample on ssrc {} failed: {e}", self.ssrc);
+                false
+            }
+        }
+    }
+}
+
 // Pumps
 async fn pump_h264_samples(
     mut sample_rx: mpsc::Receiver<gst::Sample>,
-    track: Arc<TrackLocalStaticSample>,
+    track: SampleTrack,
     ctrl_state: Arc<RwLock<StreamCtrl>>,
     stop: CancellationToken,
 ) -> std::io::Result<()> {
@@ -1104,18 +1185,11 @@ async fn pump_h264_samples(
 
                 let fps = ctrl_state.read().await.fps.max(1) as u64;
                 let dur = buffer.duration()
-                    .map(|d| std::time::Duration::from_nanos(d.nseconds()))
+                    .map(|d| Duration::from_nanos(d.nseconds()))
                     .filter(|d| d.as_nanos() > 0)
-                    .unwrap_or_else(|| std::time::Duration::from_nanos(1_000_000_000u64 / fps));
+                    .unwrap_or_else(|| Duration::from_nanos(1_000_000_000u64 / fps));
 
-                let s = webrtc::media::Sample {
-                    data: Bytes::copy_from_slice(data),
-                    duration: dur,
-                    ..Default::default()
-                };
-
-                if let Err(e) = track.write_sample(&s).await {
-                    warn!("track.write_sample failed: {e}");
+                if !track.write(data, dur).await {
                     break;
                 }
             }
@@ -1126,10 +1200,10 @@ async fn pump_h264_samples(
 
 async fn pump_opus_samples(
     mut sample_rx: mpsc::Receiver<gst::Sample>,
-    track: Arc<TrackLocalStaticSample>,
+    track: SampleTrack,
     stop: CancellationToken,
 ) -> std::io::Result<()> {
-    let dur = std::time::Duration::from_millis(20);
+    let dur = Duration::from_millis(20);
 
     loop {
         tokio::select! {
@@ -1146,16 +1220,7 @@ async fn pump_opus_samples(
                 let buffer = sample.buffer().ok_or_else(|| std::io::Error::other("audio: no buffer"))?;
                 let map = buffer.map_readable()
                     .map_err(|e| std::io::Error::other(format!("audio map buffer: {e}")))?;
-                let data = map.as_slice();
-
-                let s = webrtc::media::Sample {
-                    data: Bytes::copy_from_slice(data),
-                    duration: dur,
-                    ..Default::default()
-                };
-
-                if let Err(e) = track.write_sample(&s).await {
-                    warn!("audio track.write_sample failed: {e}");
+                if !track.write(map.as_slice(), dur).await {
                     break;
                 }
             }
@@ -1169,8 +1234,8 @@ async fn pump_opus_samples(
 async fn start_stream_runtime(
     ctrl: StreamCtrl,
     ctrl_state: Arc<RwLock<StreamCtrl>>,
-    video_track: Arc<TrackLocalStaticSample>,
-    audio_track: Arc<TrackLocalStaticSample>,
+    video_track: SampleTrack,
+    audio_track: SampleTrack,
     rtmp: Option<Arc<RtmpBroadcaster>>,
     out_tx: mpsc::Sender<WsMsg>,
 ) -> std::io::Result<StreamRuntime> {
@@ -1377,17 +1442,17 @@ pub enum SessionEvent {
     PcState {
         ws_id: u64,
         pc_id: u64,
-        state: webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState,
+        state: RTCPeerConnectionState,
     },
     IceState {
         ws_id: u64,
         pc_id: u64,
-        state: webrtc::ice_transport::ice_connection_state::RTCIceConnectionState,
+        state: RTCIceConnectionState,
     },
     IceGatheringState {
         ws_id: u64,
         pc_id: u64,
-        state: webrtc::ice_transport::ice_gatherer_state::RTCIceGathererState,
+        state: RTCIceGatheringState,
     },
 
     DataChannelOpen {
@@ -1426,10 +1491,10 @@ struct WsCtx {
     out_tx: mpsc::Sender<WsMsg>,
 
     ctrl_state: Arc<RwLock<StreamCtrl>>,
-    pc: Arc<RwLock<Option<Arc<RTCPeerConnection>>>>,
+    pc: Arc<RwLock<Option<Arc<dyn PeerConnection>>>>,
     runtime: Arc<RwLock<Option<StreamRuntime>>>,
-    track_slot: Arc<RwLock<Option<Arc<TrackLocalStaticSample>>>>,
-    audio_track_slot: Arc<RwLock<Option<Arc<TrackLocalStaticSample>>>>,
+    track_slot: Arc<RwLock<Option<SampleTrack>>>,
+    audio_track_slot: Arc<RwLock<Option<SampleTrack>>>,
     pc_id_slot: Arc<RwLock<Option<u64>>>,
 
     pc_next_id: Arc<AtomicU64>,
@@ -1442,6 +1507,320 @@ struct WsCtx {
     last_bitrate_change_ms: Arc<AtomicU64>,
 
     rtmp: Option<Arc<RtmpBroadcaster>>,
+}
+
+/// Reports one peer connection's events to its WebSocket session.
+struct PeerEvents {
+    ws_id: u64,
+    pc_id: u64,
+    out_tx: mpsc::Sender<WsMsg>,
+    on_event: Option<SessionEventCallback>,
+    dc_next_id: Arc<AtomicU64>,
+    on_dc_message: Option<DataChannelMessageCallback>,
+}
+
+impl PeerEvents {
+    fn emit(&self, event: SessionEvent) {
+        if let Some(cb) = self.on_event.as_ref() {
+            cb(event);
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl PeerConnectionEventHandler for PeerEvents {
+    async fn on_connection_state_change(&self, state: RTCPeerConnectionState) {
+        info!("pc state: {state:?}");
+        self.emit(SessionEvent::PcState {
+            ws_id: self.ws_id,
+            pc_id: self.pc_id,
+            state,
+        });
+        let _ = self
+            .out_tx
+            .send(WsMsg::Info(format!("PC state: {state:?}")))
+            .await;
+    }
+
+    async fn on_ice_connection_state_change(&self, state: RTCIceConnectionState) {
+        info!("ice conn state: {state:?}");
+        self.emit(SessionEvent::IceState {
+            ws_id: self.ws_id,
+            pc_id: self.pc_id,
+            state,
+        });
+        let _ = self
+            .out_tx
+            .send(WsMsg::Info(format!("ICE conn state: {state:?}")))
+            .await;
+    }
+
+    async fn on_ice_gathering_state_change(&self, state: RTCIceGatheringState) {
+        info!("ice gathering state: {state:?}");
+        self.emit(SessionEvent::IceGatheringState {
+            ws_id: self.ws_id,
+            pc_id: self.pc_id,
+            state,
+        });
+        let _ = self
+            .out_tx
+            .send(WsMsg::Info(format!("ICE gathering: {state:?}")))
+            .await;
+    }
+
+    async fn on_ice_candidate(&self, event: RTCPeerConnectionIceEvent) {
+        let msg = match event.candidate.to_json() {
+            Ok(ice_init) => WsMsg::Ice(IceCandidateWire {
+                candidate: ice_init.candidate,
+                sdp_mid: ice_init.sdp_mid,
+                sdp_mline_index: ice_init.sdp_mline_index,
+                username_fragment: ice_init.username_fragment,
+            }),
+            Err(e) => WsMsg::Error(format!("ICE to_json failed: {e}")),
+        };
+        let _ = self.out_tx.send(msg).await;
+    }
+
+    async fn on_data_channel(&self, dc: Arc<dyn DataChannel>) {
+        let dc_id = self.dc_next_id.fetch_add(1, Ordering::Relaxed);
+        let label = dc.label().await.unwrap_or_default();
+        self.emit(SessionEvent::DataChannelOpen {
+            ws_id: self.ws_id,
+            pc_id: self.pc_id,
+            dc_id,
+            label: label.clone(),
+        });
+        info!("[dc#{dc_id}] opened label={label}");
+
+        // Messages arrive by polling the channel, which must not hold up the
+        // peer connection's other events.
+        let on_dc_message = self.on_dc_message.clone();
+        tokio::spawn(async move {
+            while let Some(event) = dc.poll().await {
+                match event {
+                    DataChannelEvent::OnMessage(msg) => {
+                        let Some(cb) = on_dc_message.as_ref() else {
+                            continue;
+                        };
+                        let payload = match msg.is_string {
+                            true => match String::from_utf8(msg.data.to_vec()) {
+                                Ok(s) => DataChannelPayload::Text(s),
+                                Err(e) => DataChannelPayload::Binary(Bytes::from(e.into_bytes())),
+                            },
+                            false => DataChannelPayload::Binary(msg.data.freeze()),
+                        };
+                        cb(dc_id, payload);
+                    }
+                    DataChannelEvent::OnClose => break,
+                    _ => {}
+                }
+            }
+            info!("[dc#{dc_id}] closed");
+        });
+    }
+}
+
+/// The payload type negotiated for a sender's codec, or `fallback` if the
+/// sender cannot report one.
+async fn negotiated_payload_type(sender: &Arc<dyn RtpSender>, fallback: u8) -> u8 {
+    match sender.get_parameters().await {
+        Ok(params) => params
+            .rtp_parameters
+            .codecs
+            .first()
+            .map(|codec| codec.payload_type)
+            .unwrap_or(fallback),
+        Err(e) => {
+            warn!("could not read the negotiated payload type ({e}); using {fallback}");
+            fallback
+        }
+    }
+}
+
+fn udp_bind_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+/// Picks the first port in `min..=max` that is free on every interface and
+/// returns it as wildcard addresses, IPv6 included where the host has it.
+/// webrtc binds one socket per interface for a wildcard address.
+fn free_udp_addrs(min: u16, max: u16) -> std::io::Result<Vec<SocketAddr>> {
+    for port in min..=max {
+        let v4 = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
+        if UdpSocket::bind(v4).is_err() {
+            continue;
+        }
+        let v6 = SocketAddr::from((Ipv6Addr::UNSPECIFIED, port));
+        let mut addrs = vec![v4];
+        if UdpSocket::bind(v6).is_ok() {
+            addrs.push(v6);
+        }
+        return Ok(addrs);
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AddrInUse,
+        format!("no free UDP port for ICE in {min}..={max}"),
+    ))
+}
+
+/// Builds the peer connection for a browser's offer, stores it in `ctx`, and
+/// sends the answer. Returns the tracks the stream runtime writes to.
+async fn negotiate(ctx: &WsCtx, offer_sdp: String) -> std::io::Result<(SampleTrack, SampleTrack)> {
+    let video_codec = choose_video_codec_from_offer(&offer_sdp);
+    let audio_codec = choose_audio_codec_from_offer(&offer_sdp);
+
+    let video_pt = find_pt_in_offer(&offer_sdp, video_codec.offer_rtpmap_token())
+        .unwrap_or(video_codec.default_pt());
+    let audio_pt = find_pt_in_offer(&offer_sdp, audio_codec.offer_rtpmap_token())
+        .unwrap_or(audio_codec.default_pt());
+
+    let video_fmtp = find_fmtp_in_offer(&offer_sdp, video_pt);
+    let audio_fmtp = find_fmtp_in_offer(&offer_sdp, audio_pt);
+
+    let _ = ctx
+        .out_tx
+        .send(WsMsg::Info(format!(
+            "Selected video codec: {video_codec:?}"
+        )))
+        .await;
+    let _ = ctx
+        .out_tx
+        .send(WsMsg::Info(format!(
+            "Selected audio codec: {audio_codec:?}"
+        )))
+        .await;
+    let _ = ctx
+        .out_tx
+        .send(WsMsg::Info(format!("Negotiated video PT: {video_pt}")))
+        .await;
+    let _ = ctx
+        .out_tx
+        .send(WsMsg::Info(format!("Negotiated audio PT: {audio_pt}")))
+        .await;
+
+    // MediaEngine / Interceptors
+    let mut me = MediaEngine::default();
+
+    me.register_codec(
+        RTCRtpCodecParameters {
+            rtp_codec: codec_cap(video_codec, video_fmtp.as_deref()),
+            payload_type: video_pt,
+        },
+        RtpCodecKind::Video,
+    )
+    .map_err(|e| std::io::Error::other(format!("register video codec: {e}")))?;
+
+    me.register_codec(
+        RTCRtpCodecParameters {
+            rtp_codec: codec_cap(audio_codec, audio_fmtp.as_deref()),
+            payload_type: audio_pt,
+        },
+        RtpCodecKind::Audio,
+    )
+    .map_err(|e| std::io::Error::other(format!("register audio codec: {e}")))?;
+
+    let registry = register_default_interceptors(Registry::new(), &mut me)
+        .map_err(|e| std::io::Error::other(format!("register interceptors: {e}")))?;
+
+    let config = RTCConfigurationBuilder::new()
+        .with_ice_servers(vec![RTCIceServer {
+            urls: ctx.cfg.stun_urls.clone(),
+            ..Default::default()
+        }])
+        .build();
+
+    // The handler is fixed when the peer is built, so the id comes first.
+    let pc_id = ctx.pc_next_id.fetch_add(1, Ordering::Relaxed);
+    let events = Arc::new(PeerEvents {
+        ws_id: ctx.ws_id,
+        pc_id,
+        out_tx: ctx.out_tx.clone(),
+        on_event: ctx.on_event.clone(),
+        dc_next_id: ctx.dc_next_id.clone(),
+        on_dc_message: ctx.on_dc_message.clone(),
+    });
+
+    let peer: Arc<dyn PeerConnection> = {
+        // Holding the lock until the sockets are bound keeps two sessions
+        // from probing the same free port.
+        let _bind = udp_bind_lock().lock().await;
+        let udp_addrs = free_udp_addrs(ctx.cfg.udp_min, ctx.cfg.udp_max)?;
+        Arc::new(
+            PeerConnectionBuilder::new()
+                .with_configuration(config)
+                .with_media_engine(me)
+                .with_interceptor_registry(registry)
+                .with_handler(events)
+                .with_udp_addrs(udp_addrs)
+                .build()
+                .await
+                .map_err(|e| std::io::Error::other(format!("new peer connection: {e}")))?,
+        )
+    };
+
+    *ctx.pc_id_slot.write().await = Some(pc_id);
+
+    // set ctx.pc immediately so early ICE won't hit "peer not ready"
+    *ctx.pc.write().await = Some(peer.clone());
+
+    if let Some(cb) = ctx.on_event.as_ref() {
+        cb(SessionEvent::PcCreated {
+            ws_id: ctx.ws_id,
+            pc_id,
+        });
+    }
+
+    // Tracks (video + audio)
+    let mut video_track = SampleTrack::new(
+        codec_cap(video_codec, video_fmtp.as_deref()),
+        RtpCodecKind::Video,
+        "video",
+        "desktop",
+        video_pt,
+    )?;
+    let video_sender = peer
+        .add_track(video_track.track.clone() as Arc<dyn TrackLocal>)
+        .await
+        .map_err(|e| std::io::Error::other(format!("add video track: {e}")))?;
+
+    let mut audio_track = SampleTrack::new(
+        codec_cap(audio_codec, audio_fmtp.as_deref()),
+        RtpCodecKind::Audio,
+        "audio",
+        "default",
+        audio_pt,
+    )?;
+    let audio_sender = peer
+        .add_track(audio_track.track.clone() as Arc<dyn TrackLocal>)
+        .await
+        .map_err(|e| std::io::Error::other(format!("add audio track: {e}")))?;
+
+    // SDP
+    peer.set_remote_description(
+        RTCSessionDescription::offer(offer_sdp)
+            .map_err(|e| std::io::Error::other(format!("offer parse: {e}")))?,
+    )
+    .await
+    .map_err(|e| std::io::Error::other(format!("set_remote_description: {e}")))?;
+
+    let answer = peer
+        .create_answer(None)
+        .await
+        .map_err(|e| std::io::Error::other(format!("create_answer: {e}")))?;
+    peer.set_local_description(answer)
+        .await
+        .map_err(|e| std::io::Error::other(format!("set_local_description: {e}")))?;
+
+    // Every packet must carry the payload type the answer settled on.
+    video_track.payload_type = negotiated_payload_type(&video_sender, video_pt).await;
+    audio_track.payload_type = negotiated_payload_type(&audio_sender, audio_pt).await;
+
+    if let Some(local) = peer.local_description().await {
+        let _ = ctx.out_tx.send(WsMsg::Answer(local.sdp)).await;
+    }
+
+    Ok((video_track, audio_track))
 }
 
 /// Handle websocket JSON message
@@ -1473,302 +1852,7 @@ async fn handle_ws_json(ctx: WsCtx, text: &str) -> std::io::Result<()> {
             *ctx.track_slot.write().await = None;
             *ctx.audio_track_slot.write().await = None;
 
-            let video_codec = choose_video_codec_from_offer(&offer_sdp);
-            let audio_codec = choose_audio_codec_from_offer(&offer_sdp);
-
-            let video_pt = find_pt_in_offer(&offer_sdp, video_codec.offer_rtpmap_token())
-                .unwrap_or(video_codec.default_pt());
-            let audio_pt = find_pt_in_offer(&offer_sdp, audio_codec.offer_rtpmap_token())
-                .unwrap_or(audio_codec.default_pt());
-
-            let video_fmtp = find_fmtp_in_offer(&offer_sdp, video_pt);
-            let audio_fmtp = find_fmtp_in_offer(&offer_sdp, audio_pt);
-
-            let _ = ctx
-                .out_tx
-                .send(WsMsg::Info(format!(
-                    "Selected video codec: {video_codec:?}"
-                )))
-                .await;
-            let _ = ctx
-                .out_tx
-                .send(WsMsg::Info(format!(
-                    "Selected audio codec: {audio_codec:?}"
-                )))
-                .await;
-            let _ = ctx
-                .out_tx
-                .send(WsMsg::Info(format!("Negotiated video PT: {video_pt}")))
-                .await;
-            let _ = ctx
-                .out_tx
-                .send(WsMsg::Info(format!("Negotiated audio PT: {audio_pt}")))
-                .await;
-
-            // MediaEngine / Interceptors
-            let mut me = MediaEngine::default();
-
-            me.register_codec(
-                RTCRtpCodecParameters {
-                    capability: codec_cap(video_codec, video_fmtp.as_deref()),
-                    payload_type: video_pt,
-                    ..Default::default()
-                },
-                RTPCodecType::Video,
-            )
-            .map_err(|e| std::io::Error::other(format!("register video codec: {e}")))?;
-
-            me.register_codec(
-                RTCRtpCodecParameters {
-                    capability: codec_cap(audio_codec, audio_fmtp.as_deref()),
-                    payload_type: audio_pt,
-                    ..Default::default()
-                },
-                RTPCodecType::Audio,
-            )
-            .map_err(|e| std::io::Error::other(format!("register audio codec: {e}")))?;
-
-            let mut registry = Registry::new();
-            registry =
-                webrtc::api::interceptor_registry::register_default_interceptors(registry, &mut me)
-                    .map_err(|e| std::io::Error::other(format!("register interceptors: {e}")))?;
-
-            // UDP ephemeral ports
-            use webrtc::api::setting_engine::SettingEngine;
-            let udp_network = webrtc::ice::udp_network::UDPNetwork::Ephemeral(
-                webrtc::ice::udp_network::EphemeralUDP::new(ctx.cfg.udp_min, ctx.cfg.udp_max)
-                    .map_err(|e| std::io::Error::other(format!("EphemeralUDP: {e}")))?,
-            );
-            let mut se = SettingEngine::default();
-            se.set_udp_network(udp_network);
-
-            let api = APIBuilder::new()
-                .with_setting_engine(se)
-                .with_media_engine(me)
-                .with_interceptor_registry(registry)
-                .build();
-
-            let config = RTCConfiguration {
-                ice_servers: vec![RTCIceServer {
-                    urls: ctx.cfg.stun_urls.clone(),
-                    ..Default::default()
-                }],
-                ..Default::default()
-            };
-
-            let peer = Arc::new(
-                api.new_peer_connection(config)
-                    .await
-                    .map_err(|e| std::io::Error::other(format!("new_peer_connection: {e}")))?,
-            );
-
-            let pc_id = ctx.pc_next_id.fetch_add(1, Ordering::Relaxed);
-            *ctx.pc_id_slot.write().await = Some(pc_id);
-
-            // set ctx.pc immediately so early ICE won't hit "peer not ready"
-            *ctx.pc.write().await = Some(peer.clone());
-
-            if let Some(cb) = ctx.on_event.as_ref() {
-                cb(SessionEvent::PcCreated {
-                    ws_id: ctx.ws_id,
-                    pc_id,
-                });
-            }
-
-            // WebRTC state events
-            {
-                let out_tx = ctx.out_tx.clone();
-                let on_event = ctx.on_event.clone();
-                let ws_id = ctx.ws_id;
-
-                peer.on_peer_connection_state_change(Box::new(move |s| {
-                    let out_tx = out_tx.clone();
-                    let on_event = on_event.clone();
-                    Box::pin(async move {
-                        info!("pc state: {s:?}");
-                        if let Some(cb) = on_event.as_ref() {
-                            cb(SessionEvent::PcState {
-                                ws_id,
-                                pc_id,
-                                state: s,
-                            });
-                        }
-                        let _ = out_tx.send(WsMsg::Info(format!("PC state: {s:?}"))).await;
-                    })
-                }));
-            }
-            // ICE state events
-            {
-                let out_tx = ctx.out_tx.clone();
-                let on_event = ctx.on_event.clone();
-                let ws_id = ctx.ws_id;
-
-                peer.on_ice_connection_state_change(Box::new(move |s| {
-                    let out_tx = out_tx.clone();
-                    let on_event = on_event.clone();
-                    Box::pin(async move {
-                        info!("ice conn state: {s:?}");
-                        if let Some(cb) = on_event.as_ref() {
-                            cb(SessionEvent::IceState {
-                                ws_id,
-                                pc_id,
-                                state: s,
-                            });
-                        }
-                        let _ = out_tx
-                            .send(WsMsg::Info(format!("ICE conn state: {s:?}")))
-                            .await;
-                    })
-                }));
-            }
-            // ICE gathering state events
-            {
-                let out_tx = ctx.out_tx.clone();
-                let on_event = ctx.on_event.clone();
-                let ws_id = ctx.ws_id;
-
-                peer.on_ice_gathering_state_change(Box::new(move |s| {
-                    let out_tx = out_tx.clone();
-                    let on_event = on_event.clone();
-                    Box::pin(async move {
-                        info!("ice gathering state: {s:?}");
-                        if let Some(cb) = on_event.as_ref() {
-                            cb(SessionEvent::IceGatheringState {
-                                ws_id,
-                                pc_id,
-                                state: s,
-                            });
-                        }
-                        let _ = out_tx
-                            .send(WsMsg::Info(format!("ICE gathering: {s:?}")))
-                            .await;
-                    })
-                }));
-            }
-            // ICE -> outgoing
-            {
-                let out_tx = ctx.out_tx.clone();
-                peer.on_ice_candidate(Box::new(move |c| {
-                    let out_tx = out_tx.clone();
-                    Box::pin(async move {
-                        let Some(c) = c else { return };
-                        match c.to_json() {
-                            Ok(ice_init) => {
-                                let wire = IceCandidateWire {
-                                    candidate: ice_init.candidate,
-                                    sdp_mid: ice_init.sdp_mid,
-                                    sdp_mline_index: ice_init.sdp_mline_index,
-                                    username_fragment: ice_init.username_fragment,
-                                };
-                                let _ = out_tx.send(WsMsg::Ice(wire)).await;
-                            }
-                            Err(e) => {
-                                let _ = out_tx
-                                    .send(WsMsg::Error(format!("ICE to_json failed: {e}")))
-                                    .await;
-                            }
-                        }
-                    })
-                }));
-            }
-
-            // DataChannel
-            {
-                let dc_next_id = ctx.dc_next_id.clone();
-                let on_dc_message = ctx.on_dc_message.clone();
-                let on_event_outer = ctx.on_event.clone();
-                let ws_id = ctx.ws_id;
-
-                peer.on_data_channel(Box::new(move |dc| {
-                    let dc_next_id = dc_next_id.clone();
-                    let on_dc_message = on_dc_message.clone();
-                    let on_event = on_event_outer.clone();
-
-                    Box::pin(async move {
-                        let dc_id = dc_next_id.fetch_add(1, Ordering::Relaxed);
-                        let label = dc.label().to_string();
-
-                        if let Some(cb) = on_event.as_ref() {
-                            cb(SessionEvent::DataChannelOpen {
-                                ws_id,
-                                pc_id,
-                                dc_id,
-                                label: label.clone(),
-                            });
-                        }
-
-                        info!("[dc#{dc_id}] opened label={label}");
-
-                        let cb = on_dc_message.clone();
-                        dc.on_message(Box::new(move |msg: DataChannelMessage| {
-                            let cb = cb.clone();
-                            Box::pin(async move {
-                                let Some(cb) = cb.as_ref() else { return };
-
-                                if msg.is_string {
-                                    match String::from_utf8(msg.data.to_vec()) {
-                                        Ok(s) => cb(dc_id, DataChannelPayload::Text(s)),
-                                        Err(_) => cb(
-                                            dc_id,
-                                            DataChannelPayload::Binary(Bytes::copy_from_slice(
-                                                &msg.data,
-                                            )),
-                                        ),
-                                    }
-                                } else {
-                                    cb(
-                                        dc_id,
-                                        DataChannelPayload::Binary(Bytes::copy_from_slice(
-                                            &msg.data,
-                                        )),
-                                    );
-                                }
-                            })
-                        }));
-                    })
-                }));
-            }
-
-            // Tracks (video + audio)
-            let video_track = Arc::new(TrackLocalStaticSample::new(
-                codec_cap(video_codec, video_fmtp.as_deref()),
-                "video".to_string(),
-                "desktop".to_string(),
-            ));
-            peer.add_track(video_track.clone())
-                .await
-                .map_err(|e| std::io::Error::other(format!("add video track: {e}")))?;
-
-            let audio_track = Arc::new(TrackLocalStaticSample::new(
-                codec_cap(audio_codec, audio_fmtp.as_deref()),
-                "audio".to_string(),
-                "default".to_string(),
-            ));
-            peer.add_track(audio_track.clone())
-                .await
-                .map_err(|e| std::io::Error::other(format!("add audio track: {e}")))?;
-
-            // SDP
-            peer.set_remote_description(
-                webrtc::peer_connection::sdp::session_description::RTCSessionDescription::offer(
-                    offer_sdp,
-                )
-                .map_err(|e| std::io::Error::other(format!("offer parse: {e}")))?,
-            )
-            .await
-            .map_err(|e| std::io::Error::other(format!("set_remote_description: {e}")))?;
-
-            let answer = peer
-                .create_answer(None)
-                .await
-                .map_err(|e| std::io::Error::other(format!("create_answer: {e}")))?;
-            peer.set_local_description(answer)
-                .await
-                .map_err(|e| std::io::Error::other(format!("set_local_description: {e}")))?;
-
-            if let Some(local) = peer.local_description().await {
-                let _ = ctx.out_tx.send(WsMsg::Answer(local.sdp)).await;
-            }
+            let (video_track, audio_track) = negotiate(&ctx, offer_sdp).await?;
 
             // Start per-user runtime
             let ctrl_now = ctx.ctrl_state.read().await.clone();
@@ -1794,11 +1878,12 @@ async fn handle_ws_json(ctx: WsCtx, text: &str) -> std::io::Result<()> {
 
         WsMsg::Ice(cand) => {
             if let Some(peer) = ctx.pc.read().await.as_ref() {
-                let c = webrtc::ice_transport::ice_candidate::RTCIceCandidateInit {
+                let c = RTCIceCandidateInit {
                     candidate: cand.candidate,
                     sdp_mid: cand.sdp_mid,
                     sdp_mline_index: cand.sdp_mline_index,
                     username_fragment: cand.username_fragment,
+                    ..Default::default()
                 };
                 if let Err(e) = peer.add_ice_candidate(c).await {
                     let _ = ctx
@@ -2147,12 +2232,10 @@ impl HAsyncService for Server {
 
         let (out_tx, mut out_rx) = mpsc::channel::<WsMsg>(64);
 
-        let pc: Arc<RwLock<Option<Arc<RTCPeerConnection>>>> = Arc::new(RwLock::new(None));
+        let pc: Arc<RwLock<Option<Arc<dyn PeerConnection>>>> = Arc::new(RwLock::new(None));
         let runtime: Arc<RwLock<Option<StreamRuntime>>> = Arc::new(RwLock::new(None));
-        let track_slot: Arc<RwLock<Option<Arc<TrackLocalStaticSample>>>> =
-            Arc::new(RwLock::new(None));
-        let audio_track_slot: Arc<RwLock<Option<Arc<TrackLocalStaticSample>>>> =
-            Arc::new(RwLock::new(None));
+        let track_slot: Arc<RwLock<Option<SampleTrack>>> = Arc::new(RwLock::new(None));
+        let audio_track_slot: Arc<RwLock<Option<SampleTrack>>> = Arc::new(RwLock::new(None));
         let ctrl_state: Arc<RwLock<StreamCtrl>> = Arc::new(RwLock::new(self.initial_ctrl.clone()));
         let pc_id_slot: Arc<RwLock<Option<u64>>> = Arc::new(RwLock::new(None));
 

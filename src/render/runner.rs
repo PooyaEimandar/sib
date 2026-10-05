@@ -87,6 +87,11 @@ pub fn run(example: impl Example) -> RenderResult<()> {
     console_error_panic_hook::set_once();
 
     let event_loop = EventLoop::<RenderEvent>::with_user_event().build()?;
+    // Every frame requests the next one, so the loop only has to wake for
+    // events. In a browser `Poll` would spin the main thread between frames.
+    #[cfg(target_arch = "wasm32")]
+    event_loop.set_control_flow(ControlFlow::Wait);
+    #[cfg(not(target_arch = "wasm32"))]
     event_loop.set_control_flow(ControlFlow::Poll);
 
     #[cfg(not(target_arch = "wasm32"))]
