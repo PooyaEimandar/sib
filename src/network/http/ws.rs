@@ -102,8 +102,9 @@ pub(crate) fn is_h1_ws_upgrade(method: &http::Method, headers: &HeaderMap) -> bo
     upgrade_ok && conn_ok && key_ok && ver_ok
 }
 
-/// Try parse one complete WS frame from `buf`.
-/// If incomplete, returns Ok(None).
+/// Try to parse one client-to-server WS frame from `buf`.
+/// If incomplete, returns Ok(None). Protocol errors are terminal: the caller
+/// must close the connection without processing any further frames.
 pub(crate) fn try_parse_frame(buf: &mut BytesMut) -> io::Result<Option<Frame>> {
     // Need at least 2 bytes
     if buf.len() < 2 {
@@ -124,6 +125,15 @@ pub(crate) fn try_parse_frame(buf: &mut BytesMut) -> io::Result<Option<Frame>> {
     let fin = (b0 & 0x80) != 0;
     let op = OpCode::from_u8(b0 & 0x0F)?;
     let masked = (b1 & 0x80) != 0;
+    // RFC 6455 section 5.1 requires masking on every client frame, including
+    // empty/control frames and TLS connections. Reject at the base header so
+    // an invalid peer cannot make us wait for or buffer its declared payload.
+    if !masked {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "client WebSocket frames must be masked",
+        ));
+    }
 
     let mut idx = 2usize;
     let mut len7 = (b1 & 0x7F) as u64;
@@ -241,6 +251,7 @@ pub(crate) fn encode_frame(op: OpCode, payload: &Bytes, fin: bool, mask: Option<
     out.freeze()
 }
 
+/// Read a client-to-server frame. On an error, the caller must close the connection.
 #[cfg(feature = "net-h2-server")]
 pub async fn ws_read_from_io<R>(
     io: &mut R,
@@ -296,3 +307,7 @@ pub(crate) fn close_payload(code: u16, reason: &str) -> Bytes {
     out.put_slice(reason.as_bytes());
     out.freeze()
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/network/http/ws_tests.rs"]
+mod tests;
