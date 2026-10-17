@@ -151,9 +151,66 @@ fn serve_fn<S: Session>(
         _ => EncodingType::None,
     };
 
+    let can_compress = file_info.size >= min_bytes_on_the_fly_size
+        && file_info.size <= max_bytes_on_the_fly_size
+        && !range_requested;
+    let encoding = available_file_encoding(&file_info, encoding, can_compress);
+
     let mut rsp_headers = http::HeaderMap::new();
     rsp_headers.insert(header::VARY, file_vary_header(allow_ranges));
-    let mut applied_encoding: Option<&'static str> = None;
+    let applied_encoding = match encoding {
+        EncodingType::None | EncodingType::NotAcceptable => None,
+        _ => Some(encoding.as_str()),
+    };
+
+    let etag_to_send = rep_etag(&file_info.etag, applied_encoding);
+
+    // Normal request errors (such as 406) win; otherwise If-Match must run
+    // before If-None-Match, range handling and on-the-fly compression.
+    if encoding != EncodingType::NotAcceptable
+        && session.req_header(&header::IF_MATCH).is_some()
+        && !if_match_satisfied(&session.req_headers(), &etag_to_send)
+    {
+        let mut headers = get_error_headers!(close_connection_on_failed);
+        headers.insert(header::VARY, file_vary_header(allow_ranges));
+        return session
+            .status_code(StatusCode::PRECONDITION_FAILED)
+            .headers(&headers)?
+            .body(Bytes::new())
+            .eom();
+    }
+
+    if encoding != EncodingType::NotAcceptable
+        && let Some(header_val) = session.req_header(&header::IF_NONE_MATCH)
+        && if_none_match_contains(&header_val, &etag_to_send)
+    {
+        if let Some(enc) = applied_encoding {
+            rsp_headers.insert(
+                header::CONTENT_ENCODING,
+                HeaderValue::from_str(enc).map_err(std::io::Error::other)?,
+            );
+        }
+        if !disable_content_length {
+            rsp_headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("0"));
+        }
+        rsp_headers.extend([
+            (
+                header::ETAG,
+                HeaderValue::from_str(&etag_to_send).map_err(std::io::Error::other)?,
+            ),
+            (
+                header::LAST_MODIFIED,
+                HeaderValue::from_str(&file_info.last_modified_str)
+                    .map_err(std::io::Error::other)?,
+            ),
+        ]);
+
+        return session
+            .status_code(StatusCode::NOT_MODIFIED)
+            .headers(&rsp_headers)?
+            .body(Bytes::new())
+            .eom();
+    }
 
     let (file_path, total_size) = match encoding {
         // Serve file directly
@@ -175,14 +232,10 @@ fn serve_fn<S: Session>(
             if let Some(br_info) = file_info.br_info {
                 // we already have the br info in the cache
                 rsp_headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("br"));
-                applied_encoding = Some("br");
                 br_info
             } else {
                 // On-the-fly only if size is within [min,max] AND not a Range request
-                if file_info.size >= min_bytes_on_the_fly_size
-                    && file_info.size <= max_bytes_on_the_fly_size
-                    && !range_requested
-                {
+                if can_compress {
                     let (status, body) = compress_then_respond(
                         &mut rsp_headers,
                         &file_info,
@@ -207,12 +260,8 @@ fn serve_fn<S: Session>(
             if let Some(gz_info) = file_info.gz_info {
                 // we already have the gz info in the cache
                 rsp_headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
-                applied_encoding = Some("gzip");
                 gz_info
-            } else if file_info.size >= min_bytes_on_the_fly_size
-                && file_info.size <= max_bytes_on_the_fly_size
-                && !range_requested
-            {
+            } else if can_compress {
                 // On-the-fly only if size is within [min,max] AND not a Range request
                 let (status, body) = compress_then_respond(
                     &mut rsp_headers,
@@ -237,12 +286,8 @@ fn serve_fn<S: Session>(
             if let Some(zstd_info) = file_info.zstd_info {
                 // we already have the zstd info in the cache
                 rsp_headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("zstd"));
-                applied_encoding = Some("zstd");
                 zstd_info
-            } else if file_info.size >= min_bytes_on_the_fly_size
-                && file_info.size <= max_bytes_on_the_fly_size
-                && !range_requested
-            {
+            } else if can_compress {
                 // On-the-fly only if size is within [min,max] AND not a Range request
                 let (status, body) = compress_then_respond(
                     &mut rsp_headers,
@@ -273,39 +318,6 @@ fn serve_fn<S: Session>(
             .as_ref()
             .map_or(ByteRange::Ignored, |h| parse_byte_range(h, total_size))
     };
-
-    let etag_to_send = rep_etag(&file_info.etag, applied_encoding);
-
-    if let Some(header_val) = session.req_header(&header::IF_NONE_MATCH)
-        && if_none_match_contains(&header_val, &etag_to_send)
-    {
-        if let Some(enc) = applied_encoding {
-            rsp_headers.insert(
-                header::CONTENT_ENCODING,
-                HeaderValue::from_str(enc).map_err(std::io::Error::other)?,
-            );
-        }
-        if !disable_content_length {
-            rsp_headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("0"));
-        }
-        rsp_headers.extend([
-            (
-                header::ETAG,
-                HeaderValue::from_str(&etag_to_send).map_err(std::io::Error::other)?,
-            ),
-            (
-                header::LAST_MODIFIED,
-                HeaderValue::from_str(&file_info.last_modified_str)
-                    .map_err(std::io::Error::other)?,
-            ),
-        ]);
-
-        return session
-            .status_code(StatusCode::NOT_MODIFIED)
-            .headers(&rsp_headers)?
-            .body(Bytes::new())
-            .eom();
-    }
 
     if range == ByteRange::Unsatisfiable {
         let mut headers = get_error_headers!(close_connection_on_failed);
@@ -425,9 +437,68 @@ async fn serve_fn_async<S: Session>(
         _ => EncodingType::None,
     };
 
+    let can_compress = file_info.size >= min_bytes_on_the_fly_size
+        && file_info.size <= max_bytes_on_the_fly_size
+        && !range_requested;
+    let encoding = available_file_encoding(&file_info, encoding, can_compress);
+
     let mut rsp_headers = http::HeaderMap::new();
     rsp_headers.insert(header::VARY, file_vary_header(allow_ranges));
-    let mut applied_encoding: Option<&'static str> = None;
+    let applied_encoding = match encoding {
+        EncodingType::None | EncodingType::NotAcceptable => None,
+        _ => Some(encoding.as_str()),
+    };
+
+    let etag_to_send = rep_etag(&file_info.etag, applied_encoding);
+
+    // Normal request errors (such as 406) win; otherwise If-Match must run
+    // before If-None-Match, range handling and on-the-fly compression.
+    if encoding != EncodingType::NotAcceptable
+        && session.req_header(&header::IF_MATCH).is_some()
+        && !if_match_satisfied(&session.req_headers(), &etag_to_send)
+    {
+        let mut headers = get_error_headers!(close_connection_on_failed);
+        headers.insert(header::VARY, file_vary_header(allow_ranges));
+        return session
+            .status_code(StatusCode::PRECONDITION_FAILED)
+            .headers(&headers)?
+            .body(Bytes::new())
+            .eom_async()
+            .await;
+    }
+
+    if encoding != EncodingType::NotAcceptable
+        && let Some(header_val) = session.req_header(&header::IF_NONE_MATCH)
+        && if_none_match_contains(&header_val, &etag_to_send)
+    {
+        if let Some(enc) = applied_encoding {
+            rsp_headers.insert(
+                header::CONTENT_ENCODING,
+                HeaderValue::from_str(enc).map_err(std::io::Error::other)?,
+            );
+        }
+        if !disable_content_length {
+            rsp_headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("0"));
+        }
+        rsp_headers.extend([
+            (
+                header::ETAG,
+                HeaderValue::from_str(&etag_to_send).map_err(std::io::Error::other)?,
+            ),
+            (
+                header::LAST_MODIFIED,
+                HeaderValue::from_str(&file_info.last_modified_str)
+                    .map_err(std::io::Error::other)?,
+            ),
+        ]);
+
+        return session
+            .status_code(StatusCode::NOT_MODIFIED)
+            .headers(&rsp_headers)?
+            .body(Bytes::new())
+            .eom_async()
+            .await;
+    }
 
     let (file_path, total_size) = match encoding {
         // Serve file directly
@@ -451,14 +522,10 @@ async fn serve_fn_async<S: Session>(
             if let Some(br_info) = file_info.br_info {
                 // we already have the br info in the cache
                 rsp_headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("br"));
-                applied_encoding = Some("br");
                 br_info
             } else {
                 // On-the-fly only if size is within [min,max] AND not a Range request
-                if file_info.size >= min_bytes_on_the_fly_size
-                    && file_info.size <= max_bytes_on_the_fly_size
-                    && !range_requested
-                {
+                if can_compress {
                     let (status, body) = compress_then_respond_async(
                         &mut rsp_headers,
                         &file_info,
@@ -485,12 +552,8 @@ async fn serve_fn_async<S: Session>(
             if let Some(gz_info) = file_info.gz_info {
                 // we already have the gz info in the cache
                 rsp_headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
-                applied_encoding = Some("gzip");
                 gz_info
-            } else if file_info.size >= min_bytes_on_the_fly_size
-                && file_info.size <= max_bytes_on_the_fly_size
-                && !range_requested
-            {
+            } else if can_compress {
                 // On-the-fly only if size is within [min,max] AND not a Range request
                 let (status, body) = compress_then_respond_async(
                     &mut rsp_headers,
@@ -517,12 +580,8 @@ async fn serve_fn_async<S: Session>(
             if let Some(zstd_info) = file_info.zstd_info {
                 // we already have the zstd info in the cache
                 rsp_headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("zstd"));
-                applied_encoding = Some("zstd");
                 zstd_info
-            } else if file_info.size >= min_bytes_on_the_fly_size
-                && file_info.size <= max_bytes_on_the_fly_size
-                && !range_requested
-            {
+            } else if can_compress {
                 let (status, body) = compress_then_respond_async(
                     &mut rsp_headers,
                     &file_info,
@@ -554,40 +613,6 @@ async fn serve_fn_async<S: Session>(
             .as_ref()
             .map_or(ByteRange::Ignored, |h| parse_byte_range(h, total_size))
     };
-
-    let etag_to_send = rep_etag(&file_info.etag, applied_encoding);
-
-    if let Some(header_val) = session.req_header(&header::IF_NONE_MATCH)
-        && if_none_match_contains(&header_val, &etag_to_send)
-    {
-        if let Some(enc) = applied_encoding {
-            rsp_headers.insert(
-                header::CONTENT_ENCODING,
-                HeaderValue::from_str(enc).map_err(std::io::Error::other)?,
-            );
-        }
-        if !disable_content_length {
-            rsp_headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("0"));
-        }
-        rsp_headers.extend([
-            (
-                header::ETAG,
-                HeaderValue::from_str(&etag_to_send).map_err(std::io::Error::other)?,
-            ),
-            (
-                header::LAST_MODIFIED,
-                HeaderValue::from_str(&file_info.last_modified_str)
-                    .map_err(std::io::Error::other)?,
-            ),
-        ]);
-
-        return session
-            .status_code(StatusCode::NOT_MODIFIED)
-            .headers(&rsp_headers)?
-            .body(Bytes::new())
-            .eom_async()
-            .await;
-    }
 
     if range == ByteRange::Unsatisfiable {
         let mut headers = get_error_headers!(close_connection_on_failed);
@@ -1168,6 +1193,82 @@ pub async fn serve_h3<S: Session>(
     }
 
     result
+}
+
+// Compression may fall back to identity when no sidecar exists and the file
+// is outside the on-the-fly size limits. Preconditions must use that actual ETag.
+fn available_file_encoding(
+    file_info: &FileInfo,
+    encoding: EncodingType,
+    can_compress: bool,
+) -> EncodingType {
+    match encoding {
+        EncodingType::Br { .. } if file_info.br_info.is_none() && !can_compress => {
+            EncodingType::None
+        }
+        EncodingType::Gzip { .. } if file_info.gz_info.is_none() && !can_compress => {
+            EncodingType::None
+        }
+        EncodingType::Zstd { .. } if file_info.zstd_info.is_none() && !can_compress => {
+            EncodingType::None
+        }
+        other => other,
+    }
+}
+
+// Called only after confirming that the file exists. Repeated field lines form
+// one list. Invalid syntax fails closed, including a wildcard mixed with tags.
+fn if_match_satisfied(headers: &HeaderMap, target: &str) -> bool {
+    let mut value = Vec::new();
+    for (index, header) in headers.get_all(header::IF_MATCH).iter().enumerate() {
+        if index != 0 {
+            value.push(b',');
+        }
+        value.extend_from_slice(header.as_bytes());
+    }
+    if !headers.contains_key(header::IF_MATCH) {
+        return true;
+    }
+    let mut rest = value.trim_ascii();
+    if rest == b"*" {
+        return true;
+    }
+    let mut matched = false;
+    while !rest.is_empty() {
+        rest = rest.trim_ascii_start();
+        // HTTP list syntax permits empty members.
+        if let Some(tail) = rest.strip_prefix(b",") {
+            rest = tail;
+            continue;
+        }
+        if rest.is_empty() {
+            break;
+        }
+        let weak = rest.starts_with(b"W/");
+        if weak {
+            rest = &rest[2..];
+        }
+        if !rest.starts_with(b"\"") {
+            return false;
+        }
+        let Some(end) = rest[1..].iter().position(|&b| b == b'"').map(|i| i + 1) else {
+            return false;
+        };
+        // Entity tags are opaque bytes, not quoted strings: commas and backslashes
+        // inside them are literal. Spaces, controls and DEL are not valid etagc.
+        if !rest[1..end]
+            .iter()
+            .all(|&b| b == 0x21 || (0x23..=0x7e).contains(&b) || b >= 0x80)
+        {
+            return false;
+        }
+        matched |= !weak && &rest[..=end] == target.as_bytes();
+        rest = rest[end + 1..].trim_ascii_start();
+        if !rest.is_empty() && !rest.starts_with(b",") {
+            return false;
+        }
+    }
+    matched
 }
 
 #[inline]

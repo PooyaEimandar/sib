@@ -152,7 +152,7 @@ where
     fn req_headers(&self) -> http::HeaderMap {
         let mut map = http::HeaderMap::new();
         for (name, value) in self.headers.iter() {
-            map.insert(name.clone(), value.clone());
+            map.append(name.clone(), value.clone());
         }
         map
     }

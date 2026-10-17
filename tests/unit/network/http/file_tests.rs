@@ -512,3 +512,35 @@ fn safe_join_confines_to_root() {
     // NUL byte rejected.
     assert_eq!(safe_join(root, "a\0b"), None);
 }
+
+#[test]
+fn if_match_parses_opaque_tags_and_rejects_weak_or_malformed_matches() {
+    use http::{HeaderMap, HeaderValue, header};
+    assert!(super::if_match_satisfied(&HeaderMap::new(), "\"current\""));
+    for (value, target, expected) in [
+        ("*", "W/\"current\"", true),
+        ("\"current\"", "W/\"current\"", false),
+        ("W/\"current\"", "\"current\"", false),
+        ("\"\"", "\"\"", true),
+        ("\"Current\"", "\"current\"", false),
+        (" ,\t\"current\",, ", "\"current\"", true),
+        (r#""a,b\c", "other""#, r#""a,b\c""#, true),
+        ("\"étag\"", "\"étag\"", true),
+        ("\"current\" garbage", "\"current\"", false),
+        ("\"current\", W/\"unfinished", "\"current\"", false),
+        ("\"current\", \"bad tag\"", "\"current\"", false),
+        ("\"current\", *", "\"current\"", false),
+        (",,", "\"current\"", false),
+    ] {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::IF_MATCH,
+            HeaderValue::from_bytes(value.as_bytes()).unwrap(),
+        );
+        assert_eq!(
+            super::if_match_satisfied(&headers, target),
+            expected,
+            "{value:?} vs {target:?}"
+        );
+    }
+}

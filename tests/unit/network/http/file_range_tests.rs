@@ -18,8 +18,14 @@ impl Fixture {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root =
-            std::env::temp_dir().join(format!("sib-file-ranges-{}-{unique}", std::process::id()));
+        // Wall-clock timestamps can coincide across concurrent test threads.
+        static NEXT_FIXTURE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = NEXT_FIXTURE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "sib-file-ranges-{}-{unique}-{id}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&root).unwrap();
         for (directory, extension, compressed) in [
             ("gz", "gz", super::encode_gzip(b"0123456789", 1).unwrap()),
             (
@@ -598,3 +604,6 @@ async fn full_downloads_keep_compression_and_range_validators_use_original_bytes
         }
     }
 }
+
+#[path = "file_precondition_tests.rs"]
+mod precondition_tests;
