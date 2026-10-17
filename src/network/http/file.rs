@@ -47,7 +47,8 @@ macro_rules! get_file_info {
                 // up-to-date entry
                 info.clone()
             } else {
-                // outdated entry, regenerate
+                // Release the read guard before regeneration writes to the same cache shard.
+                drop(info);
                 generate_file_info($path, &$meta, modified, $file_cache)
             }
         } else {

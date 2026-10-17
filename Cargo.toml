@@ -43,7 +43,7 @@ bytemuck = { version = "1.25.2", optional = true, default-features = false, feat
 base64 = { version = "0.23.1", optional = true, default-features = false, features = [
     "std",
 ] }
-boring = { version = "5.2.0", optional = true }
+boring = { version = "5.3.0", optional = true }
 brotli = { version = "9.0.0", optional = true, default-features = false, features = [
     "std",
 ] }
@@ -63,7 +63,7 @@ futures-lite = { version = "2.6.1", optional = true, default-features = false, f
     "race",
     "std",
 ] }
-glam = { version = "0.34.0", optional = true, default-features = false, features = [
+glam = { version = "0.34.1", optional = true, default-features = false, features = [
     "std",
 ] }
 glib = { version = "0.22.10", optional = true, default-features = false, features = [
@@ -95,12 +95,12 @@ once_cell = { version = "1.21.4", optional = true, default-features = false, fea
 pollster = { version = "1.0.1", optional = true }
 rand = { version = "0.10.3", optional = true }
 rcgen = { version = "0.14.10", optional = true }
-rtc = { version = "0.21.0", optional = true, default-features = false }
+rtc = { version = "0.21.1", optional = true, default-features = false }
 rdkafka = { version = "0.39.0", optional = true, features = [
     "cmake-build",
     "ssl",
 ] }
-rustls = { version = "0.23.45", optional = true, default-features = false, features = [
+rustls = { version = "0.23.46", optional = true, default-features = false, features = [
     "aws_lc_rs",
     "prefer-post-quantum",
     "std",
@@ -110,11 +110,11 @@ rustls-pki-types = { version = "1.15.1", optional = true, default-features = fal
 serde = { version = "1.0.229", optional = true, default-features = false, features = [
     "std",
 ] }
-serde_json = { version = "1.0.151", optional = true, default-features = false, features = [
+serde_json = { version = "1.0.154", optional = true, default-features = false, features = [
     "std",
 ] }
 sha1 = { version = "0.11.0", optional = true, default-features = false }
-sha2 = { version = "0.11.0", optional = true }
+sha2 = { version = "0.11.1", optional = true }
 socket2 = { version = "0.6.5", optional = true, default-features = false, features = [
     "all",
 ] }
@@ -127,7 +127,7 @@ tracing = { version = "0.1.44", default-features = false, features = [
 skrifa = { version = "0.44.0", optional = true, default-features = false, features = [
     "std",
 ] }
-tokio = { version = "1.53.2", optional = true, default-features = false, features = [
+tokio = { version = "1.53.3", optional = true, default-features = false, features = [
     "fs",
     "io-util",
     "macros",
@@ -141,7 +141,7 @@ tokio-rustls = { version = "0.26.6", optional = true, default-features = false, 
     "tls12",
 ] }
 tokio-util = { version = "0.7.19", optional = true, default-features = false }
-webrtc = { version = "0.21.0", optional = true }
+webrtc = { version = "0.21.1", optional = true }
 web-time = { version = "1.1.0", optional = true }
 wgpu = { version = "30.0.1", optional = true }
 winit = { version = "0.30.13", optional = true }

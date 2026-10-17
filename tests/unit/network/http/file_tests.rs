@@ -23,6 +23,111 @@ fn ktx2_uses_the_registered_image_media_type() {
     assert_eq!(mime.essence_str(), "image/ktx2");
 }
 
+#[cfg(feature = "net-h2-server")]
+#[test]
+fn cached_file_refresh_does_not_deadlock() {
+    use crate::network::http::{file, h1_session_async::H1SessionAsync};
+    use bytes::Bytes;
+    use http::{HeaderMap, Method, Uri, Version};
+    use std::{
+        fs::{File, FileTimes},
+        path::PathBuf,
+        sync::mpsc,
+        time::{Duration, SystemTime},
+    };
+    use tokio::io::AsyncReadExt;
+
+    struct Fixture(PathBuf);
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    async fn response(path: &PathBuf, cache: &file::FileCache) -> String {
+        // The small response fits in the buffer without a concurrent reader.
+        let (mut server, mut client) = tokio::io::duplex(16 * 1024);
+        let mut session = H1SessionAsync::new(
+            "127.0.0.1".parse().unwrap(),
+            &mut server,
+            (Method::GET, Version::HTTP_11),
+            Uri::from_static("/asset.txt"),
+            (HeaderMap::new(), Bytes::new()),
+            false,
+            false,
+        );
+        file::serve_h1_async(
+            &mut session,
+            path,
+            cache,
+            &[EncodingType::None],
+            (0, 8192),
+            (8192, 1024),
+            ("inline", true),
+        )
+        .await
+        .unwrap();
+        drop(session);
+        drop(server);
+        let mut bytes = Vec::new();
+        client.read_to_end(&mut bytes).await.unwrap();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    let unique = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "sib-file-cache-refresh-{}-{unique}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&root).unwrap();
+    // Keep cleanup on the test thread, including when the worker times out.
+    let fixture = Fixture(root);
+    let path = fixture.0.join("asset.txt");
+    let (done_tx, done_rx) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let cache = file::FileCache::new();
+                for (version, body) in ["original", "updated asset contents"].iter().enumerate() {
+                    std::fs::write(&path, body).unwrap();
+                    // Explicit times avoid sleeps and filesystem timestamp precision races.
+                    let modified = SystemTime::UNIX_EPOCH
+                        + Duration::from_secs(1_700_000_000 + version as u64 * 2);
+                    File::options()
+                        .write(true)
+                        .open(&path)
+                        .unwrap()
+                        .set_times(FileTimes::new().set_modified(modified))
+                        .unwrap();
+
+                    // Exercise insertion/refresh, followed by an unchanged cache hit.
+                    for _ in 0..2 {
+                        let response = response(&path, &cache).await;
+                        let (headers, received_body) = response.split_once("\r\n\r\n").unwrap();
+                        assert!(headers.starts_with("HTTP/1.1 200 OK\r\n"));
+                        assert_eq!(received_body, *body);
+                        assert!(headers.lines().any(|line| {
+                            line.eq_ignore_ascii_case(&format!("content-length: {}", body.len()))
+                        }));
+                    }
+                }
+            });
+        done_tx.send(()).unwrap();
+    });
+
+    // A Tokio timeout cannot interrupt a synchronous DashMap lock on its own thread.
+    done_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("serving a changed cached file must complete without deadlocking");
+    worker.join().unwrap();
+}
+
 #[cfg(feature = "net-h1-server")]
 impl crate::network::http::session::HService for FileService {
     fn call<S: Session>(&self, session: &mut S) -> std::io::Result<()> {
