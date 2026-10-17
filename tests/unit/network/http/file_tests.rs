@@ -411,31 +411,69 @@ fn file_server() {
 
 #[test]
 fn parse_byte_range_clamps_and_never_overflows() {
+    use super::{ByteRange::*, parse_byte_range};
     use http::HeaderValue;
-    let total = 1000u64;
 
-    // end == u64::MAX must not overflow (was a debug panic / release wrap to 0..0);
-    // the end clamps to total_size.
-    let h = HeaderValue::from_static("bytes=0-18446744073709551615");
-    assert_eq!(super::parse_byte_range(&h, total), Some(0..1000));
+    for (header, total, expected) in [
+        ("bytes=0-18446744073709551615", 1000, Satisfiable(0..1000)),
+        ("bytes=0-18446744073709551616", 1000, Satisfiable(0..1000)),
+        ("bytes=10-20", 1000, Satisfiable(10..21)),
+        ("bytes=0-5000", 1000, Satisfiable(0..1000)),
+        ("bytes=990-", 1000, Satisfiable(990..1000)),
+        ("bytes=-500", 1000, Satisfiable(500..1000)),
+        ("bytes=-5000", 1000, Satisfiable(0..1000)),
+        ("bytes=-18446744073709551616", 1000, Satisfiable(0..1000)),
+        ("BYTES=0-0", 1000, Satisfiable(0..1)),
+        ("bytes=0001-0002", 1000, Satisfiable(1..3)),
+        ("bytes=1000-1001", 1000, Unsatisfiable),
+        ("bytes=1000-", 1000, Unsatisfiable),
+        ("bytes=18446744073709551616-", 1000, Unsatisfiable),
+        ("bytes=-0", 1000, Unsatisfiable),
+        ("bytes=0-0", 0, Unsatisfiable),
+        ("bytes=0-", 0, Unsatisfiable),
+        ("bytes=-1", 0, Ignored),
+        ("bytes=-0", 0, Unsatisfiable),
+        (
+            "bytes=18446744073709551614-18446744073709551615",
+            u64::MAX,
+            Satisfiable((u64::MAX - 1)..u64::MAX),
+        ),
+    ] {
+        assert_eq!(
+            parse_byte_range(&HeaderValue::from_str(header).unwrap(), total),
+            expected,
+            "{header}"
+        );
+    }
+}
 
-    // normal inclusive range -> exclusive end (+1).
-    let h = HeaderValue::from_static("bytes=10-20");
-    assert_eq!(super::parse_byte_range(&h, total), Some(10..21));
+#[test]
+fn malformed_and_unsupported_ranges_are_ignored() {
+    use super::{ByteRange, parse_byte_range};
+    use http::HeaderValue;
 
-    // end beyond EOF clamps to total_size.
-    let h = HeaderValue::from_static("bytes=0-5000");
-    assert_eq!(super::parse_byte_range(&h, total), Some(0..1000));
-
-    // open-ended and suffix forms.
-    let h = HeaderValue::from_static("bytes=990-");
-    assert_eq!(super::parse_byte_range(&h, total), Some(990..1000));
-    let h = HeaderValue::from_static("bytes=-500");
-    assert_eq!(super::parse_byte_range(&h, total), Some(500..1000));
-
-    // start past EOF is rejected.
-    let h = HeaderValue::from_static("bytes=1000-1001");
-    assert_eq!(super::parse_byte_range(&h, total), None);
+    for header in [
+        "bytes=10-bad",
+        "bytes=bad-10",
+        "bytes=10-9",
+        "bytes=10--20",
+        "bytes=+1-2",
+        "bytes=1-+2",
+        "bytes=-+2",
+        "bytes=1 -2",
+        "bytes=1- 2",
+        "bytes=-",
+        "bytes=",
+        "bytes=1",
+        "bytes=0-1,4-5",
+        "items=0-1",
+    ] {
+        assert_eq!(
+            parse_byte_range(&HeaderValue::from_str(header).unwrap(), 1000),
+            ByteRange::Ignored,
+            "{header}"
+        );
+    }
 }
 
 #[test]

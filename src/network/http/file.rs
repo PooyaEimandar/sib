@@ -117,7 +117,7 @@ fn serve_fn<S: Session>(
     let (close_connection_on_failed, disable_content_length) =
         close_connection_on_failed_and_disable_content_length;
 
-    let range_header = if allow_ranges {
+    let range_header = if allow_ranges && session.req_method() == http::Method::GET {
         session.req_header(&header::RANGE)
     } else {
         None
@@ -246,7 +246,15 @@ fn serve_fn<S: Session>(
         }
     };
 
-    let range = range_header.and_then(|h| parse_byte_range(&h, total_size));
+    // Conditional ranges need reliable representation validators. Until that
+    // validation is available, serve the complete representation for If-Range.
+    let range = if session.req_header(&header::IF_RANGE).is_some() {
+        ByteRange::Ignored
+    } else {
+        range_header
+            .as_ref()
+            .map_or(ByteRange::Ignored, |h| parse_byte_range(h, total_size))
+    };
 
     let etag_to_send = rep_etag(&file_info.etag, applied_encoding);
 
@@ -282,6 +290,22 @@ fn serve_fn<S: Session>(
             .eom();
     }
 
+    if range == ByteRange::Unsatisfiable {
+        let mut headers = get_error_headers!(close_connection_on_failed);
+        headers.insert(
+            header::CONTENT_RANGE,
+            HeaderValue::from_str(&format!("bytes */{total_size}"))
+                .map_err(std::io::Error::other)?,
+        );
+        headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+        headers.insert(header::VARY, HeaderValue::from_static("Accept-Encoding"));
+        return session
+            .status_code(StatusCode::RANGE_NOT_SATISFIABLE)
+            .headers(&headers)?
+            .body(Bytes::new())
+            .eom();
+    }
+
     rsp_headers.extend([
         (
             header::CONTENT_TYPE,
@@ -302,7 +326,7 @@ fn serve_fn<S: Session>(
         (header::VARY, HeaderValue::from_static("Accept-Encoding")),
     ]);
 
-    let (status, start, end) = if let Some(r) = range {
+    let (status, start, end) = if let ByteRange::Satisfiable(r) = range {
         rsp_headers.insert(
             header::CONTENT_RANGE,
             HeaderValue::from_str(&format!("bytes {}-{}/{}", r.start, r.end - 1, total_size))
@@ -360,7 +384,7 @@ async fn serve_fn_async<S: Session>(
     let (close_connection_on_failed, disable_content_length) =
         close_connection_on_failed_and_disable_content_length;
 
-    let range_header = if allow_ranges {
+    let range_header = if allow_ranges && session.req_method() == http::Method::GET {
         session.req_header(&header::RANGE)
     } else {
         None
@@ -496,7 +520,15 @@ async fn serve_fn_async<S: Session>(
         }
     };
 
-    let range = range_header.and_then(|h| parse_byte_range(&h, total_size));
+    // Conditional ranges need reliable representation validators. Until that
+    // validation is available, serve the complete representation for If-Range.
+    let range = if session.req_header(&header::IF_RANGE).is_some() {
+        ByteRange::Ignored
+    } else {
+        range_header
+            .as_ref()
+            .map_or(ByteRange::Ignored, |h| parse_byte_range(h, total_size))
+    };
 
     let etag_to_send = rep_etag(&file_info.etag, applied_encoding);
 
@@ -533,6 +565,23 @@ async fn serve_fn_async<S: Session>(
             .await;
     }
 
+    if range == ByteRange::Unsatisfiable {
+        let mut headers = get_error_headers!(close_connection_on_failed);
+        headers.insert(
+            header::CONTENT_RANGE,
+            HeaderValue::from_str(&format!("bytes */{total_size}"))
+                .map_err(std::io::Error::other)?,
+        );
+        headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+        headers.insert(header::VARY, HeaderValue::from_static("Accept-Encoding"));
+        return session
+            .status_code(StatusCode::RANGE_NOT_SATISFIABLE)
+            .headers(&headers)?
+            .body(Bytes::new())
+            .eom_async()
+            .await;
+    }
+
     rsp_headers.extend([
         (
             header::CONTENT_TYPE,
@@ -553,7 +602,7 @@ async fn serve_fn_async<S: Session>(
         (header::VARY, HeaderValue::from_static("Accept-Encoding")),
     ]);
 
-    let (status, start, end) = if let Some(r) = range {
+    let (status, start, end) = if let ByteRange::Satisfiable(r) = range {
         rsp_headers.insert(
             header::CONTENT_RANGE,
             HeaderValue::from_str(&format!("bytes {}-{}/{}", r.start, r.end - 1, total_size))
@@ -1324,36 +1373,70 @@ fn mime_for_path(path: &Path) -> Mime {
     }
 }
 
-fn parse_byte_range(header: &HeaderValue, total_size: u64) -> Option<Range<u64>> {
-    let header_str = header.to_str().ok()?;
-    if !header_str.starts_with("bytes=") {
-        return None;
+#[derive(Debug, PartialEq, Eq)]
+enum ByteRange {
+    // Malformed, unknown-unit and multipart ranges are ignored: send the full response.
+    Ignored,
+    Unsatisfiable,
+    Satisfiable(Range<u64>),
+}
+
+fn parse_byte_range(header: &HeaderValue, total_size: u64) -> ByteRange {
+    let Ok(value) = header.to_str() else {
+        return ByteRange::Ignored;
+    };
+    let Some((unit, ranges)) = value.trim().split_once('=') else {
+        return ByteRange::Ignored;
+    };
+    if !unit.eq_ignore_ascii_case("bytes") || ranges.contains(',') {
+        return ByteRange::Ignored;
     }
+    let Some((first, last)) = ranges.trim().split_once('-') else {
+        return ByteRange::Ignored;
+    };
 
-    let ranges_part = header_str["bytes=".len()..].trim();
-
-    // If multiple ranges are requested (comma present), we don't support
-    // multipart/byteranges yet, treat as "no range" so caller sends 200 OK.
-    if ranges_part.contains(',') {
-        return None;
-    }
-
-    let (start_str, end_str) = ranges_part.split_once('-')?;
-
-    match (start_str.parse::<u64>().ok(), end_str.parse::<u64>().ok()) {
-        // "bytes=0-1445"
-        (Some(start), Some(end)) if start < total_size && start <= end => {
-            // the end is clamped to total_size regardless
-            Some(start..end.saturating_add(1).min(total_size))
+    // Only decimal digits are valid. Saturate arbitrarily large numerals rather
+    // than treating a malformed/overflowing end as an omitted end or suffix.
+    fn number(value: &str) -> Option<u64> {
+        if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
         }
-        // "bytes=6008766-"
-        (Some(start), None) if start < total_size => Some(start..total_size),
-        // "bytes=-500"
-        (None, Some(suffix_len)) if suffix_len != 0 && suffix_len <= total_size => {
-            Some(total_size - suffix_len..total_size)
-        }
-        _ => None,
+        Some(value.parse().unwrap_or(u64::MAX))
     }
+
+    if first.is_empty() {
+        let Some(length) = number(last) else {
+            return ByteRange::Ignored;
+        };
+        if length == 0 {
+            return ByteRange::Unsatisfiable;
+        }
+        // A nonzero suffix of an empty representation is valid. Ignore it instead
+        // of emitting an impossible Content-Range with an inclusive end of -1.
+        if total_size == 0 {
+            return ByteRange::Ignored;
+        }
+        return ByteRange::Satisfiable(total_size.saturating_sub(length)..total_size);
+    }
+
+    let Some(start) = number(first) else {
+        return ByteRange::Ignored;
+    };
+    let end = if last.is_empty() {
+        total_size
+    } else {
+        let Some(last) = number(last) else {
+            return ByteRange::Ignored;
+        };
+        if last < start {
+            return ByteRange::Ignored;
+        }
+        last.saturating_add(1).min(total_size)
+    };
+    if start >= total_size {
+        return ByteRange::Unsatisfiable;
+    }
+    ByteRange::Satisfiable(start..end)
 }
 
 /// Safely map a request path (e.g. from `Session::req_path()`) to a filesystem path
@@ -1737,3 +1820,7 @@ pub async fn serve_h3_streaming<S: Session>(
 #[cfg(test)]
 #[path = "../../../tests/unit/network/http/file_tests.rs"]
 mod tests;
+
+#[cfg(all(test, feature = "net-h2-server"))]
+#[path = "../../../tests/unit/network/http/file_range_tests.rs"]
+mod range_tests;
