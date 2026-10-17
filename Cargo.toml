@@ -74,7 +74,7 @@ gstreamer = { version = "0.25.4", optional = true }
 gstreamer-app = { version = "0.25.2", optional = true }
 gstreamer-video = { version = "0.25.4", optional = true }
 glyphon = { version = "0.12.0", optional = true }
-h2 = { version = "0.4.19", optional = true, default-features = false }
+h2 = { version = "0.4.20", optional = true, default-features = false }
 heapless = { version = "0.9.3", optional = true, default-features = false }
 hex = { version = "0.4.3", optional = true }
 http = { version = "1.5.0", optional = true, default-features = false, features = [
@@ -122,9 +122,7 @@ tracing = { version = "0.1.44", default-features = false, features = [
     "attributes",
     "std",
 ] }
-# The newest skrifa that swash (glyphon -> cosmic-text) accepts. A newer one
-# would ship a second copy of the font parser in every wasm build.
-skrifa = { version = "0.44.0", optional = true, default-features = false, features = [
+skrifa = { version = "0.48.0", optional = true, default-features = false, features = [
     "std",
 ] }
 tokio = { version = "1.53.3", optional = true, default-features = false, features = [
@@ -140,7 +138,7 @@ tokio-rustls = { version = "0.26.6", optional = true, default-features = false, 
     "aws-lc-rs",
     "tls12",
 ] }
-tokio-util = { version = "0.7.19", optional = true, default-features = false }
+tokio-util = { version = "0.7.20", optional = true, default-features = false }
 webrtc = { version = "0.21.1", optional = true }
 web-time = { version = "1.1.0", optional = true }
 wgpu = { version = "30.0.1", optional = true }
@@ -148,7 +146,7 @@ winit = { version = "0.30.13", optional = true }
 wtransport = { version = "0.7.2", optional = true, default-features = false, features = [
     "ring",
 ] }
-zstd = { version = "0.14.0", optional = true }
+zstd = { version = "0.14.3", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 console_error_panic_hook = { version = "0.1.7", optional = true }
@@ -246,6 +244,7 @@ net-wt-server = [
     "dashmap",
     "rustls-pki-types",
     "tokio",
+    "tokio-util",
     "wtransport",
 ]
 
@@ -302,10 +301,10 @@ reqwest = { version = "0.13.5", default-features = false, features = [
     "http2",
     "http3",
 ] }
-sha2 = { version = "0.11.0" }
+sha2 = { version = "0.11.1" }
 tungstenite = { version = "0.30.0" }
 native-tls = "0.2.18"
-tokio = { version = "1.53.2", default-features = false, features = [
+tokio = { version = "1.53.3", default-features = false, features = [
     "macros",
     "rt",
 ] }

@@ -385,6 +385,307 @@ fn make_quinn_server(
     Ok(server)
 }
 
+#[cfg(all(
+    feature = "net-h2-server",
+    feature = "rt-tokio",
+    not(feature = "rt-glommio")
+))]
+async fn serve_h2_listener<F: HFactory>(
+    factory: std::sync::Arc<F>,
+    listener: tokio::net::TcpListener,
+    tls_acceptor: tokio_rustls::TlsAcceptor,
+    h2_cfg: std::sync::Arc<H2Config>,
+    shard_id: usize,
+    shutdown_shard: tokio_util::sync::CancellationToken,
+) -> std::io::Result<()> {
+    use std::sync::Arc;
+    use tokio::{io::AsyncWriteExt, sync::Semaphore};
+    // Local helper (shareable across threads/tasks)
+    let is_tls_eof_no_close_notify: Arc<dyn Fn(&std::io::Error) -> bool + Send + Sync> =
+        Arc::new(|e: &std::io::Error| -> bool {
+            let msg = e.to_string();
+            matches!(e.kind(), std::io::ErrorKind::UnexpectedEof)
+                || msg.contains("peer closed connection without sending TLS close_notify")
+                || msg.contains("unexpected eof")
+                || msg.contains("UnexpectedEof")
+        });
+
+    tracing::info!(
+        "Tokio H2/TLS shard {shard_id} listening on {}",
+        listener
+            .local_addr()
+            .map_err(|e| std::io::Error::other(format!("local_addr: {e}")))?,
+    );
+
+    let sem = Arc::new(Semaphore::new(h2_cfg.max_sessions as usize));
+    let local = tokio::task::LocalSet::new();
+
+    local
+        .run_until(async move {
+            loop {
+                let accept_res = tokio::select! {
+                    _ = shutdown_shard.cancelled() => {
+                        tracing::info!("h2 shard {shard_id} shutdown requested");
+                        return Ok::<(), std::io::Error>(());
+                    }
+                    r = listener.accept() => r
+                };
+
+                let (mut stream, peer_addr) = match accept_res {
+                    Ok(x) => x,
+                    Err(e) => {
+                        error!("accept error (shard {shard_id}): {e}");
+                        continue;
+                    }
+                };
+
+                let _ = stream.set_nodelay(true);
+                let peer_ip = peer_addr.ip();
+
+                // Try-acquire a session slot
+                let permit = match sem.clone().try_acquire_owned() {
+                    Ok(p) => p,
+                    Err(_) => {
+                        let _ = stream.shutdown().await;
+                        continue;
+                    }
+                };
+
+                let tls_acceptor = tls_acceptor.clone();
+                let factory = factory.clone();
+                let h2_cfg_cloned = h2_cfg.clone();
+                let is_tls_eof_no_close_notify = is_tls_eof_no_close_notify.clone();
+                let shutdown_shard_cloned = shutdown_shard.clone();
+
+                tokio::task::spawn_local(async move {
+                    let _permit = permit;
+
+                    // check for cancellation before starting TLS handshake
+                    let mut stream_opt = Some(stream);
+                    let tls_result = tokio::select! {
+                        _ = shutdown_shard_cloned.cancelled() => {
+                            if let Some(mut s) = stream_opt.take() {
+                                let _ = s.shutdown().await;
+                            }
+                            return;
+                        }
+
+                        r = async {
+                            let s = stream_opt.take().expect("stream already taken");
+                            tls_acceptor.accept(s).await
+                        } => r
+                    };
+
+                    // TLS handshake
+                    let tls_stream = match tls_result {
+                        Ok(s) => s,
+                        Err(e) => {
+                            error!("TLS handshake error (shard {shard_id}) from {peer_addr}: {e}");
+                            return;
+                        }
+                    };
+
+                    // check negotiated ALPN
+                    let negotiated = tls_stream
+                        .get_ref()
+                        .1
+                        .alpn_protocol()
+                        .map(|v| String::from_utf8_lossy(v).to_string());
+
+                    match negotiated.as_deref() {
+                        Some("h2") => {
+                            use crate::network::http::h2_server::serve_h2;
+
+                            let service = factory.async_service(shard_id);
+                            match serve_h2(
+                                tls_stream,
+                                service,
+                                &h2_cfg_cloned,
+                                peer_ip,
+                                shutdown_shard_cloned,
+                            )
+                            .await
+                            {
+                                Ok(()) => {}
+                                Err(e) if (*is_tls_eof_no_close_notify)(&e) => {}
+                                Err(e) => {
+                                    error!(
+                                        "h2 serve error (shard {shard_id}) from {peer_addr}: {e}"
+                                    );
+                                }
+                            }
+                        }
+                        _ => {
+                            use crate::network::http::h2_server::serve_h1;
+
+                            let service = factory.async_service(shard_id);
+                            match serve_h1(
+                                tls_stream,
+                                service,
+                                &h2_cfg_cloned,
+                                peer_ip,
+                                shutdown_shard_cloned,
+                            )
+                            .await
+                            {
+                                Ok(()) => {}
+                                Err(e) if (*is_tls_eof_no_close_notify)(&e) => {}
+                                Err(e) => {
+                                    error!(
+                                        "h1 serve error (shard {shard_id}) from {peer_addr}: {e}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+
+            #[allow(unreachable_code)]
+            Ok::<(), std::io::Error>(())
+        })
+        .await
+}
+
+#[cfg(feature = "net-wt-server")]
+fn make_wt_identity(chain_cert_key: (&[u8], &[u8])) -> std::io::Result<wtransport::Identity> {
+    // Load full certificate chain (PEM or DER)
+    fn load_cert_chain_pem(pem: &[u8]) -> std::io::Result<Vec<Vec<u8>>> {
+        use rustls_pki_types::{CertificateDer, pem::PemObject};
+        let mut ders = Vec::new();
+        for item in CertificateDer::pem_slice_iter(pem) {
+            let der =
+                item.map_err(|e| std::io::Error::other(format!("Invalid cert in PEM: {e}")))?;
+            ders.push(der.to_vec());
+        }
+        if ders.is_empty() {
+            Err(std::io::Error::other("No certificates found in PEM"))
+        } else {
+            Ok(ders)
+        }
+    }
+
+    fn load_cert_chain_der_or_pem(bytes: &[u8]) -> std::io::Result<Vec<Vec<u8>>> {
+        // Heuristic: if it looks like PEM, parse as PEM; otherwise assume DER (single cert)
+        let is_pem = bytes.starts_with(b"-----BEGIN");
+        if is_pem {
+            load_cert_chain_pem(bytes)
+        } else {
+            // Single DER cert
+            Ok(vec![bytes.to_vec()])
+        }
+    }
+
+    fn load_private_key_der_or_pem(bytes: &[u8]) -> std::io::Result<wtransport::tls::PrivateKey> {
+        use rustls_pki_types::{PrivatePkcs8KeyDer, pem::PemObject};
+
+        if bytes.starts_with(b"-----BEGIN") {
+            // Try PKCS#8
+            {
+                let keys = PrivatePkcs8KeyDer::pem_slice_iter(bytes)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| std::io::Error::other(format!("Invalid PKCS#8 PEM key: {e}")))?;
+                if let Some(k) = keys.into_iter().next() {
+                    return Ok(wtransport::tls::PrivateKey::from_der_pkcs8(
+                        k.secret_pkcs8_der().to_vec(),
+                    ));
+                }
+            }
+            Err(std::io::Error::other("No usable private key found in PEM"))
+        } else {
+            // Assume DER PKCS#8 by default; you can add a toggle if you need PKCS#1 here
+            Ok(wtransport::tls::PrivateKey::from_der_pkcs8(bytes.to_vec()))
+        }
+    }
+
+    let cert_chain_ders = load_cert_chain_der_or_pem(chain_cert_key.0)?;
+    // Build wtransport cert chain
+    let chain = {
+        let mut v = Vec::with_capacity(cert_chain_ders.len());
+        for der in cert_chain_ders {
+            let c = wtransport::tls::Certificate::from_der(der)
+                .map_err(|e| std::io::Error::other(format!("Certificate DER error: {e}")))?;
+            v.push(c);
+        }
+        wtransport::tls::CertificateChain::new(v)
+    };
+
+    let key = load_private_key_der_or_pem(chain_cert_key.1)?;
+
+    Ok(wtransport::Identity::new(chain, key))
+}
+
+#[cfg(feature = "net-wt-server")]
+async fn serve_wt_endpoint<F: HFactory>(
+    factory: std::sync::Arc<F>,
+    endpoint: wtransport::Endpoint<wtransport::endpoint::endpoint_side::Server>,
+    wt_cfg: std::sync::Arc<crate::network::http::wt::WTConfig>,
+    shard_id: usize,
+    shutdown: tokio_util::sync::CancellationToken,
+) -> std::io::Result<()> {
+    use std::sync::Arc;
+    use tokio::sync::Semaphore;
+    tracing::info!(
+        "WT shard {shard_id} listening on {}",
+        endpoint.local_addr()?
+    );
+
+    let sem = Arc::new(Semaphore::new(wt_cfg.max_sessions));
+    let local = tokio::task::LocalSet::new();
+
+    local
+        .run_until(async {
+            loop {
+                let incoming = tokio::select! {
+                    biased;
+                    _ = shutdown.cancelled() => break,
+                    incoming = endpoint.accept() => incoming,
+                };
+
+                // Admission control: cheap non-blocking gate
+                let Ok(permit) = sem.clone().try_acquire_owned() else {
+                    // No capacity: drop incoming fast; client will see refusal/timeout early
+                    continue;
+                };
+
+                let service = factory.wt_service(shard_id);
+                tokio::task::spawn_local(async move {
+                    let _permit = permit;
+
+                    let session_req = match incoming.await {
+                        Ok(s) => s,
+                        Err(e) => {
+                            error!("WT session request error: {e}");
+                            return;
+                        }
+                    };
+
+                    // Accept the WT session (Extended CONNECT)
+                    let conn = match session_req.accept().await {
+                        Ok(c) => c,
+                        Err(e) => {
+                            error!("WT accept error: {e}");
+                            return;
+                        }
+                    };
+
+                    // Hand off to your service
+                    use crate::network::http::wt::{WtService, WtSession};
+                    let mut svc = service;
+                    let mut sess = WtSession::new(conn);
+                    if let Err(e) = svc.call(&mut sess).await {
+                        error!("WT service error: {e}");
+                    }
+                });
+            }
+        })
+        .await;
+    endpoint.close(wtransport::VarInt::from_u32(0), b"server shutdown");
+    drop(local);
+    endpoint.wait_idle().await;
+    Ok(())
+}
+
 pub trait HFactory: Send + Sync + Sized + 'static {
     #[cfg(feature = "net-h1-server")]
     type Service: crate::network::http::session::HService + Send;
@@ -412,6 +713,72 @@ pub trait HFactory: Send + Sync + Sized + 'static {
     // create a new webtransport service for each connection
     #[cfg(feature = "net-wt-server")]
     fn wt_service(&self, id: usize) -> Self::WtService;
+
+    /// Serve HTTP/2 and HTTP/1.1 (including WebSocket upgrades) on the caller's Tokio runtime.
+    ///
+    /// This method owns a LocalSet for non-Send service futures, but creates no threads or
+    /// runtimes. Drive it alongside other services with `tokio::join!` or `try_join!`.
+    /// `num_of_shards` is only used by `start_h2_tls`; this serves the supplied listener.
+    /// Cancellation stops acceptance and drops active connection tasks before returning.
+    #[cfg(all(
+        feature = "net-h2-server",
+        feature = "rt-tokio",
+        not(feature = "rt-glommio")
+    ))]
+    #[allow(async_fn_in_trait)] // Service futures intentionally support non-Send state.
+    async fn serve_h2_tls(
+        self,
+        listener: tokio::net::TcpListener,
+        chain_cert_key: (Option<&[u8]>, &[u8], &[u8]),
+        h2_cfg: H2Config,
+        shutdown: tokio_util::sync::CancellationToken,
+    ) -> std::io::Result<()> {
+        let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(make_rustls_config(
+            &chain_cert_key,
+            h2_cfg.alpn_protocols.clone(),
+            h2_cfg.client_ca_pem.as_deref(),
+        )?));
+        serve_h2_listener(
+            std::sync::Arc::new(self),
+            listener,
+            acceptor,
+            std::sync::Arc::new(h2_cfg),
+            0,
+            shutdown,
+        )
+        .await
+    }
+
+    /// Serve WebTransport on the caller's Tokio runtime using an already-bound UDP socket.
+    ///
+    /// Like `serve_h2_tls`, this owns a LocalSet, not a runtime or worker thread.
+    /// `num_of_shards` is only used by `start_wt_tls`; this serves the supplied socket.
+    /// Cancellation closes the endpoint, drops service tasks, and waits for QUIC cleanup.
+    #[cfg(feature = "net-wt-server")]
+    #[allow(async_fn_in_trait)] // Service futures intentionally support non-Send state.
+    async fn serve_wt_tls(
+        self,
+        socket: std::net::UdpSocket,
+        chain_cert_key: (&[u8], &[u8]),
+        wt_cfg: crate::network::http::wt::WTConfig,
+        shutdown: tokio_util::sync::CancellationToken,
+    ) -> std::io::Result<()> {
+        let identity = make_wt_identity(chain_cert_key)?;
+        let config = wtransport::ServerConfig::builder()
+            .with_bind_socket(socket)
+            .with_identity(identity)
+            .keep_alive_interval(Some(wt_cfg.keep_alive_interval))
+            .build();
+        let endpoint = wtransport::Endpoint::server(config)?;
+        serve_wt_endpoint(
+            std::sync::Arc::new(self),
+            endpoint,
+            std::sync::Arc::new(wt_cfg),
+            0,
+            shutdown,
+        )
+        .await
+    }
 
     /// Start the http service
     #[cfg(feature = "net-h1-server")]
@@ -756,7 +1123,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         Ok(())
     }
 
-    /// Start the h2 service with TLS based on tokio on non-linux OS
+    /// Start the H2/TLS service on dedicated Tokio shard threads.
     #[cfg(all(
         feature = "net-h2-server",
         feature = "rt-tokio",
@@ -770,7 +1137,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         shutdown: tokio_util::sync::CancellationToken,
     ) -> std::io::Result<()> {
         use std::sync::Arc;
-        use tokio::{io::AsyncWriteExt, net::TcpListener, sync::Semaphore};
+        use tokio::net::TcpListener;
 
         // Resolve bind address once
         let socket_addr = resolve_addr!(addr)?;
@@ -811,16 +1178,6 @@ pub trait HFactory: Send + Sync + Sized + 'static {
             }
         }
 
-        // Local helper (shareable across threads/tasks)
-        let is_tls_eof_no_close_notify: Arc<dyn Fn(&std::io::Error) -> bool + Send + Sync> =
-            Arc::new(|e: &std::io::Error| -> bool {
-                let msg = e.to_string();
-                matches!(e.kind(), std::io::ErrorKind::UnexpectedEof)
-                    || msg.contains("peer closed connection without sending TLS close_notify")
-                    || msg.contains("unexpected eof")
-                    || msg.contains("UnexpectedEof")
-            });
-
         // One OS thread per shard, each with a current-thread Tokio runtime + LocalSet
         let mut handles = Vec::with_capacity(std_listeners.len());
 
@@ -828,143 +1185,35 @@ pub trait HFactory: Send + Sync + Sized + 'static {
             let tls_acceptor = tls_acceptor.clone();
             let factory = factory.clone();
             let h2_cfg = h2_cfg_arc.clone();
-            let is_tls_eof_no_close_notify = is_tls_eof_no_close_notify.clone();
             let shutdown_shard = shutdown.clone();
 
             handles.push(
-            std::thread::Builder::new()
-                .name(format!("h2-shard-{shard_id}"))
-                .spawn(move || -> std::io::Result<()> {
-                    let rt = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()?;
+                std::thread::Builder::new()
+                    .name(format!("h2-shard-{shard_id}"))
+                    .spawn(move || -> std::io::Result<()> {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()?;
 
-                    rt.block_on(async move {
-                        let listener = TcpListener::from_std(std_listener)
-                            .map_err(|e| std::io::Error::other(format!("tokio from_std: {e}")))?;
+                        rt.block_on(async move {
+                            let listener = TcpListener::from_std(std_listener).map_err(|e| {
+                                std::io::Error::other(format!("tokio from_std: {e}"))
+                            })?;
 
-                        tracing::info!(
-                            "Tokio H2/TLS shard {shard_id} listening on {}",
-                            listener
-                                .local_addr()
-                                .map_err(|e| std::io::Error::other(format!("local_addr: {e}")))?,
-                        );
-
-                        let sem = Arc::new(Semaphore::new(h2_cfg.max_sessions as usize));
-                        let local = tokio::task::LocalSet::new();
-
-                        local
-                            .run_until(async move {
-                                loop {
-                                    let accept_res = tokio::select! {
-                                        _ = shutdown_shard.cancelled() => {
-                                            tracing::info!("h2 shard {shard_id} shutdown requested");
-                                            return Ok::<(), std::io::Error>(());
-                                        }
-                                        r = listener.accept() => r
-                                    };
-
-                                    let (mut stream, peer_addr) = match accept_res {
-                                        Ok(x) => x,
-                                        Err(e) => {
-                                            error!("accept error (shard {shard_id}): {e}");
-                                            continue;
-                                        }
-                                    };
-
-                                    let _ = stream.set_nodelay(true);
-                                    let peer_ip = peer_addr.ip();
-
-                                    // Try-acquire a session slot
-                                    let permit = match sem.clone().try_acquire_owned() {
-                                        Ok(p) => p,
-                                        Err(_) => {
-                                            let _ = stream.shutdown().await;
-                                            continue;
-                                        }
-                                    };
-
-                                    let tls_acceptor = tls_acceptor.clone();
-                                    let factory = factory.clone();
-                                    let h2_cfg_cloned = h2_cfg.clone();
-                                    let is_tls_eof_no_close_notify = is_tls_eof_no_close_notify.clone();
-                                    let shutdown_shard_cloned = shutdown_shard.clone();
-
-                                    tokio::task::spawn_local(async move {
-                                        let _permit = permit;
-
-                                        // check for cancellation before starting TLS handshake
-                                        let mut stream_opt = Some(stream);
-                                        let tls_result = tokio::select! {
-                                            _ = shutdown_shard_cloned.cancelled() => {
-                                                if let Some(mut s) = stream_opt.take() {
-                                                    let _ = s.shutdown().await;
-                                                }
-                                                return;
-                                            }
-
-                                            r = async {
-                                                let s = stream_opt.take().expect("stream already taken");
-                                                tls_acceptor.accept(s).await
-                                            } => r
-                                        };
-
-                                        // TLS handshake
-                                        let tls_stream = match tls_result {
-                                            Ok(s) => s,
-                                            Err(e) => {
-                                                error!(
-                                                    "TLS handshake error (shard {shard_id}) from {peer_addr}: {e}"
-                                                );
-                                                return;
-                                            }
-                                        };
-
-                                        // check negotiated ALPN
-                                        let negotiated = tls_stream
-                                            .get_ref()
-                                            .1
-                                            .alpn_protocol()
-                                            .map(|v| String::from_utf8_lossy(v).to_string());
-
-                                        match negotiated.as_deref() {
-                                            Some("h2") => {
-                                                use crate::network::http::h2_server::serve_h2;
-
-                                                let service = factory.async_service(shard_id);
-                                                match serve_h2(tls_stream, service, &h2_cfg_cloned, peer_ip, shutdown_shard_cloned).await {
-                                                    Ok(()) => {}
-                                                    Err(e) if (*is_tls_eof_no_close_notify)(&e) => {}
-                                                    Err(e) => {
-                                                        error!("h2 serve error (shard {shard_id}) from {peer_addr}: {e}");
-                                                    }
-                                                }
-                                            }
-                                            _ => {
-                                                use crate::network::http::h2_server::serve_h1;
-
-                                                let service = factory.async_service(shard_id);
-                                                match serve_h1(tls_stream, service, &h2_cfg_cloned, peer_ip, shutdown_shard_cloned).await {
-                                                    Ok(()) => {}
-                                                    Err(e) if (*is_tls_eof_no_close_notify)(&e) => {}
-                                                    Err(e) => {
-                                                        error!("h1 serve error (shard {shard_id}) from {peer_addr}: {e}");
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    });
-                                }
-
-                                #[allow(unreachable_code)]
-                                Ok::<(), std::io::Error>(())
-                            })
+                            serve_h2_listener(
+                                factory,
+                                listener,
+                                tls_acceptor,
+                                h2_cfg,
+                                shard_id,
+                                shutdown_shard,
+                            )
                             .await
-                    })?;
+                        })?;
 
-                    Ok(())
-                })?,
-        );
+                        Ok(())
+                    })?,
+            );
         }
 
         // block by joining shard threads
@@ -1231,74 +1480,8 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         wt_cfg: crate::network::http::wt::WTConfig,
     ) -> std::io::Result<()> {
         use std::sync::Arc;
-        use tokio::sync::Semaphore;
 
-        // Load full certificate chain (PEM or DER)
-        fn load_cert_chain_pem(pem: &[u8]) -> std::io::Result<Vec<Vec<u8>>> {
-            use rustls_pki_types::{CertificateDer, pem::PemObject};
-            let mut ders = Vec::new();
-            for item in CertificateDer::pem_slice_iter(pem) {
-                let der =
-                    item.map_err(|e| std::io::Error::other(format!("Invalid cert in PEM: {e}")))?;
-                ders.push(der.to_vec());
-            }
-            if ders.is_empty() {
-                Err(std::io::Error::other("No certificates found in PEM"))
-            } else {
-                Ok(ders)
-            }
-        }
-
-        fn load_cert_chain_der_or_pem(bytes: &[u8]) -> std::io::Result<Vec<Vec<u8>>> {
-            // Heuristic: if it looks like PEM, parse as PEM; otherwise assume DER (single cert)
-            let is_pem = bytes.starts_with(b"-----BEGIN");
-            if is_pem {
-                load_cert_chain_pem(bytes)
-            } else {
-                // Single DER cert
-                Ok(vec![bytes.to_vec()])
-            }
-        }
-
-        fn load_private_key_der_or_pem(
-            bytes: &[u8],
-        ) -> std::io::Result<wtransport::tls::PrivateKey> {
-            use rustls_pki_types::{PrivatePkcs8KeyDer, pem::PemObject};
-
-            if bytes.starts_with(b"-----BEGIN") {
-                // Try PKCS#8
-                {
-                    let keys = PrivatePkcs8KeyDer::pem_slice_iter(bytes)
-                        .collect::<Result<Vec<_>, _>>()
-                        .map_err(|e| {
-                            std::io::Error::other(format!("Invalid PKCS#8 PEM key: {e}"))
-                        })?;
-                    if let Some(k) = keys.into_iter().next() {
-                        return Ok(wtransport::tls::PrivateKey::from_der_pkcs8(
-                            k.secret_pkcs8_der().to_vec(),
-                        ));
-                    }
-                }
-                Err(std::io::Error::other("No usable private key found in PEM"))
-            } else {
-                // Assume DER PKCS#8 by default; you can add a toggle if you need PKCS#1 here
-                Ok(wtransport::tls::PrivateKey::from_der_pkcs8(bytes.to_vec()))
-            }
-        }
-
-        let cert_chain_ders = load_cert_chain_der_or_pem(chain_cert_key.0)?;
-        // Build wtransport cert chain
-        let chain = {
-            let mut v = Vec::with_capacity(cert_chain_ders.len());
-            for der in cert_chain_ders {
-                let c = wtransport::tls::Certificate::from_der(der)
-                    .map_err(|e| std::io::Error::other(format!("Certificate DER error: {e}")))?;
-                v.push(c);
-            }
-            wtransport::tls::CertificateChain::new(v)
-        };
-
-        let key = load_private_key_der_or_pem(chain_cert_key.1)?;
+        let identity = make_wt_identity(chain_cert_key)?;
 
         // Resolve address coherently
         let bind = match addr.to_socket_addrs()?.next() {
@@ -1319,15 +1502,12 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         for shard_id in 0..num_shards {
             let factory = factory.clone();
             let wt_cfg = wt_cfg_arc.clone();
-            let chain = chain.clone();
-            let key = key.clone_key();
+            let identity = identity.clone_identity();
 
             handles.push(
                 std::thread::Builder::new()
                     .name(format!("wt-shard-{shard_id}"))
                     .spawn(move || -> std::io::Result<()> {
-                        let identity = wtransport::Identity::new(chain, key);
-                        // Clone the identity for each thread
                         let rt = tokio::runtime::Builder::new_current_thread()
                             .enable_all()
                             .build()?;
@@ -1345,55 +1525,14 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                                 ))
                             })?;
 
-                            tracing::info!("WT shard {shard_id} listening on {bind}");
-
-                            let sem = Arc::new(Semaphore::new(wt_cfg.max_sessions));
-                            let local = tokio::task::LocalSet::new();
-
-                            local
-                                .run_until(async move {
-                                    loop {
-                                        let incoming = endpoint.accept().await;
-
-                                        // Admission control: cheap non-blocking gate
-                                        let Ok(permit) = sem.clone().try_acquire_owned() else {
-                                            // No capacity: drop incoming fast; client will see refusal/timeout early
-                                            continue;
-                                        };
-
-                                        let service = factory.wt_service(shard_id);
-                                        tokio::task::spawn_local(async move {
-                                            let _permit = permit;
-
-                                            let session_req = match incoming.await {
-                                                Ok(s) => s,
-                                                Err(e) => {
-                                                    error!("WT session request error: {e}");
-                                                    return;
-                                                }
-                                            };
-
-                                            // Accept the WT session (Extended CONNECT)
-                                            let conn = match session_req.accept().await {
-                                                Ok(c) => c,
-                                                Err(e) => {
-                                                    error!("WT accept error: {e}");
-                                                    return;
-                                                }
-                                            };
-
-                                            // Hand off to your service
-                                            use crate::network::http::wt::{WtService, WtSession};
-                                            let mut svc = service;
-                                            let mut sess = WtSession::new(conn);
-                                            if let Err(e) = svc.call(&mut sess).await {
-                                                error!("WT service error: {e}");
-                                            }
-                                        });
-                                    }
-                                })
-                                .await;
-                            Ok(())
+                            serve_wt_endpoint(
+                                factory,
+                                endpoint,
+                                wt_cfg,
+                                shard_id,
+                                tokio_util::sync::CancellationToken::new(),
+                            )
+                            .await
                         })
                     })?,
             );
@@ -1459,3 +1598,13 @@ pub(crate) fn parse_authority(s: &str) -> Option<(String, Option<u16>)> {
 #[cfg(test)]
 #[path = "../../../tests/unit/network/http/server_tests.rs"]
 pub mod tests;
+
+#[cfg(all(
+    test,
+    feature = "rt-tokio",
+    not(feature = "rt-glommio"),
+    feature = "net-h2-server",
+    feature = "net-wt-server"
+))]
+#[path = "../../../tests/unit/network/http/shared_runtime_tests.rs"]
+mod shared_runtime_tests;
