@@ -20,11 +20,32 @@ impl Fixture {
             .as_nanos();
         let root =
             std::env::temp_dir().join(format!("sib-file-ranges-{}-{unique}", std::process::id()));
-        std::fs::create_dir_all(root.join("gz")).unwrap();
-        std::fs::write(root.join("asset.txt"), b"0123456789").unwrap();
+        for (directory, extension, compressed) in [
+            ("gz", "gz", super::encode_gzip(b"0123456789", 1).unwrap()),
+            (
+                "br",
+                "br",
+                super::encode_brotli(b"0123456789", 4096, 1, 22).unwrap(),
+            ),
+            (
+                "zstd",
+                "zstd",
+                super::encode_zstd(b"0123456789", 1).unwrap(),
+            ),
+        ] {
+            std::fs::create_dir_all(root.join(directory)).unwrap();
+            for name in ["asset.txt", "asset.wasm", "asset.pak"] {
+                std::fs::write(root.join(name), b"0123456789").unwrap();
+                std::fs::write(
+                    root.join(directory).join(format!("{name}.{extension}")),
+                    &compressed,
+                )
+                .unwrap();
+            }
+        }
+        std::fs::write(root.join("plain.txt"), b"0123456789").unwrap();
+        std::fs::write(root.join("texture.ktx2"), b"0123456789").unwrap();
         std::fs::write(root.join("empty.txt"), b"").unwrap();
-        let gzip = super::encode_gzip(b"0123456789", 1).unwrap();
-        std::fs::write(root.join("gz/asset.txt.gz"), gzip).unwrap();
         Self {
             root,
             cache: FileCache::new(),
@@ -91,8 +112,16 @@ async fn response(
 ) -> Response {
     tokio::time::timeout(Duration::from_secs(10), async {
         let path = fixture.root.join(file);
-        let encodings = [EncodingType::Gzip { level: 1 }];
-        let thresholds = (u64::MAX, u64::MAX); // Only sidecars, no on-the-fly compression.
+        let encodings = [
+            EncodingType::Br {
+                buffer_size: 4096,
+                quality: 1,
+                lgwindow: 22,
+            },
+            EncodingType::Gzip { level: 1 },
+            EncodingType::Zstd { level: 1 },
+        ];
+        let thresholds = (1, 64 * 1024); // Exercise on-the-fly fallback for plain.txt too.
         let streaming = (64 * 1024, 1024);
         let options = ("inline", allow_ranges);
         match protocol {
@@ -359,7 +388,7 @@ async fn empty_files_and_encoded_representations_have_safe_range_errors() {
         let mut headers = range_headers("bytes=99999-");
         headers.insert(header::ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
         let r = response(&fixture, protocol, "asset.txt", Method::GET, headers, true).await;
-        let size = std::fs::metadata(fixture.root.join("gz/asset.txt.gz"))
+        let size = std::fs::metadata(fixture.root.join("asset.txt"))
             .unwrap()
             .len();
         assert_eq!(r.status, StatusCode::RANGE_NOT_SATISFIABLE);
@@ -367,5 +396,205 @@ async fn empty_files_and_encoded_representations_have_safe_range_errors() {
         assert!(!r.headers.contains_key(header::CONTENT_ENCODING));
         assert_eq!(r.headers[header::CONTENT_LENGTH], "0");
         assert!(r.body.is_empty());
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn compressed_sidecars_never_change_asset_range_offsets() {
+    let fixture = Fixture::new();
+    for &protocol in PROTOCOLS {
+        for encoding in ["gzip", "br", "zstd"] {
+            for file in ["asset.txt", "asset.wasm", "asset.pak", "plain.txt"] {
+                let original = response(
+                    &fixture,
+                    protocol,
+                    file,
+                    Method::GET,
+                    HeaderMap::new(),
+                    true,
+                )
+                .await;
+                for (range, status, content_range, body) in [
+                    ("bytes=2-4", 206, "bytes 2-4/10", "234"),
+                    ("bytes=-3", 206, "bytes 7-9/10", "789"),
+                    ("bytes=-100", 206, "bytes 0-9/10", "0123456789"),
+                    ("bytes=10-", 416, "bytes */10", ""),
+                    ("bytes=20-", 416, "bytes */10", ""),
+                ] {
+                    let mut headers = range_headers(range);
+                    headers.insert(header::ACCEPT_ENCODING, HeaderValue::from_static(encoding));
+                    let r = response(&fixture, protocol, file, Method::GET, headers, true).await;
+                    assert_eq!(
+                        r.status.as_u16(),
+                        status,
+                        "{protocol:?}: {encoding} {file} {range}"
+                    );
+                    assert_eq!(r.headers[header::CONTENT_RANGE], content_range);
+                    assert_eq!(r.headers[header::CONTENT_LENGTH], body.len().to_string());
+                    assert_eq!(r.headers[header::VARY], "Accept-Encoding, Range");
+                    assert!(!r.headers.contains_key(header::CONTENT_ENCODING));
+                    assert_eq!(r.body, body.as_bytes());
+                    if status == 206 {
+                        assert_eq!(r.headers[header::ETAG], original.headers[header::ETAG]);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn range_requests_reject_forbidden_identity_encoding() {
+    let fixture = Fixture::new();
+    for &protocol in PROTOCOLS {
+        for file in ["asset.wasm", "texture.ktx2", "plain.txt"] {
+            for accept in [
+                "gzip, br, zstd, identity;q=0",
+                "gzip, *;q=0",
+                "*;q=0",
+                "IDENTITY;Q=0.000",
+            ] {
+                let mut headers = range_headers("bytes=2-4");
+                headers.insert(header::ACCEPT_ENCODING, HeaderValue::from_static(accept));
+                let r = response(&fixture, protocol, file, Method::GET, headers, true).await;
+                assert_eq!(
+                    r.status,
+                    StatusCode::NOT_ACCEPTABLE,
+                    "{protocol:?}: {accept} {file}"
+                );
+                assert_eq!(r.headers[header::CONTENT_LENGTH], "0");
+                assert_eq!(r.headers[header::VARY], "Accept-Encoding, Range");
+                assert!(!r.headers.contains_key(header::CONTENT_ENCODING));
+                assert!(!r.headers.contains_key(header::CONTENT_RANGE));
+                assert!(r.body.is_empty());
+            }
+            // Explicit identity permission overrides a wildcard exclusion, even
+            // when the client gives compression a higher preference.
+            let mut headers = range_headers("bytes=2-4");
+            headers.insert(
+                header::ACCEPT_ENCODING,
+                HeaderValue::from_static("gzip;q=1, identity;q=0.1, *;q=0"),
+            );
+            let r = response(&fixture, protocol, file, Method::GET, headers, true).await;
+            assert_eq!(r.status, StatusCode::PARTIAL_CONTENT);
+            assert!(!r.headers.contains_key(header::CONTENT_ENCODING));
+            assert_eq!(r.body, b"234");
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn full_downloads_keep_compression_and_range_validators_use_original_bytes() {
+    let fixture = Fixture::new();
+    for &protocol in PROTOCOLS {
+        for (encoding, sidecar) in [
+            ("gzip", "gz/asset.txt.gz"),
+            ("br", "br/asset.txt.br"),
+            ("zstd", "zstd/asset.txt.zstd"),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::ACCEPT_ENCODING, HeaderValue::from_static(encoding));
+            for file in ["asset.txt", "plain.txt"] {
+                let r =
+                    response(&fixture, protocol, file, Method::GET, headers.clone(), true).await;
+                assert_eq!(r.status, StatusCode::OK);
+                assert_eq!(r.headers[header::CONTENT_ENCODING], encoding);
+                assert_eq!(r.headers[header::VARY], "Accept-Encoding, Range");
+                assert_eq!(r.body, std::fs::read(fixture.root.join(sidecar)).unwrap());
+            }
+            let compressed = response(
+                &fixture,
+                protocol,
+                "asset.txt",
+                Method::GET,
+                headers.clone(),
+                true,
+            )
+            .await;
+            let original = response(
+                &fixture,
+                protocol,
+                "asset.txt",
+                Method::GET,
+                HeaderMap::new(),
+                true,
+            )
+            .await;
+            assert_ne!(
+                compressed.headers[header::ETAG],
+                original.headers[header::ETAG]
+            );
+
+            headers.insert(header::RANGE, HeaderValue::from_static("bytes=2-4"));
+            let disabled = response(
+                &fixture,
+                protocol,
+                "asset.txt",
+                Method::GET,
+                headers.clone(),
+                false,
+            )
+            .await;
+            assert_eq!(disabled.status, StatusCode::OK);
+            assert_eq!(disabled.headers[header::CONTENT_ENCODING], encoding);
+            assert_eq!(disabled.headers[header::VARY], "Accept-Encoding");
+            assert_eq!(disabled.body, compressed.body);
+            let head = response(
+                &fixture,
+                protocol,
+                "asset.txt",
+                Method::HEAD,
+                headers.clone(),
+                true,
+            )
+            .await;
+            assert_eq!(head.status, StatusCode::OK);
+            assert_eq!(head.headers[header::CONTENT_ENCODING], encoding);
+            assert!(!head.headers.contains_key(header::CONTENT_RANGE));
+            assert!(head.body.is_empty());
+
+            headers.insert(
+                header::IF_NONE_MATCH,
+                compressed.headers[header::ETAG].clone(),
+            );
+            let r = response(
+                &fixture,
+                protocol,
+                "asset.txt",
+                Method::GET,
+                headers.clone(),
+                true,
+            )
+            .await;
+            assert_eq!(r.status, StatusCode::PARTIAL_CONTENT);
+            assert!(!r.headers.contains_key(header::CONTENT_ENCODING));
+            assert_eq!(r.body, b"234");
+            headers.insert(
+                header::IF_NONE_MATCH,
+                original.headers[header::ETAG].clone(),
+            );
+            let r = response(
+                &fixture,
+                protocol,
+                "asset.txt",
+                Method::GET,
+                headers.clone(),
+                true,
+            )
+            .await;
+            assert_eq!(r.status, StatusCode::NOT_MODIFIED);
+            assert_eq!(r.headers[header::VARY], "Accept-Encoding, Range");
+            assert!(!r.headers.contains_key(header::CONTENT_ENCODING));
+            assert!(r.body.is_empty());
+
+            headers.remove(header::IF_NONE_MATCH);
+            headers.insert(header::IF_RANGE, compressed.headers[header::ETAG].clone());
+            let r = response(&fixture, protocol, "asset.txt", Method::GET, headers, true).await;
+            assert_eq!(r.status, StatusCode::OK);
+            assert!(!r.headers.contains_key(header::CONTENT_ENCODING));
+            assert!(!r.headers.contains_key(header::CONTENT_RANGE));
+            assert_eq!(r.headers[header::ETAG], original.headers[header::ETAG]);
+            assert_eq!(r.body, b"0123456789");
+        }
     }
 }

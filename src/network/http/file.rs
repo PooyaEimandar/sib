@@ -102,6 +102,15 @@ pub struct FileInfo {
 
 pub type FileCache = DashMap<String, FileInfo>;
 
+fn file_vary_header(allow_ranges: bool) -> HeaderValue {
+    // A cache must not satisfy an identity range from a stored compressed response.
+    HeaderValue::from_static(if allow_ranges {
+        "Accept-Encoding, Range"
+    } else {
+        "Accept-Encoding"
+    })
+}
+
 fn serve_fn<S: Session>(
     session: &mut S,
     file_info: FileInfo,
@@ -123,6 +132,13 @@ fn serve_fn<S: Session>(
         None
     };
     let range_requested = range_header.is_some();
+    // Asset offsets refer to the original file. Disable sidecars as well as
+    // on-the-fly compression, but still reject an explicit identity exclusion.
+    let encoding_order: &[EncodingType] = if range_requested {
+        &[EncodingType::None]
+    } else {
+        encoding_order
+    };
 
     let encoding = match session.req_header(&header::ACCEPT_ENCODING) {
         Some(val) => {
@@ -136,13 +152,15 @@ fn serve_fn<S: Session>(
     };
 
     let mut rsp_headers = http::HeaderMap::new();
+    rsp_headers.insert(header::VARY, file_vary_header(allow_ranges));
     let mut applied_encoding: Option<&'static str> = None;
 
     let (file_path, total_size) = match encoding {
         // Serve file directly
         EncodingType::None => (file_info.path.clone(), file_info.size),
         EncodingType::NotAcceptable => {
-            let headers = get_error_headers!(close_connection_on_failed);
+            let mut headers = get_error_headers!(close_connection_on_failed);
+            headers.insert(header::VARY, file_vary_header(allow_ranges));
             return session
                 .status_code(StatusCode::NOT_ACCEPTABLE)
                 .headers(&headers)?
@@ -280,7 +298,6 @@ fn serve_fn<S: Session>(
                 HeaderValue::from_str(&file_info.last_modified_str)
                     .map_err(std::io::Error::other)?,
             ),
-            (header::VARY, HeaderValue::from_static("Accept-Encoding")),
         ]);
 
         return session
@@ -298,7 +315,7 @@ fn serve_fn<S: Session>(
                 .map_err(std::io::Error::other)?,
         );
         headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
-        headers.insert(header::VARY, HeaderValue::from_static("Accept-Encoding"));
+        headers.insert(header::VARY, file_vary_header(allow_ranges));
         return session
             .status_code(StatusCode::RANGE_NOT_SATISFIABLE)
             .headers(&headers)?
@@ -323,7 +340,6 @@ fn serve_fn<S: Session>(
             header::ETAG,
             HeaderValue::from_str(&etag_to_send).map_err(std::io::Error::other)?,
         ),
-        (header::VARY, HeaderValue::from_static("Accept-Encoding")),
     ]);
 
     let (status, start, end) = if let ByteRange::Satisfiable(r) = range {
@@ -390,6 +406,13 @@ async fn serve_fn_async<S: Session>(
         None
     };
     let range_requested = range_header.is_some();
+    // Asset offsets refer to the original file. Disable sidecars as well as
+    // on-the-fly compression, but still reject an explicit identity exclusion.
+    let encoding_order: &[EncodingType] = if range_requested {
+        &[EncodingType::None]
+    } else {
+        encoding_order
+    };
 
     let encoding = match session.req_header(&header::ACCEPT_ENCODING) {
         Some(val) => {
@@ -403,13 +426,15 @@ async fn serve_fn_async<S: Session>(
     };
 
     let mut rsp_headers = http::HeaderMap::new();
+    rsp_headers.insert(header::VARY, file_vary_header(allow_ranges));
     let mut applied_encoding: Option<&'static str> = None;
 
     let (file_path, total_size) = match encoding {
         // Serve file directly
         EncodingType::None => (file_info.path.clone(), file_info.size),
         EncodingType::NotAcceptable => {
-            let headers = get_error_headers!(close_connection_on_failed);
+            let mut headers = get_error_headers!(close_connection_on_failed);
+            headers.insert(header::VARY, file_vary_header(allow_ranges));
             return session
                 .status_code(StatusCode::NOT_ACCEPTABLE)
                 .headers(&headers)?
@@ -554,7 +579,6 @@ async fn serve_fn_async<S: Session>(
                 HeaderValue::from_str(&file_info.last_modified_str)
                     .map_err(std::io::Error::other)?,
             ),
-            (header::VARY, HeaderValue::from_static("Accept-Encoding")),
         ]);
 
         return session
@@ -573,7 +597,7 @@ async fn serve_fn_async<S: Session>(
                 .map_err(std::io::Error::other)?,
         );
         headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
-        headers.insert(header::VARY, HeaderValue::from_static("Accept-Encoding"));
+        headers.insert(header::VARY, file_vary_header(allow_ranges));
         return session
             .status_code(StatusCode::RANGE_NOT_SATISFIABLE)
             .headers(&headers)?
@@ -599,7 +623,6 @@ async fn serve_fn_async<S: Session>(
             header::ETAG,
             HeaderValue::from_str(&etag_to_send).map_err(std::io::Error::other)?,
         ),
-        (header::VARY, HeaderValue::from_static("Accept-Encoding")),
     ]);
 
     let (status, start, end) = if let ByteRange::Satisfiable(r) = range {
@@ -1285,7 +1308,6 @@ fn apply_compressed_headers(
                     header::ETAG,
                     HeaderValue::from_str(&etag_val).map_err(std::io::Error::other)?,
                 ),
-                (header::VARY, HeaderValue::from_static("Accept-Encoding")),
                 (
                     header::LAST_MODIFIED,
                     HeaderValue::from_str(&file_info.last_modified_str)
@@ -1489,9 +1511,8 @@ fn choose_encoding(accept: &HeaderValue, mime: &Mime, order: &[EncodingType]) ->
     let is_svg = mime.type_() == mime::IMAGE
         && (mime.subtype() == mime::SVG || mime.suffix() == Some(mime::XML));
 
-    if order.is_empty() || (is_media && !is_svg) {
-        return EncodingType::None;
-    }
+    // Media and an empty preference list still need identity negotiation.
+    let order: &[EncodingType] = if is_media && !is_svg { &[] } else { order };
 
     #[derive(Copy, Clone)]
     struct Pref {
@@ -1535,7 +1556,9 @@ fn choose_encoding(accept: &HeaderValue, mime: &Mime, order: &[EncodingType]) ->
     let allowed = |name: &str| -> bool {
         let lname = name.to_ascii_lowercase();
         if lname == "identity" {
-            return identity_q.unwrap_or(1.0) > 0.0;
+            // Identity is acceptable by default, except for an explicit exclusion
+            // or *;q=0 without a more specific identity preference (RFC 9110 12.5.3).
+            return identity_q.map_or(star_q != Some(0.0), |q| q > 0.0);
         }
         if let Some(pref) = prefs.get(&lname) {
             return pref.q > 0.0;
