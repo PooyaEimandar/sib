@@ -1,3 +1,6 @@
+/// Why a WebTransport connection ended, including a peer's close code and reason.
+pub use wtransport::error::ConnectionError as WtConnectionError;
+
 #[derive(Debug, Clone)]
 pub struct WTConfig {
     pub keep_alive_interval: std::time::Duration,
@@ -163,11 +166,61 @@ impl WtSession {
             })
     }
 
-    /// Send a datagram.
+    /// Current maximum outgoing application datagram payload, in bytes.
+    ///
+    /// Excludes the WebTransport header. Returns `None` if the peer does not support
+    /// datagrams or its limit cannot fit that header; `Some(0)` allows only an empty
+    /// payload. This limit can change with the path MTU and does not describe incoming
+    /// datagrams or guarantee delivery. Sending can still fail after querying it.
+    pub fn max_datagram_size(&self) -> Option<usize> {
+        use wtransport::proto::{datagram::Datagram, ids::QStreamId};
+
+        let header_size = Datagram::header_size(QStreamId::from_session_id(self.conn.session_id()));
+        // wtransport 0.7.2 subtracts unchecked; a peer can advertise less than the header.
+        self.conn
+            .quic_connection()
+            .max_datagram_size()?
+            .checked_sub(header_size)
+    }
+
+    /// Send one unreliable datagram without fragmentation.
+    ///
+    /// Errors distinguish an oversized payload (`InvalidInput`), a peer without
+    /// datagram support (`Unsupported`) and a closed connection (`NotConnected`).
+    /// Success means the transport accepted the payload, not that the peer received it.
     pub fn send_dgram(&self, bytes: &bytes::Bytes) -> std::io::Result<()> {
         self.conn.send_datagram(bytes).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::Other, format!("wt send_dgram: {e}"))
+            use std::io::ErrorKind;
+            use wtransport::error::SendDatagramError;
+
+            let kind = match e {
+                SendDatagramError::TooLarge => ErrorKind::InvalidInput,
+                SendDatagramError::UnsupportedByPeer => ErrorKind::Unsupported,
+                SendDatagramError::NotConnected => ErrorKind::NotConnected,
+            };
+            std::io::Error::new(kind, e)
         })
+    }
+
+    /// Close the underlying QUIC connection immediately, without flushing pending data.
+    ///
+    /// `error_code` is a QUIC application code in `0..2^62`, not a browser WebTransport
+    /// session close code. An out-of-range code returns `InvalidInput` without closing.
+    /// The transport may truncate `reason` to fit a packet. Repeated closes are harmless.
+    pub fn close(&self, error_code: u64, reason: &[u8]) -> std::io::Result<()> {
+        let error_code = wtransport::VarInt::try_from_u64(error_code)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+        self.conn.close(error_code, reason);
+        Ok(())
+    }
+
+    /// Wait for connection termination and retain its typed reason.
+    ///
+    /// Returns immediately if already closed. A local `close` yields `LocallyClosed`;
+    /// a peer's application close includes its QUIC code and reason bytes.
+    /// This does not wait for outstanding data or close notifications to reach the peer.
+    pub async fn closed(&self) -> WtConnectionError {
+        self.conn.closed().await
     }
 }
 
@@ -195,3 +248,7 @@ pub trait WtService: Send {
 #[cfg(all(test, feature = "mtls"))]
 #[path = "../../../tests/unit/network/http/wt_tests.rs"]
 mod tests;
+
+#[cfg(all(test, feature = "mtls"))]
+#[path = "../../../tests/unit/network/http/wt_session_tests.rs"]
+mod session_tests;

@@ -145,6 +145,7 @@ wgpu = { version = "30.0.1", optional = true }
 winit = { version = "0.30.13", optional = true }
 wtransport = { version = "0.7.2", optional = true, default-features = false, features = [
     "ring",
+    "quinn",
 ] }
 zstd = { version = "0.14.3", optional = true }
 
