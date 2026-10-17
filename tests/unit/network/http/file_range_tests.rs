@@ -634,3 +634,7 @@ mod etag_tests;
 
 #[path = "file_streaming_tests.rs"]
 mod streaming_tests;
+
+#[cfg(all(feature = "rt-tokio", not(feature = "rt-glommio")))]
+#[path = "file_h2_io_tests.rs"]
+mod h2_io_tests;
