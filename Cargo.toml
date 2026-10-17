@@ -183,6 +183,7 @@ default = []
 db-fdb = ["foundationdb-sys", "crossbeam"]
 mtls = ["rcgen", "rustls"]
 net-file-server = [
+    "sha2",
     "brotli",
     "dashmap",
     "flate2",

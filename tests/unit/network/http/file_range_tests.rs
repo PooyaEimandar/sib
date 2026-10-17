@@ -116,17 +116,38 @@ async fn response(
     headers: HeaderMap,
     allow_ranges: bool,
 ) -> Response {
+    let encodings = [
+        EncodingType::Br {
+            buffer_size: 4096,
+            quality: 1,
+            lgwindow: 22,
+        },
+        EncodingType::Gzip { level: 1 },
+        EncodingType::Zstd { level: 1 },
+    ];
+    response_with_encodings(
+        fixture,
+        protocol,
+        file,
+        method,
+        headers,
+        allow_ranges,
+        &encodings,
+    )
+    .await
+}
+
+async fn response_with_encodings(
+    fixture: &Fixture,
+    protocol: Protocol,
+    file: &str,
+    method: Method,
+    headers: HeaderMap,
+    allow_ranges: bool,
+    encodings: &[EncodingType],
+) -> Response {
     tokio::time::timeout(Duration::from_secs(10), async {
         let path = fixture.root.join(file);
-        let encodings = [
-            EncodingType::Br {
-                buffer_size: 4096,
-                quality: 1,
-                lgwindow: 22,
-            },
-            EncodingType::Gzip { level: 1 },
-            EncodingType::Zstd { level: 1 },
-        ];
         let thresholds = (1, 64 * 1024); // Exercise on-the-fly fallback for plain.txt too.
         let streaming = (64 * 1024, 1024);
         let options = ("inline", allow_ranges);
@@ -151,7 +172,7 @@ async fn response(
                     &mut session,
                     &path,
                     &fixture.cache,
-                    &encodings,
+                    encodings,
                     thresholds,
                     streaming,
                     options,
@@ -176,7 +197,7 @@ async fn response(
                     &mut session,
                     &path,
                     &fixture.cache,
-                    &encodings,
+                    encodings,
                     thresholds,
                     streaming,
                     options,
@@ -200,7 +221,7 @@ async fn response(
                         &mut session,
                         &path,
                         &fixture.cache,
-                        &encodings,
+                        encodings,
                         thresholds,
                         streaming,
                         options,
@@ -607,3 +628,6 @@ async fn full_downloads_keep_compression_and_range_validators_use_original_bytes
 
 #[path = "file_precondition_tests.rs"]
 mod precondition_tests;
+
+#[path = "file_etag_tests.rs"]
+mod etag_tests;

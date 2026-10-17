@@ -3,8 +3,10 @@ use bytes::Bytes;
 use dashmap::DashMap;
 use http::{HeaderMap, HeaderValue, StatusCode, header};
 use mime::Mime;
+use sha2::{Digest, Sha256};
 use std::{
     fs::Metadata,
+    io::Read,
     ops::Range,
     path::{Component, Path, PathBuf},
     time::SystemTime,
@@ -19,42 +21,6 @@ macro_rules! get_error_headers {
             headers.insert(http::header::CONNECTION, HeaderValue::from_static("close"));
         }
         headers
-    }};
-}
-
-macro_rules! get_file_info {
-    ($session:expr, $path:expr, $meta:expr, $file_cache:expr, $close:expr) => {{
-        let key = $path.to_string_lossy().to_string();
-
-        // get modified time
-        let modified = match $meta.modified() {
-            Ok(sys_time) => sys_time,
-            Err(e) => {
-                error!("Failed to read modified time for: {}: {}", &key, e);
-
-                let headers = get_error_headers!($close);
-                return $session
-                    .status_code(StatusCode::INTERNAL_SERVER_ERROR)
-                    .headers(&headers)?
-                    .body(Bytes::new())
-                    .eom();
-            }
-        };
-
-        // file cache lookup
-        if let Some(info) = $file_cache.get(&key) {
-            if modified <= info.modified {
-                // up-to-date entry
-                info.clone()
-            } else {
-                // Release the read guard before regeneration writes to the same cache shard.
-                drop(info);
-                generate_file_info($path, &$meta, modified, $file_cache)
-            }
-        } else {
-            // generate new entry
-            generate_file_info($path, &$meta, modified, $file_cache)
-        }
     }};
 }
 
@@ -87,17 +53,53 @@ impl EncodingType {
     }
 }
 
-#[derive(Clone)]
-pub struct FileInfo {
-    etag: String,
-    mime_type: String,
-    path: PathBuf,
+// Metadata is only a cache key, never the HTTP validator. On Unix include
+// inode identity and change time so restoring mtime cannot hide a rewrite.
+// Other platforms rehash until an equally reliable change key is available.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FileStamp {
     size: u64,
     modified: SystemTime,
-    last_modified_str: String, // pre-rendered RFC1123 for hot reuse
-    gz_info: Option<(PathBuf, u64)>,
-    br_info: Option<(PathBuf, u64)>,
-    zstd_info: Option<(PathBuf, u64)>,
+    #[cfg(unix)]
+    identity: (u64, u64),
+    #[cfg(unix)]
+    changed: (i64, i64),
+}
+
+impl FileStamp {
+    fn from_metadata(meta: &Metadata) -> std::io::Result<Self> {
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+        Ok(Self {
+            size: meta.len(),
+            modified: meta.modified()?,
+            #[cfg(unix)]
+            identity: (meta.dev(), meta.ino()),
+            #[cfg(unix)]
+            changed: (meta.ctime(), meta.ctime_nsec()),
+        })
+    }
+
+    fn can_reuse(&self, other: &Self) -> bool {
+        cfg!(unix) && self == other
+    }
+}
+
+#[derive(Clone)]
+struct FileVersion {
+    path: PathBuf,
+    stamp: FileStamp,
+    etag: String,
+}
+
+#[derive(Clone)]
+pub struct FileInfo {
+    original: FileVersion,
+    mime_type: String,
+    last_modified_str: String,
+    gz_info: Option<FileVersion>,
+    br_info: Option<FileVersion>,
+    zstd_info: Option<FileVersion>,
 }
 
 pub type FileCache = DashMap<String, FileInfo>;
@@ -151,8 +153,8 @@ fn serve_fn<S: Session>(
         _ => EncodingType::None,
     };
 
-    let can_compress = file_info.size >= min_bytes_on_the_fly_size
-        && file_info.size <= max_bytes_on_the_fly_size
+    let can_compress = file_info.original.stamp.size >= min_bytes_on_the_fly_size
+        && file_info.original.stamp.size <= max_bytes_on_the_fly_size
         && !range_requested;
     let encoding = available_file_encoding(&file_info, encoding, can_compress);
 
@@ -163,10 +165,38 @@ fn serve_fn<S: Session>(
         _ => Some(encoding.as_str()),
     };
 
-    let etag_to_send = rep_etag(&file_info.etag, applied_encoding);
+    let selected_file = selected_file_version(&file_info, &encoding);
+    let compressed = if selected_file.is_none() && encoding != EncodingType::NotAcceptable {
+        match compress_file_blocking(&file_info.original.path, encoding.clone()) {
+            Ok(compressed) => Some(compressed),
+            Err(e) => {
+                error!(
+                    "Compression failed for {}: {e}",
+                    file_info.original.path.display()
+                );
+                let mut headers = get_error_headers!(close_connection_on_failed);
+                headers.insert(header::VARY, file_vary_header(allow_ranges));
+                return session
+                    .status_code(StatusCode::INTERNAL_SERVER_ERROR)
+                    .headers(&headers)?
+                    .body(Bytes::new())
+                    .eom();
+            }
+        }
+    } else {
+        None
+    };
+    let etag_to_send = if let Some((_, etag)) = &compressed {
+        etag.clone()
+    } else {
+        rep_etag(
+            &selected_file.unwrap_or(&file_info.original).etag,
+            applied_encoding,
+        )
+    };
 
     // Normal request errors (such as 406) win; otherwise If-Match must run
-    // before If-None-Match, range handling and on-the-fly compression.
+    // before If-None-Match, range handling and sending the response body.
     if encoding != EncodingType::NotAcceptable
         && session.req_header(&header::IF_MATCH).is_some()
         && !if_match_satisfied(&session.req_headers(), &etag_to_send)
@@ -212,105 +242,45 @@ fn serve_fn<S: Session>(
             .eom();
     }
 
-    let (file_path, total_size) = match encoding {
-        // Serve file directly
-        EncodingType::None => (file_info.path.clone(), file_info.size),
-        EncodingType::NotAcceptable => {
-            let mut headers = get_error_headers!(close_connection_on_failed);
-            headers.insert(header::VARY, file_vary_header(allow_ranges));
-            return session
-                .status_code(StatusCode::NOT_ACCEPTABLE)
-                .headers(&headers)?
-                .body(Bytes::new())
-                .eom();
-        }
-        EncodingType::Br {
-            buffer_size,
-            quality,
-            lgwindow,
-        } => {
-            if let Some(br_info) = file_info.br_info {
-                // we already have the br info in the cache
-                rsp_headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("br"));
-                br_info
-            } else {
-                // On-the-fly only if size is within [min,max] AND not a Range request
-                if can_compress {
-                    let (status, body) = compress_then_respond(
-                        &mut rsp_headers,
-                        &file_info,
-                        "br",
-                        disable_content_length,
-                        |b| encode_brotli(b, buffer_size, quality, lgwindow),
-                    )?;
+    if encoding == EncodingType::NotAcceptable {
+        let mut headers = get_error_headers!(close_connection_on_failed);
+        headers.insert(header::VARY, file_vary_header(allow_ranges));
+        return session
+            .status_code(StatusCode::NOT_ACCEPTABLE)
+            .headers(&headers)?
+            .body(Bytes::new())
+            .eom();
+    }
 
-                    return session
-                        .status_code(status)
-                        .headers(&rsp_headers)?
-                        .body(body)
-                        .eom();
-                } else {
-                    // fall back to original file
-                    (file_info.path.clone(), file_info.size)
-                }
-            }
-        }
+    if let Some((body, _)) = compressed {
+        apply_compressed_headers(
+            &mut rsp_headers,
+            &file_info,
+            encoding.as_str(),
+            disable_content_length,
+            &etag_to_send,
+            body.len(),
+        )?;
+        let body = if session.req_method() == http::Method::HEAD {
+            Bytes::new()
+        } else {
+            body
+        };
+        return session
+            .status_code(StatusCode::OK)
+            .headers(&rsp_headers)?
+            .body(body)
+            .eom();
+    }
 
-        EncodingType::Gzip { level } => {
-            if let Some(gz_info) = file_info.gz_info {
-                // we already have the gz info in the cache
-                rsp_headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
-                gz_info
-            } else if can_compress {
-                // On-the-fly only if size is within [min,max] AND not a Range request
-                let (status, body) = compress_then_respond(
-                    &mut rsp_headers,
-                    &file_info,
-                    "gzip",
-                    disable_content_length,
-                    |b| encode_gzip(b, level),
-                )?;
+    let selected_file = selected_file.expect("uncompressed or sidecar representation");
+    let (file_path, total_size) = (selected_file.path.clone(), selected_file.stamp.size);
+    if let Some(enc) = applied_encoding {
+        rsp_headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static(enc));
+    }
 
-                return session
-                    .status_code(status)
-                    .headers(&rsp_headers)?
-                    .body(body)
-                    .eom();
-            } else {
-                // fall back to original file
-                (file_info.path.clone(), file_info.size)
-            }
-        }
-
-        EncodingType::Zstd { level } => {
-            if let Some(zstd_info) = file_info.zstd_info {
-                // we already have the zstd info in the cache
-                rsp_headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("zstd"));
-                zstd_info
-            } else if can_compress {
-                // On-the-fly only if size is within [min,max] AND not a Range request
-                let (status, body) = compress_then_respond(
-                    &mut rsp_headers,
-                    &file_info,
-                    "zstd",
-                    disable_content_length,
-                    |b| encode_zstd(b, level),
-                )?;
-
-                return session
-                    .status_code(status)
-                    .headers(&rsp_headers)?
-                    .body(body)
-                    .eom();
-            } else {
-                // fall back to original file
-                (file_info.path.clone(), file_info.size)
-            }
-        }
-    };
-
-    // Conditional ranges need reliable representation validators. Until that
-    // validation is available, serve the complete representation for If-Range.
+    // If-Range matching is not implemented yet; keep returning the complete
+    // representation rather than applying an unchecked conditional range.
     let range = if session.req_header(&header::IF_RANGE).is_some() {
         ByteRange::Ignored
     } else {
@@ -437,8 +407,8 @@ async fn serve_fn_async<S: Session>(
         _ => EncodingType::None,
     };
 
-    let can_compress = file_info.size >= min_bytes_on_the_fly_size
-        && file_info.size <= max_bytes_on_the_fly_size
+    let can_compress = file_info.original.stamp.size >= min_bytes_on_the_fly_size
+        && file_info.original.stamp.size <= max_bytes_on_the_fly_size
         && !range_requested;
     let encoding = available_file_encoding(&file_info, encoding, can_compress);
 
@@ -449,10 +419,39 @@ async fn serve_fn_async<S: Session>(
         _ => Some(encoding.as_str()),
     };
 
-    let etag_to_send = rep_etag(&file_info.etag, applied_encoding);
+    let selected_file = selected_file_version(&file_info, &encoding);
+    let compressed = if selected_file.is_none() && encoding != EncodingType::NotAcceptable {
+        match compress_file_async(&file_info.original.path, encoding.clone()).await {
+            Ok(compressed) => Some(compressed),
+            Err(e) => {
+                error!(
+                    "Compression failed for {}: {e}",
+                    file_info.original.path.display()
+                );
+                let mut headers = get_error_headers!(close_connection_on_failed);
+                headers.insert(header::VARY, file_vary_header(allow_ranges));
+                return session
+                    .status_code(StatusCode::INTERNAL_SERVER_ERROR)
+                    .headers(&headers)?
+                    .body(Bytes::new())
+                    .eom_async()
+                    .await;
+            }
+        }
+    } else {
+        None
+    };
+    let etag_to_send = if let Some((_, etag)) = &compressed {
+        etag.clone()
+    } else {
+        rep_etag(
+            &selected_file.unwrap_or(&file_info.original).etag,
+            applied_encoding,
+        )
+    };
 
     // Normal request errors (such as 406) win; otherwise If-Match must run
-    // before If-None-Match, range handling and on-the-fly compression.
+    // before If-None-Match, range handling and sending the response body.
     if encoding != EncodingType::NotAcceptable
         && session.req_header(&header::IF_MATCH).is_some()
         && !if_match_satisfied(&session.req_headers(), &etag_to_send)
@@ -500,112 +499,47 @@ async fn serve_fn_async<S: Session>(
             .await;
     }
 
-    let (file_path, total_size) = match encoding {
-        // Serve file directly
-        EncodingType::None => (file_info.path.clone(), file_info.size),
-        EncodingType::NotAcceptable => {
-            let mut headers = get_error_headers!(close_connection_on_failed);
-            headers.insert(header::VARY, file_vary_header(allow_ranges));
-            return session
-                .status_code(StatusCode::NOT_ACCEPTABLE)
-                .headers(&headers)?
-                .body(Bytes::new())
-                .eom_async()
-                .await;
-        }
+    if encoding == EncodingType::NotAcceptable {
+        let mut headers = get_error_headers!(close_connection_on_failed);
+        headers.insert(header::VARY, file_vary_header(allow_ranges));
+        return session
+            .status_code(StatusCode::NOT_ACCEPTABLE)
+            .headers(&headers)?
+            .body(Bytes::new())
+            .eom_async()
+            .await;
+    }
 
-        EncodingType::Br {
-            buffer_size,
-            quality,
-            lgwindow,
-        } => {
-            if let Some(br_info) = file_info.br_info {
-                // we already have the br info in the cache
-                rsp_headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("br"));
-                br_info
-            } else {
-                // On-the-fly only if size is within [min,max] AND not a Range request
-                if can_compress {
-                    let (status, body) = compress_then_respond_async(
-                        &mut rsp_headers,
-                        &file_info,
-                        "br",
-                        disable_content_length,
-                        move |b| encode_brotli(b, buffer_size, quality, lgwindow),
-                    )
-                    .await?;
+    if let Some((body, _)) = compressed {
+        apply_compressed_headers(
+            &mut rsp_headers,
+            &file_info,
+            encoding.as_str(),
+            disable_content_length,
+            &etag_to_send,
+            body.len(),
+        )?;
+        let body = if session.req_method() == http::Method::HEAD {
+            Bytes::new()
+        } else {
+            body
+        };
+        return session
+            .status_code(StatusCode::OK)
+            .headers(&rsp_headers)?
+            .body(body)
+            .eom_async()
+            .await;
+    }
 
-                    return session
-                        .status_code(status)
-                        .headers(&rsp_headers)?
-                        .body(body)
-                        .eom_async()
-                        .await;
-                } else {
-                    // fall back to original file
-                    (file_info.path.clone(), file_info.size)
-                }
-            }
-        }
+    let selected_file = selected_file.expect("uncompressed or sidecar representation");
+    let (file_path, total_size) = (selected_file.path.clone(), selected_file.stamp.size);
+    if let Some(enc) = applied_encoding {
+        rsp_headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static(enc));
+    }
 
-        EncodingType::Gzip { level } => {
-            if let Some(gz_info) = file_info.gz_info {
-                // we already have the gz info in the cache
-                rsp_headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
-                gz_info
-            } else if can_compress {
-                // On-the-fly only if size is within [min,max] AND not a Range request
-                let (status, body) = compress_then_respond_async(
-                    &mut rsp_headers,
-                    &file_info,
-                    "gzip",
-                    disable_content_length,
-                    move |b| encode_gzip(b, level),
-                )
-                .await?;
-
-                return session
-                    .status_code(status)
-                    .headers(&rsp_headers)?
-                    .body(body)
-                    .eom_async()
-                    .await;
-            } else {
-                // fall back to original file
-                (file_info.path.clone(), file_info.size)
-            }
-        }
-
-        EncodingType::Zstd { level } => {
-            if let Some(zstd_info) = file_info.zstd_info {
-                // we already have the zstd info in the cache
-                rsp_headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("zstd"));
-                zstd_info
-            } else if can_compress {
-                let (status, body) = compress_then_respond_async(
-                    &mut rsp_headers,
-                    &file_info,
-                    "zstd",
-                    disable_content_length,
-                    move |b| encode_zstd(b, level),
-                )
-                .await?;
-
-                return session
-                    .status_code(status)
-                    .headers(&rsp_headers)?
-                    .body(body)
-                    .eom_async()
-                    .await;
-            } else {
-                // fall back to original file
-                (file_info.path.clone(), file_info.size)
-            }
-        }
-    };
-
-    // Conditional ranges need reliable representation validators. Until that
-    // validation is available, serve the complete representation for If-Range.
+    // If-Range matching is not implemented yet; keep returning the complete
+    // representation rather than applying an unchecked conditional range.
     let range = if session.req_header(&header::IF_RANGE).is_some() {
         ByteRange::Ignored
     } else {
@@ -725,7 +659,19 @@ async fn serve_async_fn<S: Session>(
         }
     };
 
-    let file_info = get_file_info!(session, path, meta, file_cache, false);
+    let file_info = match get_file_info_async(path, meta, file_cache).await {
+        Ok(info) => info,
+        Err(e) => {
+            error!("Failed to validate file {}: {e}", path.display());
+            let headers = get_error_headers!(false);
+            return session
+                .status_code(StatusCode::INTERNAL_SERVER_ERROR)
+                .headers(&headers)?
+                .body(Bytes::new())
+                .eom_async()
+                .await;
+        }
+    };
 
     // Reuse same logic as async fn: but content-disposition fixed to inline for h3
     serve_fn_async(
@@ -772,7 +718,18 @@ pub fn serve_h1<S: Session>(
 
     // file cache lookup
     const CLOSE_CONNECTION_ON_FAILED: bool = true;
-    let file_info = get_file_info!(session, path, meta, file_cache, CLOSE_CONNECTION_ON_FAILED);
+    let file_info = match get_file_info(path, meta, file_cache) {
+        Ok(info) => info,
+        Err(e) => {
+            error!("Failed to validate file {}: {e}", path.display());
+            let headers = get_error_headers!(CLOSE_CONNECTION_ON_FAILED);
+            return session
+                .status_code(StatusCode::INTERNAL_SERVER_ERROR)
+                .headers(&headers)?
+                .body(Bytes::new())
+                .eom();
+        }
+    };
 
     // Handle headers, range parsing, etc.
     serve_fn(
@@ -919,7 +876,19 @@ pub async fn serve_h1_async<S: Session>(
 
     // file cache lookup
     const CLOSE_CONNECTION_ON_FAILED: bool = true;
-    let file_info = get_file_info!(session, path, meta, file_cache, CLOSE_CONNECTION_ON_FAILED);
+    let file_info = match get_file_info_async(path, meta, file_cache).await {
+        Ok(info) => info,
+        Err(e) => {
+            error!("Failed to validate file {}: {e}", path.display());
+            let headers = get_error_headers!(CLOSE_CONNECTION_ON_FAILED);
+            return session
+                .status_code(StatusCode::INTERNAL_SERVER_ERROR)
+                .headers(&headers)?
+                .body(Bytes::new())
+                .eom_async()
+                .await;
+        }
+    };
 
     // async path must use serve_fn_async
     serve_fn_async(
@@ -1053,7 +1022,19 @@ pub async fn serve_h2<S: Session>(
 
     // file cache lookup
     const CLOSE_CONNECTION_ON_FAILED: bool = false;
-    let file_info = get_file_info!(session, path, meta, file_cache, CLOSE_CONNECTION_ON_FAILED);
+    let file_info = match get_file_info_async(path, meta, file_cache).await {
+        Ok(info) => info,
+        Err(e) => {
+            error!("Failed to validate file {}: {e}", path.display());
+            let headers = get_error_headers!(CLOSE_CONNECTION_ON_FAILED);
+            return session
+                .status_code(StatusCode::INTERNAL_SERVER_ERROR)
+                .headers(&headers)?
+                .body(Bytes::new())
+                .eom_async()
+                .await;
+        }
+    };
 
     let result = serve_fn_async(
         session,
@@ -1315,6 +1296,10 @@ fn if_none_match_contains(header: &HeaderValue, target: &str) -> bool {
 
 /// Create a file cache with specified capacity. For better performance use thread_local! to
 /// create per-thread caches.
+///
+/// ETags hash representation bytes. Unix caches reuse hashes while file identity,
+/// size, modification time and change time match. Other platforms rehash on each
+/// lookup. Publish assets atomically and keep them immutable during transfers.
 /// # Arguments
 /// * `capacity` - The initial capacity of the file cache
 /// # Returns
@@ -1323,60 +1308,68 @@ pub fn load_file_cache(capacity: usize) -> FileCache {
     DashMap::with_capacity(capacity)
 }
 
-fn compress_file_blocking(
-    path: &std::path::Path,
-    compress_fn: impl Fn(&[u8]) -> std::io::Result<Bytes>,
-) -> std::io::Result<Bytes> {
-    let f = std::fs::File::open(path)?;
-    let mmap = unsafe { memmap2::Mmap::map(&f) }.map_err(std::io::Error::other)?;
-    compress_fn(&mmap[..])
+fn selected_file_version<'a>(
+    info: &'a FileInfo,
+    encoding: &EncodingType,
+) -> Option<&'a FileVersion> {
+    match encoding {
+        EncodingType::None => Some(&info.original),
+        EncodingType::Gzip { .. } => info.gz_info.as_ref(),
+        EncodingType::Br { .. } => info.br_info.as_ref(),
+        EncodingType::Zstd { .. } => info.zstd_info.as_ref(),
+        EncodingType::NotAcceptable => None,
+    }
 }
 
-fn compress_then_respond(
-    headers: &mut HeaderMap,
-    file_info: &FileInfo,
-    encoding_name: &str,
-    disable_content_length: bool,
-    compress_fn: impl Fn(&[u8]) -> std::io::Result<Bytes>,
-) -> std::io::Result<(StatusCode, Bytes)> {
-    let res = compress_file_blocking(&file_info.path, compress_fn);
-    apply_compressed_headers(
-        headers,
-        file_info,
-        encoding_name,
-        disable_content_length,
-        res,
-    )
+fn digest_etag(digest: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut tag = String::with_capacity(73);
+    tag.push_str("\"sha256-");
+    for byte in digest {
+        write!(&mut tag, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    tag.push('"');
+    tag
 }
 
-async fn compress_then_respond_async(
-    headers: &mut HeaderMap,
-    file_info: &FileInfo,
-    encoding_name: &str,
-    disable_content_length: bool,
-    compress_fn: impl Fn(&[u8]) -> std::io::Result<Bytes> + Send + 'static,
-) -> std::io::Result<(StatusCode, Bytes)> {
-    let path = file_info.path.clone();
+fn compress_file_blocking(path: &Path, encoding: EncodingType) -> std::io::Result<(Bytes, String)> {
+    // The size thresholds bound this allocation. Hash the exact encoded bytes,
+    // so compression settings and encoder upgrades cannot reuse a stale tag.
+    let input = std::fs::read(path)?;
+    let bytes = match encoding {
+        EncodingType::Gzip { level } => encode_gzip(&input, level)?,
+        EncodingType::Br {
+            buffer_size,
+            quality,
+            lgwindow,
+        } => encode_brotli(&input, buffer_size, quality, lgwindow)?,
+        EncodingType::Zstd { level } => encode_zstd(&input, level)?,
+        _ => {
+            return Err(std::io::Error::other(
+                "expected a compressed representation",
+            ));
+        }
+    };
+    let tag = rep_etag(
+        &digest_etag(&Sha256::digest(&bytes)),
+        Some(encoding.as_str()),
+    );
+    Ok((bytes, tag))
+}
 
+async fn compress_file_async(
+    path: &Path,
+    encoding: EncodingType,
+) -> std::io::Result<(Bytes, String)> {
     #[cfg(feature = "rt-tokio")]
-    let res = tokio::task::spawn_blocking(move || compress_file_blocking(&path, compress_fn))
-        .await
-        .map_err(|e| std::io::Error::other(format!("spawn_blocking join error: {e}")))?;
-
-    #[cfg(all(not(feature = "rt-tokio"), feature = "rt-glommio", target_os = "linux"))]
-    let res = compress_file_blocking(&path, compress_fn);
-
-    // No async runtime to offload to: compress inline on the driving thread.
-    #[cfg(not(any(feature = "rt-tokio", all(feature = "rt-glommio", target_os = "linux"))))]
-    let res = compress_file_blocking(&path, compress_fn);
-
-    apply_compressed_headers(
-        headers,
-        file_info,
-        encoding_name,
-        disable_content_length,
-        res,
-    )
+    {
+        let path = path.to_owned();
+        tokio::task::spawn_blocking(move || compress_file_blocking(&path, encoding))
+            .await
+            .map_err(std::io::Error::other)?
+    }
+    #[cfg(not(feature = "rt-tokio"))]
+    compress_file_blocking(path, encoding)
 }
 
 fn apply_compressed_headers(
@@ -1384,100 +1377,162 @@ fn apply_compressed_headers(
     file_info: &FileInfo,
     encoding_name: &str,
     disable_content_length: bool,
-    res: std::io::Result<Bytes>,
-) -> std::io::Result<(StatusCode, Bytes)> {
-    match res {
-        Ok(compressed) => {
-            let etag_val = rep_etag(&file_info.etag, Some(encoding_name));
-            if !disable_content_length {
-                headers.insert(
-                    header::CONTENT_LENGTH,
-                    HeaderValue::from_str(&compressed.len().to_string())
-                        .map_err(std::io::Error::other)?,
-                );
-            }
-            headers.extend([
-                (
-                    header::CONTENT_ENCODING,
-                    HeaderValue::from_str(encoding_name).map_err(std::io::Error::other)?,
-                ),
-                (
-                    header::CONTENT_TYPE,
-                    HeaderValue::from_str(&file_info.mime_type).map_err(std::io::Error::other)?,
-                ),
-                (
-                    header::ETAG,
-                    HeaderValue::from_str(&etag_val).map_err(std::io::Error::other)?,
-                ),
-                (
-                    header::LAST_MODIFIED,
-                    HeaderValue::from_str(&file_info.last_modified_str)
-                        .map_err(std::io::Error::other)?,
-                ),
-            ]);
+    etag: &str,
+    size: usize,
+) -> std::io::Result<()> {
+    if !disable_content_length {
+        headers.insert(
+            header::CONTENT_LENGTH,
+            HeaderValue::from_str(&size.to_string()).map_err(std::io::Error::other)?,
+        );
+    }
+    headers.extend([
+        (
+            header::CONTENT_ENCODING,
+            HeaderValue::from_str(encoding_name).map_err(std::io::Error::other)?,
+        ),
+        (
+            header::CONTENT_TYPE,
+            HeaderValue::from_str(&file_info.mime_type).map_err(std::io::Error::other)?,
+        ),
+        (
+            header::ETAG,
+            HeaderValue::from_str(etag).map_err(std::io::Error::other)?,
+        ),
+        (
+            header::LAST_MODIFIED,
+            HeaderValue::from_str(&file_info.last_modified_str).map_err(std::io::Error::other)?,
+        ),
+    ]);
+    Ok(())
+}
 
-            Ok((StatusCode::OK, compressed))
+fn get_file_info(path: &Path, meta: Metadata, cache: &FileCache) -> std::io::Result<FileInfo> {
+    let key = path.to_string_lossy().to_string();
+    // Clone before inserting: retaining a DashMap read guard here can deadlock.
+    let previous = cache.get(&key).map(|entry| entry.clone());
+    let info = generate_file_info(path, meta, previous.as_ref())?;
+    cache.insert(key, info.clone());
+    Ok(info)
+}
+
+async fn get_file_info_async(
+    path: &Path,
+    meta: Metadata,
+    cache: &FileCache,
+) -> std::io::Result<FileInfo> {
+    #[cfg(feature = "rt-tokio")]
+    {
+        let key = path.to_string_lossy().to_string();
+        let previous = cache.get(&key).map(|entry| entry.clone());
+        let path = path.to_owned();
+        let info =
+            tokio::task::spawn_blocking(move || generate_file_info(&path, meta, previous.as_ref()))
+                .await
+                .map_err(std::io::Error::other)??;
+        cache.insert(key, info.clone());
+        Ok(info)
+    }
+    #[cfg(not(feature = "rt-tokio"))]
+    get_file_info(path, meta, cache)
+}
+
+fn load_file_version(
+    path: &Path,
+    meta: Metadata,
+    previous: Option<&FileVersion>,
+) -> std::io::Result<FileVersion> {
+    let stamp = FileStamp::from_metadata(&meta)?;
+    if let Some(previous) = previous
+        && previous.stamp.can_reuse(&stamp)
+    {
+        return Ok(previous.clone());
+    }
+
+    // Hash through a bounded buffer, not an allocation the size of a pak file.
+    // Retry if a publisher changes/replaces the file while it is being hashed.
+    // As with streaming, published assets should be replaced atomically instead
+    // of being rewritten in place during active transfers.
+    for _ in 0..3 {
+        let mut file = std::fs::File::open(path)?;
+        let meta = file.metadata()?;
+        if !meta.is_file() {
+            return Err(std::io::Error::other("expected a regular file"));
         }
-        Err(e) => {
-            error!(
-                "Compression failed ({encoding_name}) for {}: {e}",
-                file_info.path.display()
-            );
-            Ok((StatusCode::INTERNAL_SERVER_ERROR, Bytes::new()))
+        let before = FileStamp::from_metadata(&meta)?;
+        let mut digest = Sha256::new();
+        let mut buffer = [0u8; 64 * 1024];
+        let mut size = 0u64;
+        loop {
+            let count = match file.read(&mut buffer) {
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                result => result?,
+            };
+            if count == 0 {
+                break;
+            }
+            digest.update(&buffer[..count]);
+            size += count as u64;
         }
+        let after = FileStamp::from_metadata(&file.metadata()?)?;
+        let current = FileStamp::from_metadata(&std::fs::metadata(path)?)?;
+        if before == after && after == current && size == after.size {
+            return Ok(FileVersion {
+                path: path.to_owned(),
+                stamp: after,
+                etag: digest_etag(&digest.finalize()),
+            });
+        }
+    }
+    Err(std::io::Error::other(
+        "file changed while generating its ETag",
+    ))
+}
+
+fn load_sidecar(
+    path: PathBuf,
+    previous: Option<&FileVersion>,
+) -> std::io::Result<Option<FileVersion>> {
+    match std::fs::metadata(&path) {
+        Ok(meta) if meta.is_file() => load_file_version(&path, meta, previous).map(Some),
+        Ok(_) => Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
     }
 }
 
 fn generate_file_info(
-    path: &PathBuf,
-    meta: &Metadata,
-    modified: SystemTime,
-    cache: &FileCache,
-) -> FileInfo {
-    let duration = modified
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default();
-
-    let etag = format!("\"{}-{}\"", duration.as_secs(), meta.len());
-    let mime_type = mime_for_path(path);
-
-    // Precompute Last-Modified string once
-    let last_modified_str = httpdate::HttpDate::from(modified).to_string();
-
-    // Probe precompressed siblings once
-    let parent = path.parent();
-    let file_stem = path.file_name().and_then(|f| f.to_str());
+    path: &Path,
+    meta: Metadata,
+    previous: Option<&FileInfo>,
+) -> std::io::Result<FileInfo> {
+    let original = load_file_version(path, meta, previous.map(|info| &info.original))?;
+    let last_modified_str = httpdate::HttpDate::from(original.stamp.modified).to_string();
     let (mut gz_info, mut br_info, mut zstd_info) = (None, None, None);
-
-    if let (Some(p), Some(stem)) = (parent, file_stem) {
-        let gz_path = p.join("gz").join(format!("{stem}.gz"));
-        if let Ok(m) = std::fs::metadata(&gz_path) {
-            gz_info = Some((gz_path, m.len()));
-        }
-        let br_path = p.join("br").join(format!("{stem}.br"));
-        if let Ok(m) = std::fs::metadata(&br_path) {
-            br_info = Some((br_path, m.len()));
-        }
-        let zstd_path = p.join("zstd").join(format!("{stem}.zstd"));
-        if let Ok(m) = std::fs::metadata(&zstd_path) {
-            zstd_info = Some((zstd_path, m.len()));
-        }
+    // Sidecars have independent lifetimes: probe them even when the source did
+    // not change, and hash their own bytes rather than decorating the source tag.
+    if let (Some(parent), Some(stem)) = (path.parent(), path.file_name().and_then(|f| f.to_str())) {
+        gz_info = load_sidecar(
+            parent.join("gz").join(format!("{stem}.gz")),
+            previous.and_then(|i| i.gz_info.as_ref()),
+        )?;
+        br_info = load_sidecar(
+            parent.join("br").join(format!("{stem}.br")),
+            previous.and_then(|i| i.br_info.as_ref()),
+        )?;
+        zstd_info = load_sidecar(
+            parent.join("zstd").join(format!("{stem}.zstd")),
+            previous.and_then(|i| i.zstd_info.as_ref()),
+        )?;
     }
-
-    let info = FileInfo {
-        etag,
-        mime_type: mime_type.to_string(),
-        path: path.clone(),
-        size: meta.len(),
-        modified,
+    Ok(FileInfo {
+        original,
+        mime_type: mime_for_path(path).to_string(),
         last_modified_str,
         gz_info,
         br_info,
         zstd_info,
-    };
-
-    cache.insert(path.to_string_lossy().to_string(), info.clone());
-    info
+    })
 }
 
 fn mime_for_path(path: &Path) -> Mime {
