@@ -649,29 +649,57 @@ async fn serve_wt_endpoint<F: HFactory>(
                 };
 
                 let service = factory.wt_service(shard_id);
+                let request_timeout = wt_cfg.request_timeout;
                 tokio::task::spawn_local(async move {
+                    use crate::network::http::wt::{WtAdmission, WtRequest, WtService, WtSession};
                     let _permit = permit;
-
-                    let session_req = match incoming.await {
-                        Ok(s) => s,
-                        Err(e) => {
-                            error!("WT session request error: {e}");
-                            return;
-                        }
-                    };
-
-                    // Accept the WT session (Extended CONNECT)
-                    let conn = match session_req.accept().await {
-                        Ok(c) => c,
-                        Err(e) => {
-                            error!("WT accept error: {e}");
-                            return;
-                        }
-                    };
-
-                    // Hand off to your service
-                    use crate::network::http::wt::{WtService, WtSession};
                     let mut svc = service;
+
+                    let setup = async {
+                        let session_req = incoming.await.map_err(|e| {
+                            std::io::Error::other(format!("WT session request error: {e}"))
+                        })?;
+                        let decision = match svc.admit(&WtRequest::new(&session_req)).await {
+                            Ok(decision) => decision,
+                            Err(_) => {
+                                // Policy errors may contain credentials. Fail closed without logging them.
+                                tracing::warn!("WT admission failed; rejecting request");
+                                WtAdmission::Forbidden
+                            }
+                        };
+                        match decision {
+                            WtAdmission::Accept => {
+                                session_req.accept().await.map(Some).map_err(|e| {
+                                    std::io::Error::other(format!("WT accept error: {e}"))
+                                })
+                            }
+                            WtAdmission::Forbidden => {
+                                session_req.forbidden().await;
+                                Ok(None)
+                            }
+                            WtAdmission::NotFound => {
+                                session_req.not_found().await;
+                                Ok(None)
+                            }
+                            WtAdmission::TooManyRequests => {
+                                session_req.too_many_requests().await;
+                                Ok(None)
+                            }
+                        }
+                    };
+                    let conn = match tokio::time::timeout(request_timeout, setup).await {
+                        Ok(Ok(Some(conn))) => conn,
+                        Ok(Ok(None)) => return,
+                        Ok(Err(e)) => {
+                            error!("{e}");
+                            return;
+                        }
+                        Err(_) => {
+                            tracing::warn!("WT request admission timed out");
+                            return;
+                        }
+                    };
+
                     let mut sess = WtSession::new(conn);
                     if let Err(e) = svc.call(&mut sess).await {
                         error!("WT service error: {e}");
