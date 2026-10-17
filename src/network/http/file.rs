@@ -686,6 +686,12 @@ async fn serve_async_fn<S: Session>(
     .await
 }
 
+// Once body streaming starts, an error must close the connection: the client
+// still expects the advertised bytes and cannot parse a second HTTP response.
+fn abort_file_stream(error: std::io::Error) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::ConnectionAborted, error)
+}
+
 #[cfg(feature = "net-h1-server")]
 pub fn serve_h1<S: Session>(
     session: &mut S,
@@ -754,8 +760,15 @@ pub fn serve_h1<S: Session>(
         // detect if this was a Range request
         let is_range_response = status == StatusCode::PARTIAL_CONTENT;
 
-        // Always send non-streaming body for 206 / Range responses.
-        if is_range_response {
+        let stream_threshold = if stream_threshold_and_chunk_size.0 == 0 {
+            256 * 1024
+        } else {
+            stream_threshold_and_chunk_size.0
+        };
+
+        // Buffer small ranges only; large ranges use the same bounded reader
+        // as full downloads, preserving the headers prepared by serve_fn.
+        if is_range_response && bytes_to_send < stream_threshold {
             let file = std::fs::File::open(&file_path)?;
             let mmap = unsafe { memmap2::Mmap::map(&file) }.map_err(std::io::Error::other)?;
             let slice = &mmap[start as usize..end as usize];
@@ -766,7 +779,7 @@ pub fn serve_h1<S: Session>(
                 .eom();
         }
 
-        // existing streaming logic for non-Range responses
+        // Open the file before sending streaming headers.
         let file = match std::fs::File::open(&file_path) {
             Ok(f) => f,
             Err(e) => {
@@ -778,12 +791,6 @@ pub fn serve_h1<S: Session>(
                     .body(Bytes::new())
                     .eom();
             }
-        };
-
-        let stream_threshold = if stream_threshold_and_chunk_size.0 == 0 {
-            256 * 1024 // 256 KB
-        } else {
-            stream_threshold_and_chunk_size.0
         };
 
         if bytes_to_send < stream_threshold {
@@ -802,18 +809,18 @@ pub fn serve_h1<S: Session>(
             };
 
             session.status_code(status);
-            session.start_h1_streaming()?;
+            session.start_h1_streaming().map_err(abort_file_stream)?;
 
             let slice = &mmap[start as usize..end as usize];
             session.send_h1_data(slice, true)?;
         } else {
             use std::io::{Read, Seek, SeekFrom};
 
-            session.status_code(status);
-            session.start_h1_streaming()?;
-
             let mut f = file;
             f.seek(SeekFrom::Start(start))?;
+
+            session.status_code(status);
+            session.start_h1_streaming().map_err(abort_file_stream)?;
 
             let stream_chunk = if stream_threshold_and_chunk_size.1 == 0 {
                 64 * 1024 // 64 KB
@@ -821,18 +828,26 @@ pub fn serve_h1<S: Session>(
                 stream_threshold_and_chunk_size.1
             };
 
-            let mut remaining = bytes_to_send as usize;
-            let mut buf = vec![0u8; stream_chunk];
+            let mut remaining = bytes_to_send;
+            let mut buf = vec![0u8; remaining.min(stream_chunk as u64) as usize];
 
             while remaining > 0 {
-                let to_read = remaining.min(buf.len());
-                let n = f.read(&mut buf[..to_read])?;
+                let to_read = remaining.min(buf.len() as u64) as usize;
+                let n = match f.read(&mut buf[..to_read]) {
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    result => result.map_err(abort_file_stream)?,
+                };
                 if n == 0 {
-                    break;
+                    return Err(abort_file_stream(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "file ended before the advertised response length",
+                    )));
                 }
-                remaining -= n;
+                remaining -= n as u64;
 
-                session.send_h1_data(&buf[..n], remaining == 0)?;
+                session
+                    .send_h1_data(&buf[..n], remaining == 0)
+                    .map_err(abort_file_stream)?;
             }
         }
     }
@@ -918,23 +933,7 @@ pub async fn serve_h1_async<S: Session>(
             .await;
     }
 
-    // Range response
-    let is_range_response = status == StatusCode::PARTIAL_CONTENT;
-    if is_range_response {
-        let (status2, body) =
-            tokio::task::spawn_blocking(move || -> std::io::Result<(StatusCode, Bytes)> {
-                let file = std::fs::File::open(&file_path)?;
-                let mmap = unsafe { memmap2::Mmap::map(&file) }.map_err(std::io::Error::other)?;
-                let slice = &mmap[start as usize..end as usize];
-                Ok((status, Bytes::copy_from_slice(slice)))
-            })
-            .await
-            .map_err(|e| std::io::Error::other(format!("spawn_blocking join error: {e}")))??;
-
-        return session.status_code(status2).body(body).eom_async().await;
-    }
-
-    // Non-range responses, decide streaming threshold
+    // Apply the streaming threshold to both ranges and full downloads.
     let stream_threshold = if stream_threshold_and_chunk_size.0 == 0 {
         256 * 1024
     } else {
@@ -956,37 +955,45 @@ pub async fn serve_h1_async<S: Session>(
         return session.status_code(status2).body(body).eom_async().await;
     }
 
-    // Large body: H1 chunked streaming
+    // Large body: bounded H1 streaming with the known Content-Length.
     let chunk_size = if stream_threshold_and_chunk_size.1 == 0 {
         64 * 1024
     } else {
         stream_threshold_and_chunk_size.1
     };
 
-    // Start streaming response
-    session.status_code(status);
-    session.start_h1_streaming_async().await?;
-
     let mut f = tokio::fs::File::open(&file_path).await.map_err(|e| {
         std::io::Error::other(format!("Failed to open file {}: {e}", file_path.display()))
     })?;
     f.seek(SeekFrom::Start(start)).await?;
 
+    session.status_code(status);
+    session
+        .start_h1_streaming_async()
+        .await
+        .map_err(abort_file_stream)?;
+
     let mut remaining = bytes_to_send;
-    let mut buf = vec![0u8; chunk_size];
+    let mut buf = vec![0u8; remaining.min(chunk_size as u64) as usize];
 
     while remaining > 0 {
-        let to_read = (remaining as usize).min(buf.len());
-        let n = f.read(&mut buf[..to_read]).await?;
+        let to_read = remaining.min(buf.len() as u64) as usize;
+        let n = match f.read(&mut buf[..to_read]).await {
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            result => result.map_err(abort_file_stream)?,
+        };
         if n == 0 {
-            break;
+            return Err(abort_file_stream(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "file ended before the advertised response length",
+            )));
         }
         remaining -= n as u64;
 
-        // send_h1_data is sync
         session
             .send_h1_data_async(&buf[..n], remaining == 0)
-            .await?;
+            .await
+            .map_err(abort_file_stream)?;
     }
 
     Ok(())

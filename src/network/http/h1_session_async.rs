@@ -26,9 +26,10 @@ pub struct H1SessionAsync<'a, S> {
     keep_alive: bool,
     sent: bool,
 
-    // streaming state (HTTP/1.1 chunked)
+    // streaming state (fixed length, or HTTP/1.1 chunked when unknown)
     h1_streaming_headers_sent: bool,
     h1_streaming: bool,
+    h1_streaming_remaining: Option<u64>,
 
     // underlying transport
     stream: &'a mut S,
@@ -69,6 +70,7 @@ impl<'a, S> H1SessionAsync<'a, S> {
 
             h1_streaming_headers_sent: false,
             h1_streaming: false,
+            h1_streaming_remaining: None,
 
             #[cfg(feature = "net-ws-server")]
             ws_scratch: bytes::BytesMut::new(),
@@ -112,6 +114,63 @@ impl<'a, S> H1SessionAsync<'a, S> {
                 Ok::<(), std::io::Error>(())
             })
         })
+    }
+
+    fn prepare_h1_streaming(&mut self) -> std::io::Result<()> {
+        let mut length = None;
+        for value in self.rsp_headers.get_all(header::CONTENT_LENGTH) {
+            let value = value.to_str().map_err(std::io::Error::other)?.trim();
+            if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "invalid Content-Length",
+                ));
+            }
+            let parsed = value.parse::<u64>().map_err(std::io::Error::other)?;
+            if length.is_some_and(|previous| previous != parsed) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "conflicting Content-Length headers",
+                ));
+            }
+            length = Some(parsed);
+        }
+        self.h1_streaming_remaining = length;
+        if let Some(length) = length {
+            // Exactly one framing mechanism, and one canonical length field.
+            self.rsp_headers.remove(header::TRANSFER_ENCODING);
+            self.rsp_headers.insert(
+                header::CONTENT_LENGTH,
+                HeaderValue::from_str(&length.to_string()).map_err(std::io::Error::other)?,
+            );
+        } else {
+            self.rsp_headers.insert(
+                header::TRANSFER_ENCODING,
+                HeaderValue::from_static("chunked"),
+            );
+        }
+        self.h1_streaming = true;
+        self.h1_streaming_headers_sent = false;
+        Ok(())
+    }
+
+    fn remaining_after_chunk(&self, size: usize, last: bool) -> std::io::Result<Option<u64>> {
+        let Some(remaining) = self.h1_streaming_remaining else {
+            return Ok(None);
+        };
+        let remaining = remaining.checked_sub(size as u64).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "stream exceeds Content-Length",
+            )
+        })?;
+        if last && remaining != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "stream ended before Content-Length",
+            ));
+        }
+        Ok(Some(remaining))
     }
 
     #[inline]
@@ -224,12 +283,7 @@ where
         if self.h1_streaming {
             return Ok(());
         }
-        self.h1_streaming = true;
-        self.rsp_headers.remove(header::CONTENT_LENGTH);
-        self.rsp_headers.insert(
-            header::TRANSFER_ENCODING,
-            HeaderValue::from_static("chunked"),
-        );
+        self.prepare_h1_streaming()?;
 
         if !self.keep_alive {
             self.rsp_headers
@@ -266,7 +320,7 @@ where
         Ok(())
     }
 
-    /// Async header flush for H1 streaming (chunked).
+    /// Async header flush, preserving a known length or using chunked encoding.
     async fn start_h1_streaming_async(&mut self) -> std::io::Result<()> {
         use tokio::io::AsyncWriteExt;
 
@@ -277,15 +331,7 @@ where
             return Ok(());
         }
 
-        self.h1_streaming = true;
-        self.h1_streaming_headers_sent = false;
-
-        // Switch to chunked mode
-        self.rsp_headers.remove(header::CONTENT_LENGTH);
-        self.rsp_headers.insert(
-            header::TRANSFER_ENCODING,
-            HeaderValue::from_static("chunked"),
-        );
+        self.prepare_h1_streaming()?;
 
         // Connection header
         if !self.keep_alive {
@@ -355,25 +401,32 @@ where
             ));
         }
 
-        // Chunk frame: "<HEX>\r\n<data>\r\n"
+        let remaining = self.remaining_after_chunk(data.len(), last)?;
+        let chunked = remaining.is_none();
         if !data.is_empty() {
-            use core::fmt::Write;
-            let mut s = heapless::String::<32>::new();
-            write!(&mut s, "{:X}\r\n", data.len()).map_err(std::io::Error::other)?;
-            self.write_blocking(s.as_bytes())?;
+            if chunked {
+                use core::fmt::Write;
+                let mut s = heapless::String::<32>::new();
+                write!(&mut s, "{:X}\r\n", data.len()).map_err(std::io::Error::other)?;
+                self.write_blocking(s.as_bytes())?;
+            }
             self.write_blocking(data)?;
-            self.write_blocking(b"\r\n")?;
+            if chunked {
+                self.write_blocking(b"\r\n")?;
+            }
         }
-
         if last {
-            self.write_blocking(b"0\r\n\r\n")?;
+            if chunked {
+                self.write_blocking(b"0\r\n\r\n")?;
+            }
             self.sent = true;
         }
+        self.h1_streaming_remaining = remaining;
 
         Ok(())
     }
 
-    /// Async chunk send. If `last` is true, sends terminating chunk.
+    /// Async body send. Only unknown-length streams use chunk framing.
     async fn send_h1_data_async(&mut self, data: &[u8], last: bool) -> std::io::Result<()> {
         use core::fmt::Write as _;
         use tokio::io::AsyncWriteExt;
@@ -387,25 +440,29 @@ where
             ));
         }
         if !self.h1_streaming_headers_sent {
-            // If someone toggled state without emitting headers, fix it
-            self.start_h1_streaming_async().await?;
+            return Err(std::io::Error::other("streaming headers not sent"));
         }
 
-        // Chunk frame: "<HEX>\r\n<data>\r\n"
+        let remaining = self.remaining_after_chunk(data.len(), last)?;
+        let chunked = remaining.is_none();
         if !data.is_empty() {
-            let mut s = heapless::String::<32>::new();
-            write!(&mut s, "{:X}\r\n", data.len()).map_err(std::io::Error::other)?;
-            self.stream.write_all(s.as_bytes()).await?;
+            if chunked {
+                let mut s = heapless::String::<32>::new();
+                write!(&mut s, "{:X}\r\n", data.len()).map_err(std::io::Error::other)?;
+                self.stream.write_all(s.as_bytes()).await?;
+            }
             self.stream.write_all(data).await?;
-            self.stream.write_all(b"\r\n").await?;
+            if chunked {
+                self.stream.write_all(b"\r\n").await?;
+            }
         }
-
-        if last {
+        if last && chunked {
             self.stream.write_all(b"0\r\n\r\n").await?;
-            self.stream.flush().await?;
+        }
+        self.stream.flush().await?;
+        self.h1_streaming_remaining = remaining;
+        if last {
             self.sent = true;
-        } else {
-            self.stream.flush().await?;
         }
 
         Ok(())
@@ -489,6 +546,10 @@ where
     #[inline]
     async fn eom_async(&mut self) -> std::io::Result<()> {
         use tokio::io::AsyncWriteExt;
+
+        if self.sent || self.h1_streaming_headers_sent {
+            return Err(std::io::Error::other("response already started"));
+        }
 
         // If the response MUST NOT have a body, force empty body and Content-Length: 0
         if self.response_must_not_have_body() {

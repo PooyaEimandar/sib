@@ -333,6 +333,11 @@ cfg_if::cfg_if! {
 
                 // Normal HTTP error handling
                 if let Err(e) = r {
+                    // A partial fixed-length response cannot be followed by another
+                    // response on this connection (for example after file truncation).
+                    if e.kind() == std::io::ErrorKind::ConnectionAborted {
+                        return Err(e);
+                    }
                     error!("h1 service error: {e}");
                     if !session.response_sent() {
                         let _ = session

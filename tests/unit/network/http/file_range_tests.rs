@@ -631,3 +631,6 @@ mod precondition_tests;
 
 #[path = "file_etag_tests.rs"]
 mod etag_tests;
+
+#[path = "file_streaming_tests.rs"]
+mod streaming_tests;

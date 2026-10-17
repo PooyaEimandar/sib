@@ -320,7 +320,7 @@ where
                     if n < status_len {
                         off_status += n;
                     } else {
-                        off_status = status_len;
+                        off_status += status_len;
                         off_body += n - status_len;
                     }
                 }
@@ -518,7 +518,7 @@ where
                     if n < s1_len {
                         off_status += n;
                     } else {
-                        off_status = s1_len;
+                        off_status += s1_len;
                         off_body += n - s1_len;
                     }
                 }
