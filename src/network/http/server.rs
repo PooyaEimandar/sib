@@ -1235,9 +1235,9 @@ pub trait HFactory: Send + Sync + Sized + 'static {
 
         // Load full certificate chain (PEM or DER)
         fn load_cert_chain_pem(pem: &[u8]) -> std::io::Result<Vec<Vec<u8>>> {
-            let mut reader = std::io::Cursor::new(pem);
+            use rustls_pki_types::{CertificateDer, pem::PemObject};
             let mut ders = Vec::new();
-            for item in rustls_pemfile::certs(&mut reader) {
+            for item in CertificateDer::pem_slice_iter(pem) {
                 let der =
                     item.map_err(|e| std::io::Error::other(format!("Invalid cert in PEM: {e}")))?;
                 ders.push(der.to_vec());
@@ -1263,11 +1263,12 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         fn load_private_key_der_or_pem(
             bytes: &[u8],
         ) -> std::io::Result<wtransport::tls::PrivateKey> {
+            use rustls_pki_types::{PrivatePkcs8KeyDer, pem::PemObject};
+
             if bytes.starts_with(b"-----BEGIN") {
                 // Try PKCS#8
                 {
-                    let mut r = std::io::Cursor::new(bytes);
-                    let keys = rustls_pemfile::pkcs8_private_keys(&mut r)
+                    let keys = PrivatePkcs8KeyDer::pem_slice_iter(bytes)
                         .collect::<Result<Vec<_>, _>>()
                         .map_err(|e| {
                             std::io::Error::other(format!("Invalid PKCS#8 PEM key: {e}"))
