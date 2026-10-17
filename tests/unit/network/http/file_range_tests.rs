@@ -231,12 +231,10 @@ async fn response_with_encodings(
                     drop(session);
                     conn.graceful_shutdown();
                     // Keep driving the connection until the response is delivered.
-                    while let Some(result) = conn.accept().await {
-                        if result.is_err() {
-                            break;
-                        }
-                        panic!("unexpected second request");
-                    }
+                    assert!(
+                        !matches!(conn.accept().await, Some(Ok(_))),
+                        "unexpected second request"
+                    );
                 };
                 let client = async {
                     let (mut sender, conn) = h2::client::handshake(client_io).await.unwrap();

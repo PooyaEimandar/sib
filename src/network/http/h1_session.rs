@@ -618,18 +618,12 @@ where
 
         loop {
             // Try parse from already-buffered bytes
-            let frame = ws::try_parse_frame(self.req_buf).map_err(|error| {
+            let frame = ws::try_parse_frame(self.req_buf, BUF_LEN).map_err(|error| {
                 // The sync server only hard-closes on ConnectionAborted.
                 // A WebSocket protocol error must not resume HTTP processing.
                 io::Error::new(io::ErrorKind::ConnectionAborted, error)
             })?;
             if let Some(frame) = frame {
-                if frame.payload.len() > BUF_LEN {
-                    return Err(std::io::Error::other(format!(
-                        "max WS frame is {}",
-                        BUF_LEN
-                    )));
-                }
                 return Ok((frame.op, frame.payload, frame.fin));
             }
 

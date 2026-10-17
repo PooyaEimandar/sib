@@ -1526,7 +1526,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         let factory = Arc::new(self);
         let wt_cfg_arc = Arc::new(wt_cfg);
 
-        let mut handles = Vec::with_capacity(num_shards as usize);
+        let mut handles = Vec::with_capacity(num_shards);
         for shard_id in 0..num_shards {
             let factory = factory.clone();
             let wt_cfg = wt_cfg_arc.clone();

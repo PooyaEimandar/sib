@@ -87,10 +87,7 @@ impl WtReadStream {
         match self.recv.read(buf).await {
             Ok(Some(n)) => Ok(n),
             Ok(None) => Ok(0), // EOF reached, return 0 bytes read
-            Err(e) => Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("wt recv read: {e}"),
-            )),
+            Err(e) => Err(std::io::Error::other(format!("wt recv read: {e}"))),
         }
     }
 }
@@ -102,16 +99,18 @@ pub struct WtWriteStream {
 impl WtWriteStream {
     /// Write data to the stream.
     pub async fn write(&mut self, buf: &bytes::Bytes) -> std::io::Result<usize> {
-        self.send.write(buf).await.map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::Other, format!("wt send write: {e}"))
-        })
+        self.send
+            .write(buf)
+            .await
+            .map_err(|e| std::io::Error::other(format!("wt send write: {e}")))
     }
 
     /// Gracefully finish the stream.
     pub async fn finish(&mut self) -> std::io::Result<()> {
-        self.send.finish().await.map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::Other, format!("wt send finish: {e}"))
-        })
+        self.send
+            .finish()
+            .await
+            .map_err(|e| std::io::Error::other(format!("wt send finish: {e}")))
     }
 }
 
@@ -126,9 +125,7 @@ impl WtSession {
             .accept_bi()
             .await
             .map(|(send, recv)| (WtWriteStream { send }, WtReadStream { recv }))
-            .map_err(|e| {
-                std::io::Error::new(std::io::ErrorKind::Other, format!("wt accept_bi: {e}"))
-            })
+            .map_err(|e| std::io::Error::other(format!("wt accept_bi: {e}")))
     }
 
     /// Accept a unidirectional stream (from client).
@@ -137,33 +134,30 @@ impl WtSession {
             .accept_uni()
             .await
             .map(|recv| WtReadStream { recv })
-            .map_err(|e| {
-                std::io::Error::new(std::io::ErrorKind::Other, format!("wt accept_uni: {e}"))
-            })
+            .map_err(|e| std::io::Error::other(format!("wt accept_uni: {e}")))
     }
 
     /// Receive a datagram.
     pub async fn recv_dgram(&self) -> std::io::Result<bytes::Bytes> {
-        let datagram = self.conn.receive_datagram().await.map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::Other, format!("wt recv_dgram: {e}"))
-        })?;
+        let datagram = self
+            .conn
+            .receive_datagram()
+            .await
+            .map_err(|e| std::io::Error::other(format!("wt recv_dgram: {e}")))?;
         Ok(bytes::Bytes::from(datagram.to_vec()))
     }
 
     /// Open a server->client unidirectional stream.
     pub async fn open_uni(&self) -> std::io::Result<WtWriteStream> {
-        let opening = self.conn.open_uni().await.map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::Other, format!("wt open_uni: {e}"))
-        })?;
+        let opening = self
+            .conn
+            .open_uni()
+            .await
+            .map_err(|e| std::io::Error::other(format!("wt open_uni: {e}")))?;
         opening
             .await
             .map(|send| WtWriteStream { send })
-            .map_err(|e| {
-                std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("wt open_uni (send stream): {e}"),
-                )
-            })
+            .map_err(|e| std::io::Error::other(format!("wt open_uni (send stream): {e}")))
     }
 
     /// Current maximum outgoing application datagram payload, in bytes.

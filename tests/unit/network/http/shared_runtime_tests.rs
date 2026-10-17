@@ -65,6 +65,23 @@ impl HFactory for SharedService {
 impl HAsyncService for SharedService {
     async fn call<S: Session>(&self, session: &mut S) -> std::io::Result<()> {
         self.assert_caller_runtime();
+        #[cfg(feature = "net-ws-server")]
+        if session.is_ws() {
+            use crate::network::http::ws::{MessageAssembler, OpCode};
+            session.ws_accept_async().await?;
+            let mut messages = MessageAssembler::new(32, 4)?;
+            loop {
+                let (op, payload) = messages.read_async(session).await?;
+                self.assert_caller_runtime();
+                match op {
+                    OpCode::Ping => session.ws_write_async(OpCode::Pong, payload, true).await?,
+                    OpCode::Close => {
+                        return session.ws_write_async(OpCode::Close, payload, true).await;
+                    }
+                    _ => session.ws_write_async(op, payload, true).await?,
+                }
+            }
+        }
         // Exercise the non-Send service futures supported by Sib's API.
         let body = std::rc::Rc::new(Bytes::from_static(b"shared runtime"));
         tokio::task::yield_now().await;
@@ -169,6 +186,25 @@ async fn http_webtransport_and_udp_share_the_callers_runtime() {
             .unwrap()
             .with_root_certificates(roots)
             .with_no_client_auth();
+            #[cfg(feature = "net-ws-server")]
+            let mut websocket = {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut ws_tls = tls.clone();
+                ws_tls.alpn_protocols = vec![b"http/1.1".to_vec()];
+                let connector = tokio_rustls::TlsConnector::from(Arc::new(ws_tls));
+                let socket = tokio::net::TcpStream::connect(http_addr).await.unwrap();
+                let mut socket = connector.connect("localhost".try_into().unwrap(), socket).await.unwrap();
+                socket.write_all(b"GET /ws HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n").await.unwrap();
+                let mut response = Vec::new();
+                while !response.ends_with(b"\r\n\r\n") {
+                    response.push(socket.read_u8().await.unwrap());
+                }
+                assert!(response.starts_with(b"HTTP/1.1 101 "));
+                // Begin a fragmented binary message, then leave it pending while
+                // WT and UDP operate on the very same runtime thread.
+                socket.write_all(b"\x02\x83\0\0\0\0ws ").await.unwrap();
+                socket
+            };
             tls.alpn_protocols = vec![b"h3".to_vec()];
             let config = wtransport::ClientConfig::builder()
                 .with_bind_address("127.0.0.1:0".parse().unwrap())
@@ -189,6 +225,18 @@ async fn http_webtransport_and_udp_share_the_callers_runtime() {
             let mut buf = [0; 32];
             let (length, _) = udp_client.recv_from(&mut buf).await.unwrap();
             assert_eq!(&buf[..length], b"udp packet");
+            #[cfg(feature = "net-ws-server")]
+            {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                websocket.write_all(b"\x89\x81\0\0\0\0?\x80\x86\0\0\0\0packet").await.unwrap();
+                let mut response = [0; 14];
+                websocket.read_exact(&mut response).await.unwrap();
+                assert_eq!(&response, b"\x8a\x01?\x82\x09ws packet");
+                websocket.write_all(b"\x88\x82\0\0\0\0\x03\xe8").await.unwrap();
+                let mut close = [0; 4];
+                websocket.read_exact(&mut close).await.unwrap();
+                assert_eq!(&close, b"\x88\x02\x03\xe8");
+            }
             assert_eq!(service.http_requests.load(Ordering::SeqCst), 2);
             assert_eq!(service.wt_sessions.load(Ordering::SeqCst), 1);
             // Leave an active WT receive blocked when the servers are cancelled.

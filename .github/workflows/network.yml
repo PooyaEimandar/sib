@@ -1,0 +1,89 @@
+name: Networking regressions
+
+on:
+  push:
+    paths:
+      - 'src/network/**'
+      - 'src/lib.rs'
+      - 'tests/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.cargo/**'
+      - '.github/workflows/network.yml'
+  pull_request:
+    paths:
+      - 'src/network/**'
+      - 'src/lib.rs'
+      - 'tests/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.cargo/**'
+      - '.github/workflows/network.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Exercise the complete host combination without requiring FoundationDB,
+# GStreamer, a GPU, external servers, or deployment credentials.
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: --cfg reqwest_unstable -D warnings
+  HOST_FEATURES: rt-tokio,net-h1-server,net-h2-server,net-file-server,net-ws-server,net-wt-server
+
+jobs:
+  network:
+    name: Networking (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux build tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libclang-dev cmake ninja-build nasm pkg-config libssl-dev
+
+      - name: Install macOS build tools
+        if: runner.os == 'macOS'
+        run: brew install ninja nasm
+
+      - name: Install Windows build tools
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install nasm ninja llvm -y --no-progress
+          "$env:ProgramFiles\NASM" >> $env:GITHUB_PATH
+          "LIBCLANG_PATH=$env:ProgramFiles\LLVM\bin" >> $env:GITHUB_ENV
+
+      - name: Set up stable Rust
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustup component add clippy
+
+      - name: Check independent feature combinations
+        run: |
+          for features in \
+            'net-h1-server,net-file-server,net-ws-server' \
+            'rt-tokio,net-h2-server,net-file-server,net-ws-server' \
+            'net-wt-server,mtls'; do
+            cargo check --locked --lib --no-default-features --features "$features"
+          done
+
+      - name: Lint combined host configuration
+        run: cargo clippy --locked --lib --tests --no-default-features --features "$HOST_FEATURES" -- -D warnings
+
+      - name: Run combined host regressions
+        run: cargo test --locked --lib --tests --no-default-features --features "$HOST_FEATURES"
+
+      - name: Check public API documentation
+        run: cargo test --locked --doc --no-default-features --features "$HOST_FEATURES"

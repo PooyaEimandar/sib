@@ -757,26 +757,23 @@ pub fn serve_h1<S: Session>(
             return session.status_code(status).body(Bytes::new()).eom();
         }
 
-        // detect if this was a Range request
-        let is_range_response = status == StatusCode::PARTIAL_CONTENT;
-
         let stream_threshold = if stream_threshold_and_chunk_size.0 == 0 {
             256 * 1024
         } else {
             stream_threshold_and_chunk_size.0
         };
 
-        // Buffer small ranges only; large ranges use the same bounded reader
-        // as full downloads, preserving the headers prepared by serve_fn.
-        if is_range_response && bytes_to_send < stream_threshold {
-            let file = std::fs::File::open(&file_path)?;
-            let mmap = unsafe { memmap2::Mmap::map(&file) }.map_err(std::io::Error::other)?;
-            let slice = &mmap[start as usize..end as usize];
-
-            return session
-                .status_code(status)
-                .body(Bytes::copy_from_slice(slice))
-                .eom();
+        // Snapshot small responses before headers. mmap could fault if a file
+        // is truncated during delivery, and stale ranges could panic on slicing.
+        if bytes_to_send < stream_threshold {
+            use std::io::{Seek, SeekFrom};
+            let mut file = std::fs::File::open(&file_path).map_err(abort_file_stream)?;
+            file.seek(SeekFrom::Start(start))
+                .map_err(abort_file_stream)?;
+            let size = usize::try_from(bytes_to_send).map_err(std::io::Error::other)?;
+            let mut body = vec![0; size];
+            file.read_exact(&mut body).map_err(abort_file_stream)?;
+            return session.status_code(status).body(Bytes::from(body)).eom();
         }
 
         // Open the file before sending streaming headers.
@@ -793,27 +790,7 @@ pub fn serve_h1<S: Session>(
             }
         };
 
-        if bytes_to_send < stream_threshold {
-            // small: mmap, but still go through H1 streaming so we reuse the headers
-            let mmap = match unsafe { memmap2::Mmap::map(&file) } {
-                Ok(m) => m,
-                Err(e) => {
-                    error!("Failed to memory-map file: {}: {}", file_path.display(), e);
-                    let headers = get_error_headers!(true);
-                    return session
-                        .status_code(StatusCode::INTERNAL_SERVER_ERROR)
-                        .headers(&headers)?
-                        .body(Bytes::new())
-                        .eom();
-                }
-            };
-
-            session.status_code(status);
-            session.start_h1_streaming().map_err(abort_file_stream)?;
-
-            let slice = &mmap[start as usize..end as usize];
-            session.send_h1_data(slice, true)?;
-        } else {
+        {
             use std::io::{Read, Seek, SeekFrom};
 
             let mut f = file;
@@ -940,19 +917,24 @@ pub async fn serve_h1_async<S: Session>(
         stream_threshold_and_chunk_size.0
     };
 
-    // Small body: send all at once
+    // Snapshot a small response with runtime file I/O before sending headers.
     if bytes_to_send < stream_threshold {
-        let (status2, body) =
-            tokio::task::spawn_blocking(move || -> std::io::Result<(StatusCode, Bytes)> {
-                let file = std::fs::File::open(&file_path)?;
-                let mmap = unsafe { memmap2::Mmap::map(&file) }.map_err(std::io::Error::other)?;
-                let slice = &mmap[start as usize..end as usize];
-                Ok((status, Bytes::copy_from_slice(slice)))
-            })
+        let mut file = tokio::fs::File::open(&file_path)
             .await
-            .map_err(|e| std::io::Error::other(format!("spawn_blocking join error: {e}")))??;
-
-        return session.status_code(status2).body(body).eom_async().await;
+            .map_err(abort_file_stream)?;
+        file.seek(std::io::SeekFrom::Start(start))
+            .await
+            .map_err(abort_file_stream)?;
+        let size = usize::try_from(bytes_to_send).map_err(std::io::Error::other)?;
+        let mut body = vec![0; size];
+        file.read_exact(&mut body)
+            .await
+            .map_err(abort_file_stream)?;
+        return session
+            .status_code(status)
+            .body(Bytes::from(body))
+            .eom_async()
+            .await;
     }
 
     // Large body: bounded H1 streaming with the known Content-Length.

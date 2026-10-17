@@ -348,7 +348,7 @@ async fn dynamic_compression_etags_follow_output_when_settings_change() {
                 Method::GET,
                 headers.clone(),
                 true,
-                &[high.clone()],
+                std::slice::from_ref(&high),
             )
             .await;
             assert_eq!(first.status, StatusCode::OK);
@@ -366,7 +366,7 @@ async fn dynamic_compression_etags_follow_output_when_settings_change() {
                 Method::GET,
                 headers.clone(),
                 true,
-                &[high.clone()],
+                std::slice::from_ref(&high),
             )
             .await;
             assert_eq!(stale.status, StatusCode::PRECONDITION_FAILED);

@@ -392,3 +392,51 @@ async fn async_session_sync_adapter_preserves_fixed_length_streaming() {
     assert!(!response.headers.contains_key(header::TRANSFER_ENCODING));
     assert_eq!(response.body, b"hello");
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn small_h1_responses_survive_truncation_after_headers() {
+    for &protocol in PROTOCOLS.iter().filter(|p| !matches!(p, Protocol::H2)) {
+        for range in [false, true] {
+            let fixture = Fixture::new();
+            let bytes: Vec<_> = (0..8192).map(|i| (i % 251) as u8).collect();
+            std::fs::write(fixture.root.join("large.pak"), &bytes).unwrap();
+            let mut io = RecordingIo {
+                truncate_after_headers: Some(fixture.root.join("large.pak")),
+                ..Default::default()
+            };
+            serve(
+                &fixture,
+                protocol,
+                if range {
+                    range_headers("bytes=4096-")
+                } else {
+                    HeaderMap::new()
+                },
+                Version::HTTP_11,
+                (16 * 1024, 4096),
+                &mut io,
+            )
+            .await
+            .unwrap();
+            let response = parse_h1(&io.bytes);
+            let expected = if range { &bytes[4096..] } else { &bytes[..] };
+            assert_eq!(
+                response.status,
+                if range {
+                    StatusCode::PARTIAL_CONTENT
+                } else {
+                    StatusCode::OK
+                }
+            );
+            assert!(
+                response.body == expected,
+                "{protocol:?}: buffered response changed after headers"
+            );
+            assert_eq!(
+                response.headers[header::CONTENT_LENGTH],
+                expected.len().to_string()
+            );
+            assert!(io.truncate_after_headers.is_none());
+        }
+    }
+}
