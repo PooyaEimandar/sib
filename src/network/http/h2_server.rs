@@ -158,7 +158,7 @@ cfg_if::cfg_if! {
     else if #[cfg(all(feature = "rt-tokio", not(feature = "rt-glommio")))] {
 
         pub(crate) async fn serve_h1<S, T>(
-            mut stream: S,
+            stream: S,
             service: T,
             config: &H2Config,
             peer_addr: std::net::IpAddr,
@@ -173,6 +173,7 @@ cfg_if::cfg_if! {
             use http::{header, HeaderMap, HeaderName, HeaderValue, Method, Uri, Version};
             use tokio::io::AsyncReadExt;
 
+            let mut stream = IdleIo::new(stream, config.io_timeout);
             let mut buf: Vec<u8> = Vec::with_capacity(8192);
 
             loop {
@@ -181,6 +182,7 @@ cfg_if::cfg_if! {
                     return Ok(());
                 }
 
+                let header_deadline = tokio::time::Instant::now() + config.io_timeout;
                 // read headers
                 while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
                     if buf.len() >= config.max_header_list_size as usize {
@@ -190,7 +192,7 @@ cfg_if::cfg_if! {
                     let mut tmp = vec![0u8; 8192];
                     let n = tokio::select! {
                         _ = shutdown.cancelled() => return Ok(()),
-                        r = stream.read(&mut tmp) => r?
+                        r = tokio::time::timeout_at(header_deadline, stream.read(&mut tmp)) => r??
                     };
                     if n == 0 {
                         if buf.is_empty() {
@@ -214,15 +216,13 @@ cfg_if::cfg_if! {
                     httparse::Status::Partial => return Err(std::io::Error::other("partial HTTP request")),
                 };
 
-                let method = req
-                    .method
-                    .map(|m| Method::from_bytes(m.as_bytes()).unwrap_or(Method::GET))
-                    .unwrap_or(Method::GET);
+                if header_len > config.max_header_list_size as usize {
+                    return Err(std::io::Error::other("request headers exceed max header list size"));
+                }
+                let method = Method::from_bytes(req.method.unwrap_or("").as_bytes())
+                    .map_err(std::io::Error::other)?;
 
-                let uri = req
-                    .path
-                    .and_then(|p| p.parse::<Uri>().ok())
-                    .unwrap_or_else(|| Uri::from_static("/"));
+                let uri = req.path.unwrap_or("").parse::<Uri>().map_err(std::io::Error::other)?;
 
                 let version = match req.version {
                     Some(0) => Version::HTTP_10,
@@ -237,17 +237,15 @@ cfg_if::cfg_if! {
                 }
 
                 // keep-alive decision
-                let conn_hdr = req_headers
-                    .get(header::CONNECTION)
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("")
-                    .to_ascii_lowercase();
-
-                let keep_alive = if version == Version::HTTP_11 {
-                    conn_hdr != "close"
-                } else {
-                    conn_hdr == "keep-alive"
-                };
+                let connection_tokens: Vec<_> = req_headers.get_all(header::CONNECTION).iter()
+                    .filter_map(|v| v.to_str().ok()).flat_map(|v| v.split(','))
+                    .map(|v| v.trim().to_ascii_lowercase()).collect();
+                let keep_alive = config.keep_alive && !connection_tokens.iter().any(|v| v == "close")
+                    && (version == Version::HTTP_11 || connection_tokens.iter().any(|v| v == "keep-alive"));
+                if req_headers.contains_key(header::TRANSFER_ENCODING) {
+                    return Err(std::io::Error::other("Transfer-Encoding is not supported on requests"));
+                }
+                let content_length = parse_content_length(&req_headers)?;
 
                 // WS detection BEFORE session creation
                 #[cfg(feature = "net-ws-server")]
@@ -258,18 +256,9 @@ cfg_if::cfg_if! {
 
                 // If WS upgrade: DO NOT read body (service will do ws_accept + ws loop).
                 let body_bytes = if is_ws {
+                    if content_length != 0 { return Err(std::io::Error::other("WebSocket upgrade cannot carry a request body")); }
                     Bytes::new()
                 } else {
-                    // Reject Transfer-Encoding: this fallback frames bodies solely by
-                    // Content-Length and does not decode chunked request bodies, so
-                    // accepting TE would enable CL/TE request smuggling (RFC 7230 §3.3.3).
-                    if req_headers.contains_key(header::TRANSFER_ENCODING) {
-                        return Err(std::io::Error::other(
-                            "Transfer-Encoding is not supported on requests",
-                        ));
-                    }
-                    let content_length = parse_content_length(&req_headers)?;
-
                     if content_length > config.max_frame_size as usize {
                         return Err(std::io::Error::other("content-length exceeds max frame size"));
                     }
@@ -294,7 +283,7 @@ cfg_if::cfg_if! {
                         body.extend_from_slice(&tmp[..n]);
                     }
 
-                    let consumed = header_len + content_length;
+                    let consumed = header_len + buffered_body_len;
                     buf.drain(..consumed);
 
                     Bytes::from(body)
@@ -376,15 +365,18 @@ cfg_if::cfg_if! {
             // make h2 server builder
             let builder = make_h2_server_builder(config);
 
+            let stream = IdleIo::new(stream, config.io_timeout);
             // Handshake H2 connection
             let mut conn = tokio::select! {
                 _ = shutdown.cancelled() => return Ok(()),
-                r = builder.handshake(stream) => r
+                r = tokio::time::timeout(config.io_timeout, builder.handshake(stream)) => r?
             }
             .map_err(|e| std::io::Error::other(format!("h2 handshake error: {e}")))?;
 
             let svc = std::rc::Rc::new(service);
 
+            // Own stream tasks for this connection; dropping the connection cancels them.
+            let mut tasks = tokio::task::JoinSet::new();
             // Serve multiplexed requests
             loop {
                 if shutdown.is_cancelled() {
@@ -392,6 +384,7 @@ cfg_if::cfg_if! {
                 }
                 let next = tokio::select! {
                     _ = shutdown.cancelled() => return Ok(()),
+                    _ = tasks.join_next(), if !tasks.is_empty() => continue,
                     r = conn.accept() => r
                 };
 
@@ -400,7 +393,7 @@ cfg_if::cfg_if! {
                         let service = std::rc::Rc::clone(&svc);
 
                         // Each H2 stream runs on the same LocalSet thread
-                        tokio::task::spawn_local(async move {
+                        tasks.spawn_local(async move {
                             let result = service
                                 .call(&mut H2Session::new(peer_addr, request, respond))
                                 .await;
@@ -442,7 +435,14 @@ fn parse_content_length(headers: &http::HeaderMap) -> std::io::Result<usize> {
         let value = value.to_str().map_err(|_| {
             std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid Content-Length")
         })?;
-        let len = value.trim().parse::<usize>().map_err(|_| {
+        let value = value.trim();
+        if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid Content-Length",
+            ));
+        }
+        let len = value.parse::<usize>().map_err(|_| {
             std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid Content-Length")
         })?;
         if let Some(prev) = parsed
@@ -457,3 +457,99 @@ fn parse_content_length(headers: &http::HeaderMap) -> std::io::Result<usize> {
     }
     Ok(parsed.unwrap_or(0))
 }
+
+// Time out a stalled transport, not a long transfer that keeps making progress.
+#[cfg(all(feature = "rt-tokio", not(feature = "rt-glommio")))]
+struct IdleIo<S> {
+    inner: S,
+    idle: std::time::Duration,
+    deadline: std::pin::Pin<Box<tokio::time::Sleep>>,
+}
+#[cfg(all(feature = "rt-tokio", not(feature = "rt-glommio")))]
+impl<S> IdleIo<S> {
+    fn new(inner: S, idle: std::time::Duration) -> Self {
+        Self {
+            inner,
+            idle,
+            deadline: Box::pin(tokio::time::sleep(idle)),
+        }
+    }
+    fn progress(&mut self) {
+        self.deadline
+            .as_mut()
+            .reset(tokio::time::Instant::now() + self.idle);
+    }
+    fn stalled<T>(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<T>> {
+        use std::future::Future;
+        if self.deadline.as_mut().poll(cx).is_ready() {
+            std::task::Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "HTTP transport idle timeout",
+            )))
+        } else {
+            std::task::Poll::Pending
+        }
+    }
+}
+#[cfg(all(feature = "rt-tokio", not(feature = "rt-glommio")))]
+impl<S: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for IdleIo<S> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        match std::pin::Pin::new(&mut self.inner).poll_read(cx, buf) {
+            std::task::Poll::Ready(result) => {
+                if buf.filled().len() > before {
+                    self.progress();
+                }
+                std::task::Poll::Ready(result)
+            }
+            std::task::Poll::Pending => self.stalled(cx),
+        }
+    }
+}
+#[cfg(all(feature = "rt-tokio", not(feature = "rt-glommio")))]
+impl<S: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for IdleIo<S> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        match std::pin::Pin::new(&mut self.inner).poll_write(cx, buf) {
+            std::task::Poll::Ready(result) => {
+                if matches!(result, Ok(n) if n > 0) {
+                    self.progress();
+                }
+                std::task::Poll::Ready(result)
+            }
+            std::task::Poll::Pending => self.stalled(cx),
+        }
+    }
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match std::pin::Pin::new(&mut self.inner).poll_flush(cx) {
+            std::task::Poll::Ready(r) => std::task::Poll::Ready(r),
+            std::task::Poll::Pending => self.stalled(cx),
+        }
+    }
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match std::pin::Pin::new(&mut self.inner).poll_shutdown(cx) {
+            std::task::Poll::Ready(r) => std::task::Poll::Ready(r),
+            std::task::Poll::Pending => self.stalled(cx),
+        }
+    }
+}
+
+#[cfg(all(test, feature = "rt-tokio", not(feature = "rt-glommio")))]
+#[path = "../../../tests/unit/network/http/h2_runtime_tests.rs"]
+mod runtime_tests;

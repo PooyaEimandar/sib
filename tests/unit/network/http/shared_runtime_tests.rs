@@ -300,3 +300,55 @@ async fn cancelled_servers_return_without_waiting_for_clients() {
     assert_eq!(service.http_requests.load(Ordering::SeqCst), 0);
     assert_eq!(service.wt_sessions.load(Ordering::SeqCst), 0);
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn stalled_tls_handshake_releases_connection_capacity() {
+    use tokio::io::AsyncReadExt;
+    let identity = crate::MtlsIdentity::generate(&[], &[], false);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let shutdown = CancellationToken::new();
+    let run = SharedService::new().serve_h2_tls(
+        listener,
+        (
+            None,
+            identity.server_cert_pem.as_bytes(),
+            identity.server_key_pem.as_bytes(),
+        ),
+        H2Config {
+            max_sessions: 1,
+            io_timeout: Duration::from_millis(100),
+            ..Default::default()
+        },
+        shutdown.clone(),
+    );
+    let verify = async {
+        let mut stalled = tokio::net::TcpStream::connect(addr).await.unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), stalled.read_u8())
+                .await
+                .unwrap()
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::UnexpectedEof
+        );
+        let client = reqwest::Client::builder()
+            .tls_backend_rustls()
+            .no_proxy()
+            .add_root_certificate(
+                reqwest::Certificate::from_pem(identity.ca_cert_pem.as_bytes()).unwrap(),
+            )
+            .build()
+            .unwrap();
+        let response = client
+            .get(format!("https://{addr}/after-timeout"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.text().await.unwrap(), "shared runtime");
+        shutdown.cancel();
+    };
+    let (result, ()) = tokio::join!(run, verify);
+    result.unwrap();
+}

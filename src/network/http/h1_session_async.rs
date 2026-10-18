@@ -83,6 +83,13 @@ impl<'a, S> H1SessionAsync<'a, S> {
     #[inline]
     pub fn keep_alive(&self) -> bool {
         self.keep_alive
+            && !self
+                .rsp_headers
+                .get_all(header::CONNECTION)
+                .iter()
+                .filter_map(|v| v.to_str().ok())
+                .flat_map(|v| v.split(','))
+                .any(|v| v.trim().eq_ignore_ascii_case("close"))
     }
 
     #[inline]
@@ -551,12 +558,23 @@ where
             return Err(std::io::Error::other("response already started"));
         }
 
-        // If the response MUST NOT have a body, force empty body and Content-Length: 0
+        // HEAD describes the GET representation. 1xx/204 forbid Content-Length;
+        // omit it on 304 rather than inventing a zero-length representation.
         if self.response_must_not_have_body() {
+            if self.rsp_status.is_informational()
+                || self.rsp_status == StatusCode::NO_CONTENT
+                || self.rsp_status == StatusCode::NOT_MODIFIED
+            {
+                self.rsp_headers.remove(header::CONTENT_LENGTH);
+            } else if !self.rsp_headers.contains_key(header::CONTENT_LENGTH) {
+                self.rsp_headers.insert(
+                    header::CONTENT_LENGTH,
+                    HeaderValue::from_str(&self.rsp_body.len().to_string())
+                        .map_err(std::io::Error::other)?,
+                );
+            }
             self.rsp_body = Bytes::new();
             self.rsp_headers.remove(header::TRANSFER_ENCODING);
-            self.rsp_headers
-                .insert(header::CONTENT_LENGTH, HeaderValue::from_static("0"));
         } else {
             // Ensure Content-Length cause we’re not doing chunked responses here
             if !self.rsp_headers.contains_key(header::CONTENT_LENGTH) {

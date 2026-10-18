@@ -145,7 +145,17 @@ impl Session for H2Session {
         use futures_lite::future::race;
         let data_fut = async {
             match self.req.body_mut().data().await {
-                Some(Ok(bytes)) => Some(Ok(bytes)),
+                Some(Ok(bytes)) => {
+                    if let Err(error) = self
+                        .req
+                        .body_mut()
+                        .flow_control()
+                        .release_capacity(bytes.len())
+                    {
+                        return Some(Err(std::io::Error::other(error)));
+                    }
+                    Some(Ok(bytes))
+                }
                 Some(Err(e)) => Some(Err(std::io::Error::other(e.to_string()))),
                 None => None,
             }

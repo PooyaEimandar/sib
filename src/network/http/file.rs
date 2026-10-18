@@ -220,9 +220,6 @@ fn serve_fn<S: Session>(
                 HeaderValue::from_str(enc).map_err(std::io::Error::other)?,
             );
         }
-        if !disable_content_length {
-            rsp_headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("0"));
-        }
         rsp_headers.extend([
             (
                 header::ETAG,
@@ -475,9 +472,6 @@ async fn serve_fn_async<S: Session>(
                 header::CONTENT_ENCODING,
                 HeaderValue::from_str(enc).map_err(std::io::Error::other)?,
             );
-        }
-        if !disable_content_length {
-            rsp_headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("0"));
         }
         rsp_headers.extend([
             (
@@ -1005,7 +999,8 @@ pub async fn serve_h2<S: Session>(
             return session
                 .status_code(StatusCode::NOT_FOUND)
                 .body(Bytes::new())
-                .eom();
+                .eom_async()
+                .await;
         }
     };
 
@@ -1032,7 +1027,7 @@ pub async fn serve_h2<S: Session>(
         min_max_compress_thresholds,
         content_disposition_allow_ranges,
         &mut file_tuple,
-        (CLOSE_CONNECTION_ON_FAILED, true),
+        (CLOSE_CONNECTION_ON_FAILED, false),
     )
     .await?;
 
@@ -1041,7 +1036,7 @@ pub async fn serve_h2<S: Session>(
     };
     let bytes_to_send = end - start;
     if bytes_to_send == 0 {
-        return session.body(Bytes::new()).eom();
+        return session.body(Bytes::new()).eom_async().await;
     }
 
     let stream_threshold = if stream_threshold_and_chunk_size.0 == 0 {
@@ -1066,7 +1061,7 @@ pub async fn serve_h2<S: Session>(
     // wait on the filesystem on the thread driving other connections.
     let size = usize::try_from(bytes_to_send).map_err(std::io::Error::other)?;
     let body = file.read_exact_bytes(size).await?;
-    session.status_code(status).body(body).eom()
+    session.status_code(status).body(body).eom_async().await
 }
 
 #[cfg(all(feature = "net-h3-server", target_os = "linux"))]

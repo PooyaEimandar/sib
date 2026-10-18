@@ -393,7 +393,7 @@ fn make_quinn_server(
 async fn serve_h2_listener<F: HFactory>(
     factory: std::sync::Arc<F>,
     listener: tokio::net::TcpListener,
-    tls_acceptor: tokio_rustls::TlsAcceptor,
+    tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
     h2_cfg: std::sync::Arc<H2Config>,
     shard_id: usize,
     shutdown_shard: tokio_util::sync::CancellationToken,
@@ -460,6 +460,14 @@ async fn serve_h2_listener<F: HFactory>(
                 tokio::task::spawn_local(async move {
                     let _permit = permit;
 
+                    let Some(tls_acceptor) = tls_acceptor else {
+                        let service = factory.async_service(shard_id);
+                        if let Err(error) = crate::network::http::h2_server::serve_h1(
+                            stream, service, &h2_cfg_cloned, peer_ip, shutdown_shard_cloned).await {
+                            tracing::debug!("HTTP/1 connection ended: {error}");
+                        }
+                        return;
+                    };
                     // check for cancellation before starting TLS handshake
                     let mut stream_opt = Some(stream);
                     let tls_result = tokio::select! {
@@ -472,7 +480,7 @@ async fn serve_h2_listener<F: HFactory>(
 
                         r = async {
                             let s = stream_opt.take().expect("stream already taken");
-                            tls_acceptor.accept(s).await
+                            tokio::time::timeout(h2_cfg_cloned.io_timeout, tls_acceptor.accept(s)).await?
                         } => r
                     };
 
@@ -769,8 +777,33 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         serve_h2_listener(
             std::sync::Arc::new(self),
             listener,
-            acceptor,
+            Some(acceptor),
             std::sync::Arc::new(h2_cfg),
+            0,
+            shutdown,
+        )
+        .await
+    }
+
+    /// Serve plaintext HTTP/1.1 on the caller's Tokio runtime (for loopback development or TLS termination).
+    /// Uses the same bounded HTTP/1 fallback implementation as `serve_h2_tls`.
+    #[cfg(all(
+        feature = "net-h2-server",
+        feature = "rt-tokio",
+        not(feature = "rt-glommio")
+    ))]
+    #[allow(async_fn_in_trait)]
+    async fn serve_http1(
+        self,
+        listener: tokio::net::TcpListener,
+        config: H2Config,
+        shutdown: tokio_util::sync::CancellationToken,
+    ) -> std::io::Result<()> {
+        serve_h2_listener(
+            std::sync::Arc::new(self),
+            listener,
+            None,
+            std::sync::Arc::new(config),
             0,
             shutdown,
         )
@@ -1231,7 +1264,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                             serve_h2_listener(
                                 factory,
                                 listener,
-                                tls_acceptor,
+                                Some(tls_acceptor),
                                 h2_cfg,
                                 shard_id,
                                 shutdown_shard,
