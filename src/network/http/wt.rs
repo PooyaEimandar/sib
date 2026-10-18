@@ -8,6 +8,13 @@ pub struct WTConfig {
     pub request_timeout: std::time::Duration,
     pub num_of_shards: usize,
     pub max_sessions: usize,
+    /// Per-connection incoming datagram queue bytes. None keeps Quinn's default.
+    /// Old datagrams are dropped on overflow; use a nonzero value large enough
+    /// for the largest datagram, including the WebTransport header.
+    pub datagram_receive_buffer_bytes: Option<usize>,
+    /// Per-connection outgoing datagram queue bytes. None keeps Quinn's default.
+    /// A full queue drops old datagrams instead of building a reliable backlog.
+    pub datagram_send_buffer_bytes: Option<usize>,
 }
 
 impl Default for WTConfig {
@@ -17,7 +24,30 @@ impl Default for WTConfig {
             request_timeout: std::time::Duration::from_secs(10),
             num_of_shards: 1,
             max_sessions: 1024,
+            datagram_receive_buffer_bytes: None,
+            datagram_send_buffer_bytes: None,
         }
+    }
+}
+
+impl WTConfig {
+    pub(crate) fn transport_config(&self) -> std::io::Result<wtransport::quinn::TransportConfig> {
+        if self.datagram_receive_buffer_bytes == Some(0)
+            || self.datagram_send_buffer_bytes == Some(0)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "WebTransport datagram queue limits must be nonzero",
+            ));
+        }
+        let mut transport = wtransport::quinn::TransportConfig::default();
+        if let Some(bytes) = self.datagram_receive_buffer_bytes {
+            transport.datagram_receive_buffer_size(Some(bytes));
+        }
+        if let Some(bytes) = self.datagram_send_buffer_bytes {
+            transport.datagram_send_buffer_size(bytes);
+        }
+        Ok(transport)
     }
 }
 

@@ -5,10 +5,12 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: --cfg reqwest_unstable -D warnings
+  NETWORK_FEATURES: rt-tokio,net-h1-server,net-h2-server,net-file-server,net-ws-server,net-wt-server
 
 jobs:
   linux:
@@ -24,9 +26,9 @@ jobs:
       - name: Install tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build nasm \
+          sudo apt-get install -y clang libclang-dev cmake ninja-build nasm \
             gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libc6-dev-arm64-cross \
-            pkg-config
+            pkg-config libssl-dev
 
       - name: Install GStreamer (host)
         run: |
@@ -48,8 +50,16 @@ jobs:
           bash ./bash/fdb.sh
           echo "SIB_FDB_CLUSTER_FILE=/etc/foundationdb/fdb.cluster" >> $GITHUB_ENV
 
-      - name: Add Rust target
-        run: rustup target add ${{ matrix.target }}
+      - name: Setup Rust
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustup target add ${{ matrix.target }}
+
+      # Cargo.lock is not committed for this library. Resolve dependencies once
+      # so subsequent --locked commands use the same versions in this job.
+      - name: Generate lockfile
+        run: cargo generate-lockfile
 
       - name: Configure AArch64 cross toolchain env
         if: matrix.target == 'aarch64-unknown-linux-gnu'
@@ -84,12 +94,12 @@ jobs:
         run: |
           rustup component add clippy
           # Lint each runtime so lints in runtime-gated code (may/glommio) can't drift.
-          cargo clippy --all-targets --no-default-features --features "rt-tokio net-h1-server net-h2-server db-fdb" -- -D warnings
+          cargo clippy --locked --all-targets --no-default-features --features "$NETWORK_FEATURES,db-fdb" -- -D warnings
           cargo clippy --all-targets --no-default-features --features "rt-may net-h1-server db-fdb" -- -D warnings
           cargo clippy --all-targets --no-default-features --features "rt-glommio net-h2-server db-fdb" -- -D warnings
 
       - name: Build
-        run: cargo build --release --target=${{ matrix.target }} --no-default-features --features "rt-tokio net-h1-server net-h2-server"
+        run: cargo build --locked --release --target=${{ matrix.target }} --no-default-features --features "$NETWORK_FEATURES"
 
       - name: Check render module (native + wasm)
         if: matrix.target == 'x86_64-unknown-linux-gnu'
@@ -99,7 +109,8 @@ jobs:
           cargo check --target wasm32-unknown-unknown --no-default-features --features render
 
       - name: Test (tokio runtime + FDB)
-        run: cargo test --release --no-default-features --features "rt-tokio net-h2-server db-fdb"
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: cargo test --locked --release --no-default-features --features "$NETWORK_FEATURES,db-fdb"
 
       # Exercise the FDB layer on the other two runtimes against the same live cluster.
       # The async cache/futures path is shared by tokio + glommio; `may` uses the
@@ -123,21 +134,27 @@ jobs:
       - name: Install tools
         run: |
           choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' -y
-          choco install ninja nasm -y
+          choco install ninja nasm llvm -y
+          "$env:ProgramFiles\NASM" >> $env:GITHUB_PATH
+          "LIBCLANG_PATH=$env:ProgramFiles\LLVM\bin" >> $env:GITHUB_ENV
 
       - name: Setup Rust
         run: |
+          rustup update stable --no-self-update
           rustup default stable
           rustup component add clippy
 
+      - name: Generate lockfile
+        run: cargo generate-lockfile
+
       - name: Run Clippy
-        run: cargo clippy --all-targets --no-default-features --features "rt-tokio net-h2-server" -- -D warnings
+        run: cargo clippy --locked --all-targets --no-default-features --features "$env:NETWORK_FEATURES" -- -D warnings
 
       - name: Build
-        run: cargo build --release --no-default-features --features "rt-tokio net-h2-server"
+        run: cargo build --locked --release --no-default-features --features "$env:NETWORK_FEATURES"
 
       - name: Test
-        run: cargo test --release --no-default-features --features "rt-tokio net-h2-server"
+        run: cargo test --locked --release --no-default-features --features "$env:NETWORK_FEATURES"
 
   android:
     name: Android ${{ matrix.target }}
@@ -150,8 +167,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Add Android target
-        run: rustup target add ${{ matrix.target }}
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libclang-dev cmake ninja-build nasm
+
+      - name: Setup Rust
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustup target add ${{ matrix.target }}
+
+      - name: Generate lockfile
+        run: cargo generate-lockfile
 
       - name: Install NDK
         uses: nttld/setup-ndk@v1
@@ -163,7 +191,7 @@ jobs:
         run: cargo install cargo-ndk
 
       - name: Build
-        run: cargo ndk -t ${{ matrix.target }} -o ./target build --release
+        run: cargo ndk -t ${{ matrix.target }} -o ./target build --locked --release --no-default-features --features "$NETWORK_FEATURES"
 
   apple:
     name: Apple (macOS & iOS)
@@ -173,7 +201,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install tools
-        run: brew install ninja
+        run: brew install ninja nasm
 
       - name: Run FoundationDB setup
         run: |
@@ -182,18 +210,28 @@ jobs:
 
       - name: Setup Rust
         run: |
+          rustup update stable --no-self-update
           rustup default stable
           rustup component add clippy
           rustup target add aarch64-apple-darwin
           rustup target add aarch64-apple-ios
 
+      - name: Generate lockfile
+        run: cargo generate-lockfile
+
       - name: Run Clippy
-        run: cargo clippy --all-targets --no-default-features --features "rt-tokio net-h1-server net-h2-server db-fdb" -- -D warnings
+        run: cargo clippy --locked --all-targets --no-default-features --features "$NETWORK_FEATURES,db-fdb" -- -D warnings
 
       - name: Build for macOS (arm64)
-        run: cargo build --release --target=aarch64-apple-darwin
+        run: cargo build --locked --release --target=aarch64-apple-darwin --no-default-features --features "$NETWORK_FEATURES"
+
+      - name: Test (macOS)
+        run: cargo test --locked --release --no-default-features --features "$NETWORK_FEATURES"
 
       - name: Build for iOS (staticlib)
+        env:
+          # net-h1-server's may/nix socket bindings do not compile on iOS.
+          IOS_NETWORK_FEATURES: rt-tokio,net-h2-server,net-file-server,net-ws-server,net-wt-server
         run: |
           cargo install cargo-lipo
-          cargo lipo --release --targets=aarch64-apple-ios
+          cargo lipo --locked --release --targets=aarch64-apple-ios --no-default-features --features "$IOS_NETWORK_FEATURES"

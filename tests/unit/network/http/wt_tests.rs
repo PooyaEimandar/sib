@@ -167,6 +167,8 @@ where
         let config = WTConfig {
             max_sessions: 1,
             request_timeout,
+            datagram_receive_buffer_bytes: Some(32 * 1024),
+            datagram_send_buffer_bytes: Some(32 * 1024),
             ..WTConfig::default()
         };
         let server = Factory(state.clone()).serve_wt_tls(
@@ -321,4 +323,24 @@ async fn shutdown_cancels_pending_admission() {
         state.wait_idle().await;
         assert_eq!(state.calls.load(Ordering::SeqCst), 0);
     }).await;
+}
+
+#[test]
+fn zero_datagram_queue_limits_are_rejected() {
+    for config in [
+        WTConfig {
+            datagram_receive_buffer_bytes: Some(0),
+            ..WTConfig::default()
+        },
+        WTConfig {
+            datagram_send_buffer_bytes: Some(0),
+            ..WTConfig::default()
+        },
+    ] {
+        assert_eq!(
+            config.transport_config().unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+    }
+    assert!(WTConfig::default().transport_config().is_ok());
 }

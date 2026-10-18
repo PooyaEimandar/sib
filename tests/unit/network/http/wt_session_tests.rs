@@ -32,7 +32,13 @@ where
         tls.alpn_protocols = vec![b"h3".to_vec()];
 
         // Keep the path limit stable for the exact-size datagram test.
-        let mut server_transport = TransportConfig::default();
+        let mut server_transport = super::WTConfig {
+            datagram_receive_buffer_bytes: Some(4096),
+            datagram_send_buffer_bytes: Some(4096),
+            ..Default::default()
+        }
+        .transport_config()
+        .unwrap();
         server_transport.mtu_discovery_config(None);
         client_transport.mtu_discovery_config(None);
         let server = wtransport::Endpoint::server(
@@ -184,6 +190,34 @@ async fn invalid_close_code_keeps_session_open_and_local_close_is_repeatable() {
             }
             other => panic!("expected peer application close, got {other:?}"),
         }
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn bounded_send_queue_drops_old_datagrams_and_keeps_latest() {
+    with_session_pair(TransportConfig::default(), |server, client| async move {
+        // No yield while filling: the QUIC driver cannot drain the send queue.
+        for sequence in 0..128u8 {
+            server
+                .send_dgram(&Bytes::from(vec![sequence; 1024]))
+                .unwrap();
+        }
+        let first = client.recv_dgram().await.unwrap();
+        assert_eq!(first.len(), 1024);
+        assert!(
+            first[0] >= 124,
+            "an old packet survived the 4 KiB queue bound"
+        );
+        let mut last = first;
+        while last[0] != 127 {
+            last = client.recv_dgram().await.unwrap();
+        }
+        assert!(last.iter().all(|byte| *byte == 127));
+        client
+            .send_dgram(&Bytes::from_static(b"still connected"))
+            .unwrap();
+        assert_eq!(server.recv_dgram().await.unwrap(), b"still connected"[..]);
     })
     .await;
 }

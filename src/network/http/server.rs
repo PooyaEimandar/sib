@@ -827,7 +827,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
         let identity = make_wt_identity(chain_cert_key)?;
         let config = wtransport::ServerConfig::builder()
             .with_bind_socket(socket)
-            .with_identity(identity)
+            .with_custom_transport(identity, wt_cfg.transport_config()?)
             .keep_alive_interval(Some(wt_cfg.keep_alive_interval))
             .build();
         let endpoint = wtransport::Endpoint::server(config)?;
@@ -1555,6 +1555,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
             }
         };
 
+        wt_cfg.transport_config()?;
         let num_shards = wt_cfg.num_of_shards.max(1);
         let factory = Arc::new(self);
         let wt_cfg_arc = Arc::new(wt_cfg);
@@ -1576,7 +1577,7 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                         rt.block_on(async move {
                             let cfg = wtransport::ServerConfig::builder()
                                 .with_bind_address(bind)
-                                .with_identity(identity)
+                                .with_custom_transport(identity, wt_cfg.transport_config()?)
                                 .keep_alive_interval(Some(wt_cfg.keep_alive_interval))
                                 // .with_udp_socket(your_reuseport_socket)? // if the API supports it
                                 .build();
