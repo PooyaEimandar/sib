@@ -798,7 +798,8 @@ fn test_h2_tls_server_post() {
 #[ignore = "legacy network integration test uses fixed ports or long-running servers"]
 fn test_h2_tls_ws_over_h1_upgrade() {
     use crate::MtlsIdentity;
-    use std::{net::TcpStream, time::Duration};
+    use rustls::pki_types::{CertificateDer, ServerName, pem::PemObject};
+    use std::{net::TcpStream, sync::Arc, time::Duration};
 
     let addr = "127.0.0.1:8087";
 
@@ -828,14 +829,18 @@ fn test_h2_tls_ws_over_h1_upgrade() {
 
     std::thread::sleep(Duration::from_millis(800));
 
-    // Client trusts the SAME cert the server will present
-    let ca =
-        native_tls::Certificate::from_pem(mtls.server_cert_pem.as_bytes()).expect("parse cert pem");
-
-    let connector = native_tls::TlsConnector::builder()
-        .add_root_certificate(ca)
-        .build()
-        .expect("build tls connector");
+    // Trust the CA that issued the server certificate. Reuse Rustls so Linux
+    // tests do not link OpenSSL alongside the HTTP/1 backend's BoringSSL.
+    let mut roots = rustls::RootCertStore::empty();
+    for cert in CertificateDer::pem_slice_iter(mtls.ca_cert_pem.as_bytes()) {
+        roots
+            .add(cert.expect("parse CA cert pem"))
+            .expect("add CA cert as root");
+    }
+    let mut tls_cfg = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    tls_cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
 
     // Connect TCP to the bind address
     let tcp = TcpStream::connect(addr).expect("tcp connect");
@@ -843,8 +848,10 @@ fn test_h2_tls_ws_over_h1_upgrade() {
     tcp.set_write_timeout(Some(Duration::from_secs(3))).ok();
     tcp.set_nodelay(true).ok();
 
-    // Perform TLS handshake (SNI = "localhost")
-    let tls_stream = connector.connect("localhost", tcp).expect("tls handshake");
+    // TLS is negotiated on first I/O, with SNI matching the server certificate.
+    let server_name = ServerName::try_from("localhost").expect("server name");
+    let conn = rustls::ClientConnection::new(Arc::new(tls_cfg), server_name).expect("client conn");
+    let tls_stream = rustls::StreamOwned::new(conn, tcp);
 
     // Perform WebSocket handshake
     let (mut ws, resp) =
