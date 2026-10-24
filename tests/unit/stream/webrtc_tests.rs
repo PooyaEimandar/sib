@@ -4,6 +4,7 @@ use bytes::Bytes;
 use tracing::info;
 
 #[test]
+#[ignore = "manual signaling server requiring interactive screen and audio capture"]
 fn test_webrtc() {
     let cancel_token = tokio_util::sync::CancellationToken::new();
     let mtls = crate::MtlsIdentity::generate(&[], &[], false);
@@ -271,4 +272,139 @@ async fn negotiated_peer_streams_samples_and_receives_data_channel_messages() {
     if let Some(peer) = ctx.pc.write().await.take() {
         peer.close().await.unwrap();
     }
+}
+
+#[test]
+fn raw_frame_queue_drops_old_frames_when_encoder_stalls() {
+    use super::*;
+    gst::init().unwrap();
+    let source = gst_app::AppSrc::builder().build();
+    configure_raw_source(&source).unwrap();
+    for _ in 0..100 {
+        source
+            .push_buffer(gst::Buffer::with_size(1280 * 720 * 3 / 2).unwrap())
+            .unwrap();
+    }
+    assert!(source.property::<u64>("current-level-buffers") <= 2);
+    assert!(source.property::<u64>("current-level-bytes") <= 2 * 1280 * 720 * 3 / 2);
+}
+
+#[test]
+fn captured_frames_keep_source_caps_while_output_is_scaled() {
+    use super::*;
+    gst::init().unwrap();
+    let pipeline = gst::parse::launch("appsrc name=src format=time ! videoconvert ! videoscale ! video/x-raw,format=NV12,width=640,height=360 ! appsink name=sink sync=false").unwrap().downcast::<gst::Pipeline>().unwrap();
+    let source = pipeline
+        .by_name("src")
+        .unwrap()
+        .downcast::<gst_app::AppSrc>()
+        .unwrap();
+    let sink = pipeline
+        .by_name("sink")
+        .unwrap()
+        .downcast::<gst_app::AppSink>()
+        .unwrap();
+    configure_raw_source(&source).unwrap();
+    pipeline.set_state(gst::State::Playing).unwrap();
+    let frame = CapturedFrame {
+        data: Bytes::from(vec![0; 1280 * 720 * 3 / 2]),
+        caps: gst::Caps::builder("video/x-raw")
+            .field("format", "NV12")
+            .field("width", 1280_i32)
+            .field("height", 720_i32)
+            .field("framerate", gst::Fraction::new(30, 1))
+            .build(),
+        dur: Duration::from_millis(33),
+    };
+    push_captured_frame(&source, &frame, &mut 0).unwrap();
+    source.end_of_stream().unwrap();
+    let sample = sink.try_pull_sample(gst::ClockTime::from_seconds(3));
+    pipeline.set_state(gst::State::Null).unwrap();
+    let sample = sample.expect("scaled frame");
+    let info = gst_video::VideoInfo::from_caps(sample.caps().unwrap()).unwrap();
+    assert_eq!((info.width(), info.height()), (640, 360));
+    assert_eq!(source.caps().unwrap(), frame.caps);
+    assert_eq!(sample.buffer().unwrap().size(), 640 * 360 * 3 / 2);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn http_responses_work_on_current_thread_runtime() {
+    use super::*;
+    use crate::network::http::h1_session_async::H1SessionAsync;
+    use tokio::io::AsyncReadExt;
+    for (index, is_ws, expected) in [
+        (Some(Bytes::from_static(b"index")), false, "200 OK"),
+        (None, false, "404 Not Found"),
+        (None, true, "401 Unauthorized"),
+    ] {
+        let server = Server::new(
+            ServerConfig {
+                auth_token: Some("secret".into()),
+                ..Default::default()
+            },
+            StreamCtrl::default(),
+            index,
+            None,
+        );
+        let (mut io, mut client) = tokio::io::duplex(4096);
+        let mut session = H1SessionAsync::new(
+            "127.0.0.1".parse().unwrap(),
+            &mut io,
+            (http::Method::GET, http::Version::HTTP_11),
+            "/".parse().unwrap(),
+            (http::HeaderMap::new(), Bytes::new()),
+            false,
+            is_ws,
+        );
+        server.call(&mut session).await.unwrap();
+        drop(session);
+        drop(io);
+        let mut response = String::new();
+        client.read_to_string(&mut response).await.unwrap();
+        assert!(
+            response.starts_with(&format!("HTTP/1.1 {expected}\r\n")),
+            "{response}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn fragmented_signaling_cannot_exceed_message_limit() {
+    use super::*;
+    use crate::network::http::h1_session_async::H1SessionAsync;
+    let server = Server::new(
+        ServerConfig {
+            max_message_size: 4,
+            max_message_fragments: 2,
+            auth_token: Some("secret".into()),
+            ..Default::default()
+        },
+        StreamCtrl::default(),
+        None,
+        None,
+    );
+    let (mut io, _client) = tokio::io::duplex(4096);
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        "sec-websocket-key",
+        http::HeaderValue::from_static("dGhlIHNhbXBsZSBub25jZQ=="),
+    );
+    let mut session = H1SessionAsync::new(
+        "127.0.0.1".parse().unwrap(),
+        &mut io,
+        (http::Method::GET, http::Version::HTTP_11),
+        "/?token=secret".parse().unwrap(),
+        (headers, Bytes::new()),
+        true,
+        true,
+    );
+    // Two individually valid masked frames whose combined payload exceeds four bytes.
+    session.ws_seed(&[
+        0x01, 0x83, 0, 0, 0, 0, b'a', b'b', b'c', 0x80, 0x82, 0, 0, 0, 0, b'd', b'e',
+    ]);
+    let error = tokio::time::timeout(Duration::from_secs(2), server.call(&mut session))
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
 }

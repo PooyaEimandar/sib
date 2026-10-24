@@ -6,9 +6,9 @@
 use crate::network::http::{
     server::HFactory,
     session::{HAsyncService, Session},
-    ws::OpCode,
+    ws::{MessageAssembler, OpCode},
 };
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use glib::{prelude::ObjectExt, types::StaticType};
 use gst::prelude::*;
 use gstreamer as gst;
@@ -67,6 +67,11 @@ pub struct ServerConfig {
 
     /// Maximum number of concurrent WS sessions. `0` means unlimited.
     pub max_sessions: u64,
+
+    /// Maximum bytes in one complete signaling message, across all fragments.
+    pub max_message_size: usize,
+    /// Maximum data frames in one signaling message. Must be nonzero.
+    pub max_message_fragments: usize,
 }
 
 impl Default for ServerConfig {
@@ -78,6 +83,8 @@ impl Default for ServerConfig {
             auth_token: None,
             allowed_origins: Vec::new(),
             max_sessions: 0,
+            max_message_size: 1024 * 1024,
+            max_message_fragments: 128,
         }
     }
 }
@@ -184,6 +191,7 @@ pub struct ServerStats {
 #[derive(Clone)]
 struct CapturedFrame {
     data: Bytes,              // raw NV12 bytes
+    caps: gst::Caps,          // actual capture dimensions and frame rate
     dur: std::time::Duration, // frame duration
 }
 
@@ -701,6 +709,7 @@ async fn ensure_capture_hub(
                 .new_sample(move |sink| {
                     let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
                     let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
+                    let caps = sample.caps().ok_or(gst::FlowError::Error)?.to_owned();
                     let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
                     let data = Bytes::copy_from_slice(map.as_slice());
 
@@ -710,7 +719,7 @@ async fn ensure_capture_hub(
                         .filter(|d| d.as_nanos() > 0)
                         .unwrap_or_else(|| std::time::Duration::from_millis(16));
 
-                    let _ = tx.send(CapturedFrame { data, dur });
+                    let _ = tx.send(CapturedFrame { data, caps, dur });
                     Ok(gst::FlowSuccess::Ok)
                 })
                 .build(),
@@ -748,6 +757,22 @@ async fn maybe_stop_capture_hub() {
         gst_stop_pipeline_graceful(&hub.pipeline, 1500);
         hub.bus_handle.abort();
     }
+}
+
+// Keep at most two raw frames when an encoder falls behind capture. Drop the
+// oldest queued frame so recovery favors current video instead of stale frames.
+fn configure_raw_source(appsrc: &gst_app::AppSrc) -> std::io::Result<()> {
+    if appsrc.find_property("max-buffers").is_none() || appsrc.find_property("leaky-type").is_none()
+    {
+        return Err(std::io::Error::other(
+            "WebRTC capture requires GStreamer 1.20 or newer",
+        ));
+    }
+    appsrc.set_property("block", false);
+    appsrc.set_property("max-buffers", 2u64);
+    appsrc.set_property("max-bytes", 0u64);
+    appsrc.set_property_from_str("leaky-type", "downstream");
+    Ok(())
 }
 
 // Per-user H264 encoder pipeline (appsrc -> encode -> appsink)
@@ -807,21 +832,9 @@ fn build_encoder_pipeline_h264_from_appsrc(
         .downcast::<gst_app::AppSrc>()
         .map_err(|e| std::io::Error::other(format!("rawsrc not AppSrc: {e:?}")))?;
 
-    // Set caps on appsrc
-    let caps_in = gst::Caps::builder("video/x-raw")
-        .field("format", "NV12")
-        .field("width", w)
-        .field("height", h)
-        .field("framerate", gst::Fraction::new(fps, 1))
-        .build();
-    appsrc.set_caps(Some(&caps_in));
-
-    // Extra low-latency appsrc knobs
-    if appsrc.find_property("block").is_some() {
-        appsrc.set_property("block", false);
-    }
-
-    set_prop_int(appsrc.upcast_ref::<gst::Element>(), "max-bytes", 0u64);
+    // Input caps arrive with each captured frame; `vcaps` alone selects the
+    // user's output dimensions. Relabeling input bytes would corrupt frames.
+    configure_raw_source(&appsrc)?;
     set_prop_int(appsrc.upcast_ref::<gst::Element>(), "min-latency", 0u64);
     set_prop_int(appsrc.upcast_ref::<gst::Element>(), "max-latency", 0u64);
 
@@ -1231,6 +1244,29 @@ async fn pump_opus_samples(
 }
 
 // Start/stop runtime (per-user)
+fn push_captured_frame(
+    appsrc: &gst_app::AppSrc,
+    frame: &CapturedFrame,
+    pts_ns: &mut u64,
+) -> std::io::Result<()> {
+    if appsrc.caps().as_ref() != Some(&frame.caps) {
+        appsrc.set_caps(Some(&frame.caps));
+    }
+    let dur_ns = (frame.dur.as_nanos() as u64).max(1);
+    let mut buffer = gst::Buffer::from_slice(frame.data.to_vec());
+    let writable = buffer
+        .get_mut()
+        .ok_or_else(|| std::io::Error::other("buffer not writable"))?;
+    writable.set_duration(gst::ClockTime::from_nseconds(dur_ns));
+    writable.set_pts(gst::ClockTime::from_nseconds(*pts_ns));
+    writable.set_dts(gst::ClockTime::from_nseconds(*pts_ns));
+    *pts_ns = pts_ns.saturating_add(dur_ns);
+    appsrc
+        .push_buffer(buffer)
+        .map(|_| ())
+        .map_err(std::io::Error::other)
+}
+
 async fn start_stream_runtime(
     ctrl: StreamCtrl,
     ctrl_state: Arc<RwLock<StreamCtrl>>,
@@ -1305,34 +1341,15 @@ async fn start_stream_runtime(
                     msg = cap_rx.recv() => {
                         let Ok(frame) = msg else { continue };
 
-                        let dur_ns = (frame.dur.as_nanos() as u64).max(1);
-
-                        let mut buf = gst::Buffer::with_size(frame.data.len())
-                            .map_err(|_| std::io::Error::other("gst::Buffer::with_size failed"))?;
-
-                        {
-                            let bm = buf.get_mut().ok_or_else(|| std::io::Error::other("buffer not writable"))?;
-                            {
-                                let mut map = bm.map_writable().map_err(|_| std::io::Error::other("map_writable failed"))?;
-                                map.as_mut_slice().copy_from_slice(&frame.data);
-                            }
-
-                            bm.set_duration(gst::ClockTime::from_nseconds(dur_ns));
-                            bm.set_pts(gst::ClockTime::from_nseconds(pts_ns));
-                            bm.set_dts(gst::ClockTime::from_nseconds(pts_ns));
-                        }
-
-                        pts_ns = pts_ns.saturating_add(dur_ns);
-
-                        // appsrc is configured block=false; if downstream is slow, it drops/backs up minimally
-                        if let Err(e) = appsrc.push_buffer(buf) {
-                            warn!("appsrc.push_buffer failed: {e:?}");
+                        if let Err(e) = push_captured_frame(&appsrc, &frame, &mut pts_ns) {
+                            warn!("appsrc.push_buffer failed: {e}");
                         }
                     }
                 }
             }
             Ok(())
-        }.await;
+        }
+        .await;
 
         if let Err(e) = result {
             warn!("raw->appsrc push task error: {e}");
@@ -1837,14 +1854,14 @@ async fn handle_ws_json(ctx: WsCtx, text: &str) -> std::io::Result<()> {
 
             // close previous peer + emit PcClosed
             if let Some(old_peer) = ctx.pc.write().await.take() {
-                if let Some(old_pc_id) = *ctx.pc_id_slot.read().await {
-                    if let Some(cb) = ctx.on_event.as_ref() {
-                        cb(SessionEvent::PcClosed {
-                            ws_id: ctx.ws_id,
-                            pc_id: old_pc_id,
-                            reason: Some("replaced by new Offer".into()),
-                        });
-                    }
+                if let Some(old_pc_id) = *ctx.pc_id_slot.read().await
+                    && let Some(cb) = ctx.on_event.as_ref()
+                {
+                    cb(SessionEvent::PcClosed {
+                        ws_id: ctx.ws_id,
+                        pc_id: old_pc_id,
+                        reason: Some("replaced by new Offer".into()),
+                    });
                 }
                 let _ = old_peer.close().await;
             }
@@ -2190,12 +2207,14 @@ impl HAsyncService for Server {
                         })?,
                     )?
                     .body(index)
-                    .eom();
+                    .eom_async()
+                    .await;
             }
             session
                 .status_code(http::StatusCode::NOT_FOUND)
                 .body(bytes::Bytes::from_static(b"WebRTC index page not found"))
-                .eom()?;
+                .eom_async()
+                .await?;
             return Ok(());
         }
 
@@ -2208,16 +2227,21 @@ impl HAsyncService for Server {
                 .status_code(status)
                 .header_str("Connection", "close")?
                 .body(Bytes::from_static(b"forbidden"))
-                .eom()?;
+                .eom_async()
+                .await?;
             return Ok(());
         }
+
+        let mut messages =
+            MessageAssembler::new(self.cfg.max_message_size, self.cfg.max_message_fragments)?;
 
         // Accept WS
         if let Err(e) = session.ws_accept_async().await {
             session
                 .status_code(http::StatusCode::BAD_REQUEST)
                 .header_str("Connection", "close")?
-                .eom()?;
+                .eom_async()
+                .await?;
             return Err(e);
         }
 
@@ -2268,15 +2292,6 @@ impl HAsyncService for Server {
 
         let _ = out_tx.send(WsMsg::Info("WS connected".into())).await;
 
-        // Fragmentation state
-        let mut frag_buf = BytesMut::new();
-        let mut expecting_continuation = false;
-        let mut initial_is_text = false;
-
-        let err_protocol = Bytes::from_static(b"protocol error");
-        let err_unexpected = Bytes::from_static(b"unexpected continue");
-        let err_utf8 = Bytes::from_static(b"invalid utf8");
-
         // Wrap the loop so the cleanup below runs on EVERY exit path, including the
         // `?` early-returns on abnormal disconnect / write errors. Without this,
         // active_ws() is never decremented and the shared capture hub is never torn
@@ -2284,9 +2299,19 @@ impl HAsyncService for Server {
         let loop_result: std::io::Result<()> = async {
         loop {
             tokio::select! {
-                incoming = session.ws_read_async() => {
-                    let (code, payload, fin) = incoming?;
-
+                incoming = messages.read_async(session) => {
+                    let (code, payload) = match incoming {
+                        Ok(message) => message,
+                        Err(error) => {
+                            if error.kind() == std::io::ErrorKind::InvalidData {
+                                if let Some(cb) = on_event.as_ref() {
+                                    cb(SessionEvent::WsProtocolError { ws_id, message: error.to_string() });
+                                }
+                                session.ws_close_async(Some(Bytes::from_static(b"\x03\xea"))).await?;
+                            }
+                            return Err(error);
+                        }
+                    };
                     match code {
                         OpCode::Ping => session.ws_write_async(OpCode::Pong, payload, true).await?,
                         OpCode::Pong => {}
@@ -2294,80 +2319,13 @@ impl HAsyncService for Server {
                             session.ws_write_async(OpCode::Close, payload, true).await?;
                             break;
                         }
-
-                        OpCode::Text | OpCode::Binary => {
-                            if expecting_continuation {
-                                if let Some(cb) = on_event.as_ref() {
-                                    cb(SessionEvent::WsProtocolError { ws_id, message: "expected continuation frame".into() });
-                                }
-                                session.ws_close_async(Some(err_protocol)).await?;
-                                break;
-                            }
-
-                            if !fin {
-                                frag_buf.clear();
-                                frag_buf.extend_from_slice(payload.as_ref());
-                                expecting_continuation = true;
-                                initial_is_text = matches!(code, OpCode::Text);
-                                continue;
-                            }
-
-                            if matches!(code, OpCode::Binary) {
-                                continue;
-                            }
-
-                            let text = match std::str::from_utf8(payload.as_ref()) {
-                                Ok(s) => s,
-                                Err(_) => {
-                                    if let Some(cb) = on_event.as_ref() {
-                                        cb(SessionEvent::WsProtocolError { ws_id, message: "invalid utf8".into() });
-                                    }
-                                    session.ws_close_async(Some(err_utf8)).await?;
-                                    break;
-                                }
-                            };
-
+                        OpCode::Text => {
+                            let text = std::str::from_utf8(&payload).map_err(std::io::Error::other)?;
                             if let Err(e) = handle_ws_json(ctx.clone(), text).await {
                                 let _ = out_tx.send(WsMsg::Error(format!("{e}"))).await;
                             }
                         }
-
-                        OpCode::Continue => {
-                            if !expecting_continuation {
-                                if let Some(cb) = on_event.as_ref() {
-                                    cb(SessionEvent::WsProtocolError { ws_id, message: "unexpected continuation".into() });
-                                }
-                                session.ws_close_async(Some(err_unexpected)).await?;
-                                break;
-                            }
-
-                            frag_buf.extend_from_slice(payload.as_ref());
-
-                            if fin {
-                                let whole = frag_buf.as_ref();
-
-                                if initial_is_text {
-                                    let text = match std::str::from_utf8(whole) {
-                                        Ok(s) => s,
-                                        Err(_) => {
-                                            if let Some(cb) = on_event.as_ref() {
-                                                cb(SessionEvent::WsProtocolError { ws_id, message: "invalid utf8".into() });
-                                            }
-                                            session.ws_close_async(Some(err_utf8)).await?;
-                                            break;
-                                        }
-                                    };
-
-                                    if let Err(e) = handle_ws_json(ctx.clone(), text).await {
-                                        let _ = out_tx.send(WsMsg::Error(format!("{e}"))).await;
-                                    }
-                                }
-
-                                frag_buf.clear();
-                                expecting_continuation = false;
-                                initial_is_text = false;
-                            }
-                        }
+                        OpCode::Binary | OpCode::Continue => {}
                     }
                 }
 
@@ -2404,14 +2362,14 @@ impl HAsyncService for Server {
 
         // Cleanup: close peer + emit PcClosed
         if let Some(peer) = pc.write().await.take() {
-            if let Some(cb) = on_event.as_ref() {
-                if let Some(pc_id) = *pc_id_slot.read().await {
-                    cb(SessionEvent::PcClosed {
-                        ws_id,
-                        pc_id,
-                        reason: Some("call() cleanup".into()),
-                    });
-                }
+            if let Some(cb) = on_event.as_ref()
+                && let Some(pc_id) = *pc_id_slot.read().await
+            {
+                cb(SessionEvent::PcClosed {
+                    ws_id,
+                    pc_id,
+                    reason: Some("call() cleanup".into()),
+                });
             }
             if let Err(e) = peer.close().await {
                 warn!("peer.close failed: {e}");
