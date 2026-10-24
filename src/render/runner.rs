@@ -127,7 +127,7 @@ enum AppState {
     New,
     Initializing,
     Running {
-        context: RenderContext,
+        context: Box<RenderContext>,
         example: Box<dyn Example>,
     },
     Failed,
@@ -231,7 +231,10 @@ impl Application {
             return;
         }
 
-        self.state = AppState::Running { context, example };
+        self.state = AppState::Running {
+            context: Box::new(context),
+            example,
+        };
         self.request_redraw();
     }
 
@@ -273,7 +276,10 @@ impl Application {
     ) {
         match initialized {
             Ok(Initialized { context, example }) => {
-                self.state = AppState::Running { context, example };
+                self.state = AppState::Running {
+                    context: Box::new(context),
+                    example,
+                };
                 self.request_redraw();
             }
             Err(error) => self.fail(event_loop, error),
