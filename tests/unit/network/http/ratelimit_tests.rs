@@ -271,3 +271,60 @@ fn test_ratelimit_h3_tls_server() {
 
     verify_cookie_flow(&client, &url, reqwest::Version::HTTP_3);
 }
+
+fn assert_429_framing(wire: &[u8]) {
+    let wire = std::str::from_utf8(wire).unwrap();
+    let (headers, body) = wire.split_once("\r\n\r\n").unwrap();
+    assert!(headers.starts_with("HTTP/1.1 429"));
+    let length: usize = headers
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse().unwrap())
+        })
+        .unwrap();
+    assert_eq!(length, body.len());
+    assert_eq!(body, "Too Many Requests");
+}
+
+#[cfg(feature = "net-h1-server")]
+#[test]
+fn sync_429_has_correct_content_length() {
+    use crate::network::http::h1_session::new_session;
+    let mut stream = std::io::Cursor::new(Vec::new());
+    let mut req = bytes::BytesMut::from(&b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"[..]);
+    let mut rsp = bytes::BytesMut::new();
+    let peer = "127.0.0.1".parse().unwrap();
+    let mut session = new_session(&mut stream, &peer, &mut req, &mut rsp)
+        .unwrap()
+        .unwrap();
+    RateLimitedService::<()>::stamp_429_h1(&mut session).unwrap();
+    drop(session);
+    assert_429_framing(&stream.into_inner());
+}
+
+#[cfg(all(feature = "net-h2-server", feature = "rt-tokio"))]
+#[tokio::test]
+async fn async_429_has_correct_content_length() {
+    use crate::network::http::h1_session_async::H1SessionAsync;
+    use tokio::io::AsyncReadExt;
+    let (mut stream, mut client) = tokio::io::duplex(4096);
+    let mut session = H1SessionAsync::new(
+        "127.0.0.1".parse().unwrap(),
+        &mut stream,
+        (http::Method::GET, http::Version::HTTP_11),
+        "/".parse().unwrap(),
+        (http::HeaderMap::new(), bytes::Bytes::new()),
+        false,
+        false,
+    );
+    RateLimitedService::<()>::stamp_429_async(&mut session)
+        .await
+        .unwrap();
+    drop(session);
+    drop(stream);
+    let mut wire = Vec::new();
+    client.read_to_end(&mut wire).await.unwrap();
+    assert_429_framing(&wire);
+}

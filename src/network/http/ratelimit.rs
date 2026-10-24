@@ -121,7 +121,8 @@ impl<Svc> RateLimitedService<Svc> {
             )?
             .header(
                 header::CONTENT_LENGTH,
-                header::HeaderValue::from_static("18"),
+                header::HeaderValue::from_str(&body.len().to_string())
+                    .map_err(std::io::Error::other)?,
             )?
             .body(body)
             .eom()
@@ -140,7 +141,8 @@ impl<Svc> RateLimitedService<Svc> {
             )?
             .header(
                 header::CONTENT_LENGTH,
-                header::HeaderValue::from_static("18"),
+                header::HeaderValue::from_str(&body.len().to_string())
+                    .map_err(std::io::Error::other)?,
             )?
             .body(body)
             .eom_async()
