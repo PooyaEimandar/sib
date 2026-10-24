@@ -18,6 +18,7 @@ use std::time::Duration;
    gst-launch-1.0 -v srtsrc uri="srt://127.0.0.1:5004?mode=caller&latency=50" ! matroskademux ! av1parse ! dav1ddec ! fpsdisplaysink video-sink=autovideosink text-overlay=true sync=false
 */
 #[test]
+#[ignore = "requires interactive screen capture"]
 fn test_sender() {
     gst::init().unwrap();
 
@@ -57,4 +58,47 @@ fn test_sender() {
     // Wait for the streamer to finish
     thread::sleep(Duration::from_secs(3));
     handle.join().unwrap();
+}
+
+#[test]
+fn restarted_sender_observes_replacement_pipeline_eos() {
+    gst::init().unwrap();
+    let control = ControlHandle::new();
+    let sender = Sender::new(
+        Config {
+            host: "127.0.0.1".into(),
+            port: 5004,
+            width: 640,
+            height: 480,
+            bitrate: 1000,
+            fps: 30,
+            ping: 1,
+            codec: Codec::H264,
+            protocol: Protocol::UDP,
+        },
+        control.clone(),
+    )
+    .unwrap();
+    control.send(vec![Command::SetResolution(1280, 720)]);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let handle = thread::spawn(move || {
+        let mut builds = 0;
+        let result = sender.run_with_builder(|| {
+            builds += 1;
+            if builds == 1 {
+                return Ok(gst::Pipeline::new());
+            }
+            Ok(gst::parse::launch("fakesrc num-buffers=1 ! fakesink")
+                .unwrap()
+                .downcast::<gst::Pipeline>()
+                .unwrap())
+        });
+        tx.send(result).unwrap();
+    });
+    let result = rx.recv_timeout(Duration::from_secs(3));
+    control.send(vec![Command::Stop]);
+    handle.join().unwrap();
+    result
+        .expect("replacement EOS must end the sender")
+        .unwrap();
 }

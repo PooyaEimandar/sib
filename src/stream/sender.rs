@@ -65,8 +65,15 @@ impl Sender {
     }
 
     pub fn run(&mut self) -> std::io::Result<()> {
-        let mut pipeline = self.build_pipeline()?;
-        let bus = match pipeline.bus() {
+        self.run_with_builder(|| self.build_pipeline())
+    }
+
+    fn run_with_builder(
+        &self,
+        mut build: impl FnMut() -> std::io::Result<gst::Pipeline>,
+    ) -> std::io::Result<()> {
+        let mut pipeline = build()?;
+        let mut bus = match pipeline.bus() {
             Some(bus) => bus,
             None => {
                 return Err(std::io::Error::other(
@@ -162,7 +169,10 @@ impl Sender {
             if needs_restart {
                 info!("Restarting GStreamer pipeline...");
                 set_pipeline_state(&pipeline, gst::State::Null)?;
-                pipeline = self.build_pipeline()?;
+                pipeline = build()?;
+                bus = pipeline
+                    .bus()
+                    .ok_or_else(|| std::io::Error::other("replacement pipeline has no bus"))?;
                 set_pipeline_state(&pipeline, gst::State::Playing)?;
                 info!("GStreamer pipeline restarted");
             }
