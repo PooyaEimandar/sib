@@ -1,5 +1,5 @@
 use once_cell::sync::Lazy;
-use std::cell::{Cell, UnsafeCell};
+use std::cell::Cell;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Current UNIX time in seconds, updated once per second.
@@ -59,7 +59,7 @@ struct TlDate {
     mday: Cell<i32>,  // 1..=31
 
     // 29-byte ASCII RFC7231 date buffer
-    buf: UnsafeCell<[u8; 29]>,
+    buf: Cell<[u8; 29]>,
 }
 
 impl TlDate {
@@ -70,19 +70,12 @@ impl TlDate {
             year: Cell::new(1970),
             month: Cell::new(1),
             mday: Cell::new(1),
-            buf: UnsafeCell::new(*b"Thu, 01 Jan 1970 00:00:00 GMT"),
+            buf: Cell::new(*b"Thu, 01 Jan 1970 00:00:00 GMT"),
         }
     }
 
     #[inline(always)]
-    unsafe fn as_str(&self) -> &str {
-        // Always ASCII, always 29 bytes.
-        let bytes: &[u8; 29] = unsafe { &*self.buf.get() };
-        unsafe { std::str::from_utf8_unchecked(bytes) }
-    }
-
-    #[inline(always)]
-    unsafe fn write(&self, unix_sec: u64) {
+    fn write(&self, unix_sec: u64) {
         let days = (unix_sec / 86_400) as i64;
 
         // Cache civil date, recompute only when day changes.
@@ -103,7 +96,8 @@ impl TlDate {
         // 1970-01-01 was a Thursday. weekday: 0=Sun..6=Sat
         let weekday = ((days + 4).rem_euclid(7)) as usize;
 
-        let buf = unsafe { &mut *self.buf.get() };
+        let mut bytes = self.buf.get();
+        let buf = &mut bytes;
 
         // "Sun, 06 Nov 1994 08:49:37 GMT"
         buf[0..3].copy_from_slice(&WEEKDAY[weekday]);
@@ -129,6 +123,7 @@ impl TlDate {
         buf[26] = b'G';
         buf[27] = b'M';
         buf[28] = b'T';
+        self.buf.set(bytes);
     }
 }
 
@@ -196,28 +191,41 @@ fn civil_from_days(days_since_epoch: i64) -> (i32, i32, i32) {
     (year, m as i32, d as i32)
 }
 
+/// Return an owned copy of the cached RFC 7231 date without allocating.
 #[inline]
-pub fn current_date_str() -> &'static str {
+pub fn current_date_bytes() -> [u8; 29] {
     TL_DATE.with(|tl| {
         let now = NOW_SEC.load(Ordering::Relaxed);
-
         if tl.sec.get() != now {
+            tl.write(now);
             tl.sec.set(now);
-            unsafe {
-                tl.write(now);
-            }
         }
-
-        let s: &str = unsafe { tl.as_str() };
-
-        // SAFETY:
-        //
-        // The returned &str points to a thread-local fixed-size ASCII buffer.
-        // The buffer may be rewritten on later calls to `current_date_str()` on
-        // the same OS thread, but never concurrently, because it is thread-local.
-        //
-        // Do not hold it across coroutine yield points or
-        // across another call to `current_date_str()` on the same thread.
-        unsafe { std::mem::transmute::<&str, &'static str>(s) }
+        tl.buf.get()
     })
+}
+
+/// Return a date string that remains valid across cache updates and thread exit.
+#[inline]
+pub fn current_date_str() -> String {
+    String::from_utf8(current_date_bytes().to_vec()).expect("HTTP date is ASCII")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn returned_date_survives_cache_updates_and_thread_exit() {
+        let date = std::thread::spawn(|| {
+            let date = current_date_str();
+            let original = date.clone();
+            TL_DATE.with(|tl| tl.write(NOW_SEC.load(Ordering::Relaxed) + 86_400));
+            assert_eq!(date, original);
+            date
+        })
+        .join()
+        .unwrap();
+        assert_eq!(date.len(), 29);
+        assert!(date.ends_with(" GMT"));
+    }
 }

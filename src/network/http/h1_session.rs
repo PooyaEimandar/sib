@@ -264,7 +264,7 @@ where
             .extend_from_slice(SERVER_NAME.as_bytes())
             .ok();
         self.status_buf
-            .extend_from_slice(crate::network::http::date::current_date_str().as_bytes())
+            .extend_from_slice(&crate::network::http::date::current_date_bytes())
             .ok();
         self.status_buf.extend_from_slice(CRLF).ok();
 
