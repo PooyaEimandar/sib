@@ -100,8 +100,8 @@ fn base_client_config(cfg: &KafkaSettings) -> ClientConfig {
 
 fn create_producer_client_config(cfg: &KafkaSettings) -> ClientConfig {
     let mut cc = base_client_config(cfg);
-    cc.set("message.timeout.ms", &cfg.timeout.as_millis().to_string());
-    cc.set("queue.buffering.max.ms", &cfg.buffering_max_ms.to_string());
+    cc.set("message.timeout.ms", cfg.timeout.as_millis().to_string());
+    cc.set("queue.buffering.max.ms", cfg.buffering_max_ms.to_string());
     cc
 }
 
@@ -109,6 +109,7 @@ fn create_consumer_client_config(cfg: &KafkaSettings) -> ClientConfig {
     let mut cc = base_client_config(cfg);
     cc.set("group.id", &cfg.group_id)
         .set("enable.auto.commit", "false")
+        .set("enable.auto.offset.store", "false")
         .set("auto.offset.reset", &cfg.auto_offset_reset)
         .set(
             "partition.assignment.strategy",
@@ -181,7 +182,7 @@ cfg_if::cfg_if! {
             pub fn new(settings: KafkaSettings) -> std::io::Result<Self> {
                 let producer: BaseProducer = create_producer_client_config(&settings)
                     .create()
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Kafka producer creation failed: {e}")))?;
+                    .map_err(|e| std::io::Error::other(format!("Kafka producer creation failed: {e}")))?;
 
                 Ok(Self {
                     producer: Arc::new(producer),
@@ -200,7 +201,7 @@ cfg_if::cfg_if! {
                 use rdkafka::util::Timeout;
                 self.producer
                     .flush(Timeout::After(self.settings.timeout))
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Kafka producer flush error: {e}")))
+                    .map_err(|e| std::io::Error::other(format!("Kafka producer flush error: {e}")))
             }
 
             pub fn topic_ready(&self, topic: &str, timeout: Duration) -> std::io::Result<()> {
@@ -242,7 +243,7 @@ cfg_if::cfg_if! {
             {
                 self.consumer
                     .subscribe(&[topic])
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("subscribe failed: {e}")))?;
+                    .map_err(|e| std::io::Error::other(format!("subscribe failed: {e}")))?;
 
                 let consumer = Arc::clone(&self.consumer);
 
@@ -256,15 +257,20 @@ cfg_if::cfg_if! {
                             Some(Err(e)) => error!("KafkaConsumer got an error: {e}"),
                             Some(Ok(m)) => {
                                 let payload = m.payload().unwrap_or(&[]).to_vec();
-                                match handler(payload) {
-                                    Ok(_) => {
-                                        if let Err(e) = consumer.commit_message(&m, CommitMode::Async) {
-                                            error!("KafkaConsumer commit error: {e}");
+                                // Never advance past a failed record: a later offset commit
+                                // would also acknowledge this record in the same partition.
+                                loop {
+                                    if cancel.is_cancelled() { return; }
+                                    match handler(payload.clone()) {
+                                        Ok(()) => break,
+                                        Err(e) => {
+                                            error!("KafkaConsumer handler failed; retrying current message: {e}");
+                                            may::coroutine::sleep(Duration::from_millis(100));
                                         }
                                     }
-                                    Err(e) => {
-                                        error!("KafkaConsumer handler git an error without committing: {e}");
-                                    }
+                                }
+                                if let Err(e) = consumer.commit_message(&m, CommitMode::Async) {
+                                    error!("KafkaConsumer commit error: {e}");
                                 }
                             }
                         }
@@ -289,7 +295,7 @@ cfg_if::cfg_if! {
             pub fn new(settings: KafkaSettings) -> std::io::Result<Self> {
                 let producer: FutureProducer = create_producer_client_config(&settings)
                     .create()
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("KafkaAsyncProducer creation failed: {e}")))?;
+                    .map_err(|e| std::io::Error::other(format!("KafkaAsyncProducer creation failed: {e}")))?;
 
                 Ok(Self {
                     producer: Arc::new(producer),
@@ -334,8 +340,7 @@ cfg_if::cfg_if! {
                 let consumer: StreamConsumer = create_consumer_client_config(&settings)
                     .create()
                     .map_err(|e| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::Other,
+                        std::io::Error::other(
                             format!("KafkaAsyncConsumer creation failed: {e}"),
                         )
                     })?;
@@ -377,17 +382,31 @@ cfg_if::cfg_if! {
                     match msg {
                         Ok(m) => {
                             let payload = m.payload().unwrap_or(&[]).to_vec();
-                            match handler(payload).await {
-                                Ok(_) => {
-                                    if let Err(e) = self.consumer.commit_message(&m, CommitMode::Async) {
-                                        error!("KafkaAsyncConsumer commit error: {e}");
+                            loop {
+                                if cancel.is_cancelled() { return Ok(()); }
+                                let handled = futures_lite::future::race(
+                                    async { Some(handler(payload.clone()).await) },
+                                    async { cancel.cancelled().await; None },
+                                ).await;
+                                match handled {
+                                    Some(Ok(())) => break,
+                                    None => return Ok(()),
+                                    Some(Err(e)) => {
+                                        error!("KafkaAsyncConsumer handler failed; retrying current message: {e}");
+                                        futures_lite::future::race(
+                                            async {
+                                                #[cfg(all(feature = "rt-glommio", not(feature = "rt-tokio"), target_os = "linux"))]
+                                                glommio::timer::Timer::new(Duration::from_millis(100)).await;
+                                                #[cfg(not(all(feature = "rt-glommio", not(feature = "rt-tokio"), target_os = "linux")))]
+                                                tokio::time::sleep(Duration::from_millis(100)).await;
+                                            },
+                                            cancel.cancelled(),
+                                        ).await;
                                     }
                                 }
-                                Err(e) => {
-                                    error!(
-                                        "KafkaAsyncConsumer handler got an error without committing: {e}"
-                                    );
-                                }
+                            }
+                            if let Err(e) = self.consumer.commit_message(&m, CommitMode::Async) {
+                                error!("KafkaAsyncConsumer commit error: {e}");
                             }
                         }
                         Err(e) => {

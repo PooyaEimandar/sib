@@ -1,158 +1,90 @@
 use super::*;
-use std::{sync::mpsc, time::Duration};
-use tokio_util::sync::CancellationToken;
+use rdkafka::mocking::MockCluster;
 
-static TOPIC: &str = "";
-static KEY_NAME: &str = "k1";
-static PAYLOAD: &[u8] = b"hello-world";
-
-fn tls_settings(group_id: &str) -> KafkaSettings {
+fn settings(brokers: String) -> KafkaSettings {
     KafkaSettings {
-        brokers: "localhost:9093".into(),
-        group_id: group_id.into(),
+        brokers,
         auto_offset_reset: "earliest".into(),
-        timeout: Duration::from_secs(10),
-        tls_ca: Some(chain),
-        tls_cert: Some(cert),
-        tls_key: Some(key),
-        tls_key_password: None,
-        tls_verify: true,
-        tls_verify_hostname: false,
+        ..Default::default()
     }
 }
 
-// rt-may
-#[cfg(feature = "rt-may")]
-#[test]
-fn kafka_cli_may_pub_sub() -> std::io::Result<()> {
-    const NUMBER_OF_WORKERS: usize = 2;
-    const STACK_SIZE: usize = 1024 * 1024;
-    crate::init_global_poller(NUMBER_OF_WORKERS, STACK_SIZE);
-
-    let settings = tls_settings("topic-test");
-    let producer = KafkaProducer::new(settings.clone())?;
-    let consumer = KafkaConsumer::new(settings)?;
-
+#[cfg(all(
+    any(feature = "rt-tokio", feature = "rt-glommio"),
+    not(feature = "rt-may")
+))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_message_is_retried_before_later_offsets() {
+    let cluster = MockCluster::new(1).unwrap();
+    cluster.create_topic("retry", 1, 1).unwrap();
+    let cfg = settings(cluster.bootstrap_servers());
+    let producer = KafkaAsyncProducer::new(cfg.clone()).unwrap();
+    producer.send("retry", "key", b"first").await.unwrap();
+    producer.send("retry", "key", b"second").await.unwrap();
+    let consumer = KafkaAsyncConsumer::new(cfg).unwrap();
     let cancel = CancellationToken::new();
-    let (tx, rx) = mpsc::channel::<Vec<u8>>();
-
-    // Consumer thread
-    let cancel_c = cancel.clone();
-    let consumer_thread = std::thread::spawn({
-        let consumer = consumer.clone();
-        move || {
-            // run() spawns a may coroutine and returns immediately
-            consumer
-                .run(
-                    TOPIC,
-                    Duration::from_millis(200),
-                    cancel_c.clone(),
-                    move |msg| {
-                        tx.send(msg).map_err(|e| e.to_string())?;
-                        Ok(())
-                    },
-                )
-                .map_err(|e| format!("consumer.run failed: {e}"))?;
-
-            // keep OS thread alive until cancelled so may coroutine can poll
-            while !cancel_c.is_cancelled() {
-                std::thread::sleep(Duration::from_millis(50));
+    let mut seen = Vec::new();
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        consumer.run("retry", cancel.clone(), |payload| {
+            seen.push(payload.clone());
+            let result = if seen.len() == 1 {
+                Err("temporary failure".into())
+            } else {
+                Ok(())
+            };
+            if payload == b"second" {
+                cancel.cancel();
             }
-            Ok::<(), String>(())
-        }
-    });
-
-    // Ensure consumer subscribed before producing
-    std::thread::sleep(Duration::from_millis(400));
-
-    producer.topic_ready(TOPIC, Duration::from_secs(5))?;
-
-    // Producer thread
-    let producer_thread = std::thread::spawn({
-        let producer = producer.clone();
-        move || -> Result<(), String> {
-            producer.send(TOPIC, KEY_NAME, PAYLOAD)?;
-            producer.flush().map_err(|e| e.to_string())?;
-            Ok(())
-        }
-    });
-
-    producer_thread
-        .join()
-        .map_err(|_| std::io::Error::other("producer thread panicked"))?
-        .map_err(std::io::Error::other)?;
-
-    let got = rx
-        .recv_timeout(Duration::from_secs(10))
-        .map_err(|e| std::io::Error::other(format!("did not receive message in time: {e}")))?;
-
-    cancel.cancel();
-
-    consumer_thread
-        .join()
-        .map_err(|_| std::io::Error::other("consumer thread panicked"))?
-        .map_err(std::io::Error::other)?;
-
-    assert_eq!(got, PAYLOAD);
-    Ok(())
+            std::future::ready(result)
+        }),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        seen,
+        vec![b"first".to_vec(), b"first".to_vec(), b"second".to_vec()]
+    );
 }
 
-// rt-tokio / rt-glommio (FutureProducer/StreamConsumer) TLS test
-#[cfg(any(feature = "rt-tokio", feature = "rt-glommio"))]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn kafka_cli_tokio_pub_sub() -> std::io::Result<()> {
-    let settings = tls_settings("topic-test");
-
-    let producer = KafkaAsyncProducer::new(settings.clone())?;
-    let consumer = KafkaAsyncConsumer::new(settings)?;
-
+#[cfg(feature = "rt-may")]
+#[test]
+fn failed_message_is_retried_before_later_offsets() {
+    let cluster = MockCluster::new(1).unwrap();
+    cluster.create_topic("retry", 1, 1).unwrap();
+    let cfg = settings(cluster.bootstrap_servers());
+    let producer = KafkaProducer::new(cfg.clone()).unwrap();
+    producer.send("retry", "key", b"first").unwrap();
+    producer.send("retry", "key", b"second").unwrap();
+    producer.flush().unwrap();
+    let consumer = KafkaConsumer::new(cfg).unwrap();
     let cancel = CancellationToken::new();
-    let (tx, rx) = mpsc::channel::<Vec<u8>>();
-
-    // Consumer task (async)
-    let cancel_c = cancel.clone();
-    let consumer_task = tokio::spawn({
-        let consumer = consumer.clone();
-        async move {
-            consumer
-                .run(TOPIC, cancel_c.clone(), move |msg| {
-                    let tx = tx.clone();
-                    async move {
-                        tx.send(msg).map_err(|e| e.to_string())?;
-                        Ok(())
-                    }
-                })
-                .await
-        }
-    });
-
-    // Give consumer time to subscribe
-    tokio::time::sleep(Duration::from_millis(400)).await;
-
-    producer.topic_ready(TOPIC, Duration::from_secs(5))?;
-
-    let producer_task = tokio::spawn({
-        let producer = producer.clone();
-        async move {
-            producer.send(TOPIC, KEY_NAME, PAYLOAD).await?;
-            producer.flush()?;
-            Ok::<(), std::io::Error>(())
-        }
-    });
-    producer_task.await??;
-
-    let got = tokio::task::spawn_blocking(move || {
-        rx.recv_timeout(Duration::from_secs(10))
-            .map_err(|e| std::io::Error::other(format!("did not receive message in time: {e}")))
-    })
-    .await??;
-
+    let stop = cancel.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut seen = Vec::new();
+    consumer
+        .run(
+            "retry",
+            Duration::from_millis(100),
+            cancel.clone(),
+            move |payload| {
+                seen.push(payload.clone());
+                if seen.len() == 1 {
+                    return Err("temporary failure".into());
+                }
+                if payload == b"second" {
+                    tx.send(seen.clone()).unwrap();
+                    stop.cancel();
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+    let result = rx.recv_timeout(Duration::from_secs(20));
     cancel.cancel();
-    consumer_task
-        .await
-        .map_err(|e| std::io::Error::other(format!("consumer task panicked: {e}")))?
-        .map_err(std::io::Error::other)?;
-
-    assert_eq!(got, PAYLOAD);
-    Ok(())
+    assert_eq!(
+        result.unwrap(),
+        vec![b"first".to_vec(), b"first".to_vec(), b"second".to_vec()]
+    );
 }
