@@ -116,12 +116,28 @@ impl Receiver {
                 ));
             }
         };
-        for msg in bus.iter_timed(gst::ClockTime::NONE) {
-            use gst::MessageView;
-            if *stop_flag.lock().unwrap() {
-                warn!("Graceful shutdown triggered.");
-                break;
-            }
+        let result = wait_for_shutdown(&bus, &stop_flag);
+        let shutdown = pipeline
+            .set_state(gst::State::Null)
+            .map(|_| ())
+            .map_err(|e| std::io::Error::other(format!("Shutdown failed: {e}")));
+        result.and(shutdown)
+    }
+}
+
+fn wait_for_shutdown(bus: &gst::Bus, stop_flag: &Mutex<bool>) -> std::io::Result<()> {
+    loop {
+        use gst::MessageView;
+        if *stop_flag
+            .lock()
+            .map_err(|e| std::io::Error::other(format!("stop flag lock poisoned: {e}")))?
+        {
+            warn!("Graceful shutdown triggered.");
+            return Ok(());
+        }
+        // A flag update does not post a GStreamer message. Bound the wait so a
+        // quiet or stalled pipeline can still shut down promptly.
+        if let Some(msg) = bus.timed_pop(gst::ClockTime::from_mseconds(50)) {
             match msg.view() {
                 MessageView::Error(err) => {
                     error!(
@@ -139,12 +155,8 @@ impl Receiver {
                 _ => {}
             }
         }
-
-        pipeline
-            .set_state(gst::State::Null)
-            .map(|_| ())
-            .map_err(|e| std::io::Error::other(format!("Shutdown failed: {e}")))
     }
+    Ok(())
 }
 
 #[cfg(test)]
