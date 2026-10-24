@@ -461,18 +461,32 @@ impl BucketTtlCache {
         Ok(true)
     }
 
+    /// Run GC forever. A pass that cleaned a bucket is followed immediately by the
+    /// next one, so a backlog drains; failures (a busy pool, FDB conflicts) are
+    /// logged and retried after `interval` instead of stopping collection.
     #[cfg(feature = "rt-may")]
     pub fn run_gc_loop(&self, interval: Duration) -> std::io::Result<()> {
         loop {
-            let _ = self.gc_once()?;
+            match self.gc_once() {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(e) => tracing::warn!("cache GC pass failed, retrying: {e}"),
+            }
             may::coroutine::sleep(interval);
         }
     }
 
+    /// Run GC forever. A pass that cleaned a bucket is followed immediately by the
+    /// next one, so a backlog drains; failures (a busy pool, FDB conflicts) are
+    /// logged and retried after `interval` instead of stopping collection.
     #[cfg(any(feature = "rt-tokio", feature = "rt-glommio"))]
     pub async fn run_gc_loop(&self, interval: Duration) -> std::io::Result<()> {
         loop {
-            let _ = self.gc_once().await?;
+            match self.gc_once().await {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(e) => tracing::warn!("cache GC pass failed, retrying: {e}"),
+            }
             // Runtime-specific sleep (glommio has no tokio reactor).
             #[cfg(all(feature = "rt-tokio", not(feature = "rt-glommio")))]
             tokio::time::sleep(interval).await;

@@ -13,6 +13,7 @@ pub struct H1SessionAsync<'a, S> {
     // request
     method: Method,
     req_body: Bytes,
+    req_body_taken: bool,
     req_headers: HeaderMap,
     uri: Uri,
     version: Version,
@@ -60,6 +61,7 @@ impl<'a, S> H1SessionAsync<'a, S> {
             version: method_version.1,
             req_headers: req.0,
             req_body: req.1,
+            req_body_taken: false,
 
             rsp_body: Bytes::new(),
             rsp_headers: HeaderMap::new(),
@@ -95,6 +97,22 @@ impl<'a, S> H1SessionAsync<'a, S> {
     #[inline]
     pub fn response_sent(&self) -> bool {
         self.sent
+    }
+
+    /// True once response bytes reached the transport, even if the response is unfinished.
+    #[inline]
+    pub fn response_started(&self) -> bool {
+        self.sent || self.h1_streaming_headers_sent
+    }
+
+    /// Forget a response the handler staged but never sent, so an error
+    /// response cannot inherit its status, framing headers or body.
+    pub fn reset_response(&mut self) {
+        self.rsp_status = StatusCode::OK;
+        self.rsp_headers.clear();
+        self.rsp_body = Bytes::new();
+        self.h1_streaming = false;
+        self.h1_streaming_remaining = None;
     }
 
     fn write_blocking(&mut self, data: &[u8]) -> std::io::Result<()>
@@ -264,6 +282,10 @@ where
         &mut self,
         _timeout: std::time::Duration,
     ) -> Option<std::io::Result<Bytes>> {
+        // The body is already buffered: yield it once, then report it drained.
+        if std::mem::replace(&mut self.req_body_taken, true) {
+            return None;
+        }
         Some(Ok(self.req_body.clone()))
     }
 
@@ -482,9 +504,10 @@ where
         ))
     }
 
+    // Append like the other sessions: repeated fields such as Set-Cookie must all be sent.
     #[inline]
     fn header(&mut self, key: HeaderName, val: HeaderValue) -> std::io::Result<&mut Self> {
-        self.rsp_headers.insert(key, val);
+        self.rsp_headers.append(key, val);
         Ok(self)
     }
 
@@ -492,14 +515,14 @@ where
     fn header_str(&mut self, name: &str, value: &str) -> std::io::Result<&mut Self> {
         let header_name = HeaderName::from_bytes(name.as_bytes()).map_err(std::io::Error::other)?;
         let header_value = HeaderValue::from_str(value).map_err(std::io::Error::other)?;
-        self.rsp_headers.insert(header_name, header_value);
+        self.rsp_headers.append(header_name, header_value);
         Ok(self)
     }
 
     #[inline]
     fn headers(&mut self, headers: &HeaderMap) -> std::io::Result<&mut Self> {
         for (k, v) in headers.iter() {
-            self.rsp_headers.insert(k.clone(), v.clone());
+            self.rsp_headers.append(k.clone(), v.clone());
         }
         Ok(self)
     }
@@ -510,7 +533,7 @@ where
             let header_name =
                 HeaderName::from_bytes(name.as_bytes()).map_err(std::io::Error::other)?;
             let header_value = HeaderValue::from_str(value).map_err(std::io::Error::other)?;
-            self.rsp_headers.insert(header_name, header_value);
+            self.rsp_headers.append(header_name, header_value);
         }
         Ok(self)
     }
@@ -532,7 +555,17 @@ where
                 // will error (not panic) on current-thread runtime
                 self.start_h1_streaming()?;
             }
-            self.write_blocking(b"0\r\n\r\n")?;
+            // Only a chunked stream has a terminator; a fixed-length one must be complete.
+            match self.h1_streaming_remaining {
+                None => self.write_blocking(b"0\r\n\r\n")?,
+                Some(0) => {}
+                Some(_) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "stream ended before Content-Length",
+                    ));
+                }
+            }
             self.sent = true;
             return Ok(());
         }
@@ -586,11 +619,12 @@ where
             }
         }
 
-        // Connection header
-        if !self.keep_alive {
+        // Connection header; a 101 response must keep its Connection: Upgrade.
+        let switching = self.rsp_status == StatusCode::SWITCHING_PROTOCOLS;
+        if !self.keep_alive && !switching {
             self.rsp_headers
                 .insert(header::CONNECTION, HeaderValue::from_static("close"));
-        } else if self.version == Version::HTTP_10 {
+        } else if self.version == Version::HTTP_10 && !switching {
             self.rsp_headers
                 .insert(header::CONNECTION, HeaderValue::from_static("keep-alive"));
         }
@@ -727,7 +761,18 @@ where
     #[cfg(feature = "net-ws-server")]
     async fn ws_close_async(&mut self, reason: Option<bytes::Bytes>) -> std::io::Result<()> {
         use crate::network::http::ws;
-        let payload = reason.unwrap_or_else(|| ws::close_payload(1000, "bye"));
+        // Same payload as the sync ws_close: normal closure plus an optional UTF-8 reason.
+        let reason = reason.unwrap_or_default();
+        if reason.len() > 123 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "close reason too long",
+            ));
+        }
+        let reason = std::str::from_utf8(&reason).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "close reason not utf8")
+        })?;
+        let payload = ws::close_payload(1000, reason);
         let _ = self.ws_write_async(ws::OpCode::Close, payload, true).await;
         Ok(())
     }

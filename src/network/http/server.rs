@@ -882,6 +882,9 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                     let id = stream.as_raw_socket() as usize;
 
                     mc!(stream.set_nodelay(true));
+                    // Bound idle and stalled connections, as start_h1_tls does.
+                    let _ = stream.set_read_timeout(Some(cfg.io_timeout));
+                    let _ = stream.set_write_timeout(Some(cfg.io_timeout));
                     let service = self.service(id);
                     let builder = may::coroutine::Builder::new().id(id);
                     let _ = may::go!(builder, move || if let Err(e) =
@@ -1125,23 +1128,32 @@ pub trait HFactory: Send + Sync + Sized + 'static {
                         })
                         .ip();
 
-                    // TLS handshake
-                    let tls_stream = match tls_acceptor.accept(stream).await {
-                        Ok(s) => s,
-                        Err(e) => {
-                            error!("H2 TLS handshake error (shard {shard_id}): {e}");
-                            // sess_token is dropped here, freeing the slot
-                            continue;
-                        }
-                    };
-
                     let factory_cloned = std::sync::Arc::clone(&factory);
                     let h2_cfg_cloned = h2_cfg.clone();
+                    let acceptor = tls_acceptor.clone();
 
                     glommio::spawn_local({
                         async move {
                             // Hold for the lifetime of the session
                             let _permit = sess_token;
+
+                            // Handshake off the accept loop and bounded, so a silent
+                            // peer cannot stall the shard or hold its slot forever.
+                            let handshake =
+                                glommio::timer::timeout(h2_cfg_cloned.io_timeout, async {
+                                    acceptor
+                                        .accept(stream)
+                                        .await
+                                        .map_err(glommio::GlommioError::IoError)
+                                })
+                                .await;
+                            let tls_stream = match handshake {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    error!("H2 TLS handshake error (shard {shard_id}): {e}");
+                                    return;
+                                }
+                            };
 
                             // check negotiated ALPN
                             let negotiated = tls_stream

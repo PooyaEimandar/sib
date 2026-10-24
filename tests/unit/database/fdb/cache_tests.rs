@@ -140,6 +140,61 @@ async fn cache_set_get_lazy_expire_and_gc() {
 
 #[cfg(feature = "rt-tokio")]
 #[tokio::test]
+async fn gc_loop_survives_a_busy_pool_and_drains_a_backlog() {
+    use crate::database::fdb::trans::FDBTransaction;
+
+    let Some(pool) = start_network_and_pool_sized(1) else {
+        if cfg!(feature = "db-fdb") {
+            panic!("live FoundationDB test requested, but no usable cluster was found");
+        }
+        return;
+    };
+    let ns = format!("test_gc_loop_{}", now_ms());
+    let mut cache = BucketTtlCache::new(pool.clone(), ns.as_bytes());
+    cache.bucket_ms = 50;
+    cache.lazy_expiration_ms = 0;
+
+    // Expired rows spread over several buckets.
+    let keys: [&[u8]; 3] = [b"g0", b"g1", b"g2"];
+    for key in keys {
+        cache
+            .set(key, b"v", Duration::from_millis(1))
+            .await
+            .expect("set");
+        tokio::time::sleep(Duration::from_millis(60)).await;
+    }
+
+    // While the only handle is taken, every pass fails; the loop must keep running.
+    let loan = pool.try_loan().expect("single pool handle");
+    let busy = tokio::time::timeout(
+        Duration::from_millis(150),
+        cache.run_gc_loop(Duration::from_millis(20)),
+    )
+    .await;
+    assert!(busy.is_err(), "GC loop exited while the pool was busy: {busy:?}");
+    drop(loan);
+
+    // A long interval must not throttle a backlog: all buckets drain at once.
+    let drained = tokio::time::timeout(
+        Duration::from_secs(1),
+        cache.run_gc_loop(Duration::from_secs(30)),
+    )
+    .await;
+    assert!(drained.is_err(), "GC loop exited: {drained:?}");
+
+    let loan = pool.try_loan().expect("pool handle");
+    let trx = FDBTransaction::new(&loan).expect("transaction");
+    for key in keys {
+        let row = trx
+            .get_async_value_optional(&k_data_for(ns.as_bytes(), key), true)
+            .await
+            .expect("get");
+        assert!(row.is_none(), "expired row {key:?} was not collected");
+    }
+}
+
+#[cfg(feature = "rt-tokio")]
+#[tokio::test]
 async fn cache_delete_removes_row() {
     let Some(pool) = start_network_and_pool() else {
         if cfg!(feature = "db-fdb") {

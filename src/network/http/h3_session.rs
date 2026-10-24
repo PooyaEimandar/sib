@@ -9,6 +9,7 @@ pub struct H3Session {
     peer_addr: IpAddr,
     req: http::Request<()>,
     req_body_max_bytes: usize,
+    req_body_done: bool,
     stream: RequestStream<BidiStream<Bytes>, Bytes>,
     res_status: StatusCode,
     resp_headers: HeaderMap,
@@ -25,6 +26,7 @@ impl H3Session {
             peer_addr,
             req,
             req_body_max_bytes: 4 * 1024 * 1024, // 4MB
+            req_body_done: false,
             stream,
             res_status: StatusCode::OK,
             resp_headers: HeaderMap::new(),
@@ -109,6 +111,11 @@ impl Session for H3Session {
     async fn req_body_async(&mut self, timeout: Duration) -> Option<std::io::Result<Bytes>> {
         use futures_lite::future::race;
         use std::time::Instant;
+
+        // The whole body is returned at once; a later call reports it drained.
+        if std::mem::replace(&mut self.req_body_done, true) {
+            return None;
+        }
 
         let deadline = Instant::now() + timeout;
         let mut out = bytes::BytesMut::with_capacity(self.req_body_max_bytes);
@@ -201,6 +208,7 @@ impl Session for H3Session {
 
     /// Start an HTTP/2 streaming response: send headers now, return a `H2Stream`
     /// so the caller later can push data frames and decide when to end the stream.
+    #[cfg(feature = "net-h2-server")]
     #[inline]
     fn start_h2_streaming(&mut self) -> std::io::Result<super::h2_session::H2Stream> {
         Err(std::io::Error::other(
@@ -355,5 +363,84 @@ impl Session for H3Session {
             .finish()
             .await
             .map_err(|e| std::io::Error::other(e.to_string()))
+    }
+
+    #[cfg(feature = "net-ws-server")]
+    #[inline]
+    fn is_ws(&self) -> bool {
+        false
+    }
+
+    #[cfg(all(feature = "net-ws-server", feature = "net-h1-server"))]
+    #[inline]
+    fn ws_accept(&mut self) -> std::io::Result<()> {
+        Err(std::io::Error::other(
+            "ws_accept is not supported in H3Session",
+        ))
+    }
+
+    #[cfg(all(feature = "net-ws-server", feature = "net-h2-server"))]
+    async fn ws_accept_async(&mut self) -> std::io::Result<()> {
+        Err(std::io::Error::other(
+            "ws_accept_async is not supported in H3Session",
+        ))
+    }
+
+    #[cfg(all(feature = "net-ws-server", feature = "net-h1-server"))]
+    #[inline]
+    fn ws_read(
+        &mut self,
+    ) -> std::io::Result<(crate::network::http::ws::OpCode, bytes::Bytes, bool)> {
+        Err(std::io::Error::other(
+            "ws_read is not supported in H3Session",
+        ))
+    }
+
+    #[cfg(all(feature = "net-ws-server", feature = "net-h2-server"))]
+    async fn ws_read_async(
+        &mut self,
+    ) -> std::io::Result<(crate::network::http::ws::OpCode, Bytes, bool)> {
+        Err(std::io::Error::other(
+            "ws_read_async is not supported in H3Session",
+        ))
+    }
+
+    #[cfg(all(feature = "net-ws-server", feature = "net-h1-server"))]
+    #[inline]
+    fn ws_write(
+        &mut self,
+        _op: crate::network::http::ws::OpCode,
+        _payload: &bytes::Bytes,
+        _fin: bool,
+    ) -> std::io::Result<()> {
+        Err(std::io::Error::other(
+            "ws_write is not supported in H3Session",
+        ))
+    }
+
+    #[cfg(all(feature = "net-ws-server", feature = "net-h2-server"))]
+    async fn ws_write_async(
+        &mut self,
+        _op: crate::network::http::ws::OpCode,
+        _payload: Bytes,
+        _fin: bool,
+    ) -> std::io::Result<()> {
+        Err(std::io::Error::other(
+            "ws_write_async is not supported in H3Session",
+        ))
+    }
+
+    #[cfg(all(feature = "net-ws-server", feature = "net-h1-server"))]
+    fn ws_close(&mut self, _reason: Option<&bytes::Bytes>) -> std::io::Result<()> {
+        Err(std::io::Error::other(
+            "ws_close is not supported in H3Session",
+        ))
+    }
+
+    #[cfg(all(feature = "net-ws-server", feature = "net-h2-server"))]
+    async fn ws_close_async(&mut self, _reason: Option<Bytes>) -> std::io::Result<()> {
+        Err(std::io::Error::other(
+            "ws_close_async is not supported in H3Session",
+        ))
     }
 }

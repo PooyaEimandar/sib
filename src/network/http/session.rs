@@ -13,6 +13,9 @@ pub trait Session {
     fn req_headers(&self) -> http::HeaderMap;
     fn req_header(&self, header: &http::HeaderName) -> Option<http::HeaderValue>;
     fn req_body(&mut self, timeout: std::time::Duration) -> std::io::Result<&[u8]>;
+    /// Next part of the request body, or `None` once it has been read completely.
+    /// HTTP/2 yields one DATA frame per call; HTTP/1 and HTTP/3 yield the whole body
+    /// in a single call. Loop until `None` to read a body portably.
     async fn req_body_async(
         &mut self,
         timeout: std::time::Duration,

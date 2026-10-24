@@ -95,12 +95,34 @@ fn ws_token_from_request<S: Session>(session: &S) -> Option<String> {
     let query = session.req_query();
     for pair in query.trim_start_matches('?').split('&') {
         if let Some(v) = pair.strip_prefix("token=") {
-            return Some(v.to_owned());
+            // Browsers send it through encodeURIComponent.
+            return percent_decode(v);
         }
     }
     session
         .req_header(&http::HeaderName::from_static("sec-websocket-protocol"))
         .and_then(|v| v.to_str().ok().map(|s| s.trim().to_owned()))
+}
+
+/// Decode `%XX` escapes in a query value; `+` stays literal. Malformed escapes yield `None`.
+fn percent_decode(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = bytes.get(i + 1..i + 3)?;
+            if !hex.iter().all(u8::is_ascii_hexdigit) {
+                return None;
+            }
+            out.push(u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 /// Constant-time byte comparison, to avoid leaking the secret via timing.
@@ -2307,7 +2329,9 @@ impl HAsyncService for Server {
                                 if let Some(cb) = on_event.as_ref() {
                                     cb(SessionEvent::WsProtocolError { ws_id, message: error.to_string() });
                                 }
-                                session.ws_close_async(Some(Bytes::from_static(b"\x03\xea"))).await?;
+                                // ws_close_async always uses 1000; a protocol error closes with 1002.
+                                let payload = crate::network::http::ws::close_payload(1002, "protocol error");
+                                let _ = session.ws_write_async(OpCode::Close, payload, true).await;
                             }
                             return Err(error);
                         }

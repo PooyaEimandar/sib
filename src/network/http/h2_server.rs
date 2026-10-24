@@ -328,7 +328,13 @@ cfg_if::cfg_if! {
                         return Err(e);
                     }
                     error!("h1 service error: {e}");
+                    if session.response_started() && !session.response_sent() {
+                        // Part of the response is already on the wire.
+                        return Err(e);
+                    }
                     if !session.response_sent() {
+                        // Headers the handler staged, such as Content-Length, must not frame the 500.
+                        session.reset_response();
                         let _ = session
                             .status_code(http::StatusCode::INTERNAL_SERVER_ERROR)
                             .body(Bytes::new())
@@ -336,6 +342,11 @@ cfg_if::cfg_if! {
                             .await;
                     }
                 } else if !session.response_sent() {
+                    if session.response_started() {
+                        return Err(std::io::Error::other(
+                            "h1 handler returned before finishing its streamed response",
+                        ));
+                    }
                     let _ = session
                         .status_code(http::StatusCode::OK)
                         .body(Bytes::new())

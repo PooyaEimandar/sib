@@ -4,8 +4,13 @@ use governor::{Quota, RateLimiter as GovLimiter};
 use http::{HeaderName, StatusCode, header};
 use std::{
     num::NonZeroU32,
+    sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
     {net::IpAddr, sync::Arc},
 };
+
+// Keyed limiters keep every key they see until pruned.
+const PRUNE_INTERVAL_MS: u64 = 1_000;
 
 pub type IpLimiter = governor::DefaultKeyedRateLimiter<IpAddr>;
 pub type UserLimiter = governor::DefaultKeyedRateLimiter<String>;
@@ -70,6 +75,12 @@ impl RLKey {
             return format!("ck:{v}");
         }
 
+        self.ip_key(sess)
+    }
+
+    /// Key for the client address. The first X-Forwarded-For hop is trusted only
+    /// when the peer is a trusted proxy.
+    pub fn ip_key<S: super::session::Session>(&self, sess: &S) -> String {
         // If behind a trusted proxy, trust first X-Forwarded-For hop
         let peer = *sess.peer_addr();
         if self.trusted_proxies.contains(&peer)
@@ -149,10 +160,54 @@ impl<Svc> RateLimitedService<Svc> {
             .await
     }
 
+    /// Charge the request to its user and IP buckets. Returns whether it is
+    /// allowed and the rlid `Set-Cookie` value to send, if any.
+    fn check<S: super::session::Session>(&self, sess: &S) -> (bool, Option<String>) {
+        self.prune_stale_keys();
+
+        let (verified_user_key, set_cookie) = self.user_key_and_cookie(sess);
+        let cascaded_key = {
+            let k = self.key_policy.make_key(sess);
+            if k.starts_with("ck:") {
+                // A forged or expired cookie must not buy a fresh bucket per request.
+                verified_user_key.unwrap_or_else(|| self.key_policy.ip_key(sess))
+            } else {
+                k
+            }
+        };
+
+        let ip_key = *sess.peer_addr();
+        let user_ok = self.user_rl.check_key(&cascaded_key).is_ok();
+        let ip_ok = self.ip_rl.check_key(&ip_key).is_ok();
+        (user_ok && ip_ok, set_cookie)
+    }
+
+    /// Drop keys whose buckets have fully refilled, at most once per interval
+    /// across all services, so unverified credentials cannot grow memory forever.
+    fn prune_stale_keys(&self) {
+        static NEXT_PRUNE_MS: AtomicU64 = AtomicU64::new(0);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let next = NEXT_PRUNE_MS.load(Ordering::Relaxed);
+        if now < next
+            || NEXT_PRUNE_MS
+                .compare_exchange(next, now + PRUNE_INTERVAL_MS, Ordering::Relaxed, Ordering::Relaxed)
+                .is_err()
+        {
+            return;
+        }
+        self.user_rl.retain_recent();
+        self.ip_rl.retain_recent();
+    }
+
+    /// Returns the user key of a verified rlid cookie, plus a `Set-Cookie` value
+    /// when a new or refreshed cookie must be issued.
     fn user_key_and_cookie<S: super::session::Session>(
         &self,
         sess: &S,
-    ) -> (String, Option<String>) {
+    ) -> (Option<String>, Option<String>) {
         let cookie_header = sess
             .req_header(&header::COOKIE)
             .and_then(|v| v.to_str().ok().map(|s| s.to_owned()));
@@ -164,8 +219,9 @@ impl<Svc> RateLimitedService<Svc> {
         });
         let rlid_val = rlid_val.and_then(|v| v.strip_prefix("=").map(|s| s.to_owned()));
 
-        let chk = self.rlid_signer.verify_or_new(rlid_val.as_deref());
-        let user_key = format!("ck:{}", chk.id);
+        let verified = rlid_val.as_deref().and_then(|v| self.rlid_signer.verify(v));
+        let user_key = verified.as_ref().map(|chk| format!("ck:{}", chk.id));
+        let chk = verified.unwrap_or_else(|| self.rlid_signer.verify_or_new(None));
 
         let set_cookie = if chk.must_issue {
             Some(self.rlid_signer.issue_set_cookie(
@@ -188,25 +244,13 @@ where
     Svc: super::session::HService,
 {
     fn call<SE: super::session::Session>(&self, sess: &mut SE) -> std::io::Result<()> {
-        let (anon_user_key, set_cookie) = self.user_key_and_cookie(sess);
-        let cascaded_key = {
-            let k = self.key_policy.make_key(sess);
-            if k.starts_with("ck:") {
-                anon_user_key
-            } else {
-                k
-            }
-        };
-
-        let ip_key = *sess.peer_addr();
-        let user_ok = self.user_rl.check_key(&cascaded_key).is_ok();
-        let ip_ok = self.ip_rl.check_key(&ip_key).is_ok();
+        let (allowed, set_cookie) = self.check(sess);
 
         if let Some(sc) = set_cookie.as_ref() {
             let _ = sess.header_str("Set-Cookie", sc);
         }
 
-        if !(user_ok && ip_ok) {
+        if !allowed {
             return Self::stamp_429_h1(sess);
         }
         self.inner.call(sess)
@@ -223,25 +267,13 @@ where
     Svc: super::session::HAsyncService,
 {
     async fn call<SE: super::session::Session>(&self, sess: &mut SE) -> std::io::Result<()> {
-        let (anon_user_key, set_cookie) = self.user_key_and_cookie(sess);
-        let cascaded_key = {
-            let k = self.key_policy.make_key(sess);
-            if k.starts_with("ck:") {
-                anon_user_key
-            } else {
-                k
-            }
-        };
-
-        let ip_key = *sess.peer_addr();
-        let user_ok = self.user_rl.check_key(&cascaded_key).is_ok();
-        let ip_ok = self.ip_rl.check_key(&ip_key).is_ok();
+        let (allowed, set_cookie) = self.check(sess);
 
         if let Some(sc) = set_cookie.as_ref() {
             let _ = sess.header_str("Set-Cookie", sc);
         }
 
-        if !(user_ok && ip_ok) {
+        if !allowed {
             return Self::stamp_429_async(sess).await;
         }
         self.inner.call(sess).await

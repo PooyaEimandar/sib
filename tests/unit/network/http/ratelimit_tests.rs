@@ -248,7 +248,8 @@ fn test_ratelimit_h3_tls_server() {
         signer,
     };
 
-    let (cert_pem, key_pem) = crate::network::http::server::tests::create_self_signed_tls_pems();
+    let tls = crate::MtlsIdentity::generate(&[], &[], false);
+    let (cert_pem, key_pem) = (tls.server_cert_pem, tls.server_key_pem);
 
     let _server_thread = std::thread::spawn(move || {
         factory
@@ -327,4 +328,56 @@ async fn async_429_has_correct_content_length() {
     let mut wire = Vec::new();
     client.read_to_end(&mut wire).await.unwrap();
     assert_429_framing(&wire);
+}
+
+#[cfg(feature = "net-h1-server")]
+#[test]
+fn forged_rlid_cookie_does_not_mint_a_fresh_user_bucket() {
+    use crate::network::http::{
+        h1_session::new_session,
+        ratelimit::RLKey,
+        session::{HService, Session},
+    };
+
+    struct Ok200;
+    impl HService for Ok200 {
+        fn call<S: Session>(&self, session: &mut S) -> std::io::Result<()> {
+            session
+                .status_code(http::StatusCode::OK)
+                .header_str("Content-Length", "0")?
+                .body(bytes::Bytes::new())
+                .eom()
+        }
+    }
+
+    let (ip, user) = build_test_limiters();
+    let service = RateLimitedService::new(
+        Ok200,
+        user.clone(),
+        ip,
+        RLKey {
+            cookie_name: "rlid",
+            trusted_proxies: vec![],
+        },
+        build_signer(),
+    );
+    let peer = "127.0.0.1".parse().unwrap();
+    let mut statuses = Vec::new();
+    for _ in 0..4 {
+        let mut stream = std::io::Cursor::new(Vec::new());
+        let mut req = bytes::BytesMut::from(
+            &b"GET / HTTP/1.1\r\nHost: localhost\r\nCookie: rlid=forged\r\n\r\n"[..],
+        );
+        let mut rsp = bytes::BytesMut::new();
+        let mut session = new_session(&mut stream, &peer, &mut req, &mut rsp)
+            .unwrap()
+            .unwrap();
+        service.call(&mut session).unwrap();
+        drop(session);
+        let wire = String::from_utf8(stream.into_inner()).unwrap();
+        statuses.push(wire[9..12].to_owned());
+    }
+
+    assert!(statuses.iter().any(|s| s == "429"), "{statuses:?}");
+    assert_eq!(user.len(), 1, "each forged cookie created a new bucket");
 }

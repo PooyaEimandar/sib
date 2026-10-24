@@ -68,6 +68,14 @@ where
     status_buf: heapless::Vec<u8, 192>,
     // whether in streaming mode
     streaming: bool,
+    // whether the blank line ending the response headers is in rsp_buf
+    head_ended: bool,
+    // whether this request's response was completely written or queued
+    responded: bool,
+    // whether the connection was upgraded to WebSocket
+    upgraded: bool,
+    // rsp_buf bytes queued by earlier complete responses
+    rsp_start: usize,
 }
 
 #[async_trait::async_trait(?Send)]
@@ -242,6 +250,8 @@ where
     #[inline]
     fn write_all_eom(&mut self, status: &[u8]) -> std::io::Result<()> {
         self.rsp_buf.extend_from_slice(status);
+        self.rsp_start = self.rsp_buf.len();
+        self.responded = true;
         Ok(())
     }
 
@@ -288,7 +298,9 @@ where
         }
 
         // End of headers
-        self.rsp_buf.extend_from_slice(CRLF);
+        if !self.head_ended {
+            self.rsp_buf.extend_from_slice(CRLF);
+        }
 
         let mut off_status = 0usize;
         let mut off_body = 0usize;
@@ -334,6 +346,7 @@ where
         // headers sent; clear, mark streaming
         self.status_buf.clear();
         self.rsp_buf.clear();
+        self.head_ended = false;
         self.rsp_headers_len = 0;
         self.streaming = true;
 
@@ -389,6 +402,7 @@ where
         if end_stream {
             // end of response; ready for next request on keep-alive
             self.streaming = false;
+            self.responded = true;
         }
 
         Ok(())
@@ -466,7 +480,10 @@ where
         if !self.status_set {
             self.status_code(http::StatusCode::OK);
         }
-        self.rsp_buf.extend_from_slice(CRLF);
+        if !self.head_ended {
+            self.rsp_buf.extend_from_slice(CRLF);
+            self.head_ended = true;
+        }
         self.rsp_buf.extend_from_slice(&body);
         self
     }
@@ -483,12 +500,17 @@ where
             self.status_buf.clear();
             self.status_set = false;
             self.streaming = false;
+            self.responded = true;
             return Ok(());
         }
 
         if !self.status_set {
             // default 200 if nothing set yet
             self.status_code(http::StatusCode::OK);
+        }
+        // A response without body() still needs the blank line ending its headers.
+        if !self.head_ended {
+            self.rsp_buf.extend_from_slice(CRLF);
         }
 
         let mut off_status = 0usize;
@@ -531,8 +553,11 @@ where
 
         // We fully sent the response; clear buffers for reuse if desired
         self.rsp_buf.clear();
+        self.rsp_start = 0;
         self.status_buf.clear();
         self.status_set = false;
+        self.head_ended = false;
+        self.responded = true;
 
         Ok(())
     }
@@ -560,6 +585,7 @@ where
             return self
                 .status_code(http::StatusCode::BAD_REQUEST)
                 .header_str("Connection", "close")?
+                .header_str("Content-Length", "0")?
                 .eom();
         }
 
@@ -569,6 +595,7 @@ where
                 return self
                     .status_code(http::StatusCode::BAD_REQUEST)
                     .header_str("Connection", "close")?
+                    .header_str("Content-Length", "0")?
                     .eom();
             }
         };
@@ -601,12 +628,15 @@ where
         self.stream.write_all(resp.as_bytes())?;
 
         // After upgrade, switch to WS mode with clean buffers/state
+        self.upgraded = true;
         self.req_buf.clear();
         self.rsp_buf.clear();
+        self.rsp_start = 0;
         self.status_buf.clear();
         self.status_set = false;
         self.rsp_headers_len = 0;
         self.streaming = false;
+        self.head_ended = false;
 
         Ok(())
     }
@@ -750,6 +780,27 @@ where
         self.content_length = 0;
         Ok(false)
     }
+
+    /// Called after the handler failed. Drops a response it left unfinished and
+    /// queues a `500` if nothing reached the client yet. Returns true when the
+    /// connection must be closed.
+    pub(crate) fn fail_request(&mut self) -> bool {
+        if self.upgraded {
+            // A WebSocket connection never returns to HTTP parsing.
+            return true;
+        }
+        if self.responded {
+            return false;
+        }
+        // Staged headers have no status line yet; never put them on the wire.
+        self.rsp_buf.truncate(self.rsp_start);
+        if !self.streaming {
+            self.rsp_buf.extend_from_slice(
+                b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+        }
+        true
+    }
 }
 
 pub fn new_session<'buf, 'stream, S>(
@@ -822,6 +873,7 @@ where
     req_buf.advance(count);
 
     // reserve rsp_buf
+    let rsp_start = rsp_buf.len();
     let rem = rsp_buf.capacity() - rsp_buf.len();
     if rem < 1024 {
         rsp_buf.reserve(BUF_LEN - rem);
@@ -841,6 +893,10 @@ where
         status_set: false,
         status_buf: heapless::Vec::new(),
         streaming: false,
+        head_ended: false,
+        responded: false,
+        upgraded: false,
+        rsp_start,
     }))
 }
 

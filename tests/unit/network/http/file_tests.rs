@@ -176,16 +176,11 @@ impl crate::network::http::session::HAsyncService for FileService {
         const H2_STREAM_CHUNK_SIZE: usize = 64 * 1024; // 64 KB
 
         if session.req_http_version() == http::Version::HTTP_3 {
-            #[cfg(all(
-                all(feature = "net-h3-server", target_os = "linux"),
-                feature = "rt-glommio",
-                target_os = "linux"
-            ))]
+            #[cfg(all(feature = "net-h3-server", target_os = "linux"))]
             if let Err(e) = crate::network::http::file::serve_h3(
                 session,
-                file!(),
+                &std::path::PathBuf::from(file!()),
                 get_cache(),
-                &mut rsp_headers,
                 &[
                     EncodingType::Zstd { level: 3 },
                     EncodingType::Br {
@@ -201,7 +196,7 @@ impl crate::network::http::session::HAsyncService for FileService {
             )
             .await
             {
-                error!("H3 FileService failed: {e}");
+                tracing::error!("H3 FileService failed: {e}");
                 return session
                     .status_code(http::StatusCode::INTERNAL_SERVER_ERROR)
                     .body(bytes::Bytes::new())
@@ -386,15 +381,15 @@ fn file_server() {
 
     cfg_if::cfg_if! {
         if #[cfg(all(feature = "net-h3-server", target_os = "linux"))] {
-            let cert_h3_pem = cert.clone();
-            let key_h3_pem = key.clone();
+            let cert_h3_pem = mtls.server_cert_pem.clone();
+            let key_h3_pem = mtls.server_key_pem.clone();
             let h3_handle = std::thread::spawn(move || {
                 use crate::network::http::server::H3Config;
                 let addr = "0.0.0.0:8082";
                 let cert_pem = cert_h3_pem.as_bytes();
                 let key_pem = key_h3_pem.as_bytes();
                 let id = std::thread::current().id();
-                tracing::info!("Starting H2 server on {addr} with thread: {id:?}");
+                tracing::info!("Starting H3 server on {addr} with thread: {id:?}");
                 FileServer(FileService)
                     .start_h3_tls(addr, (None, cert_pem, key_pem), H3Config::default())
                     .unwrap_or_else(|_| panic!("H3 file server failed to start for thread {id:?}"));

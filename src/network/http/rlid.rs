@@ -108,6 +108,11 @@ impl RlidSigner {
         }
     }
 
+    /// Verify an incoming cookie value without minting a replacement identity.
+    pub fn verify(&self, token: &str) -> Option<VerifyOutcome> {
+        self.verify_v1(token)
+    }
+
     /// Create a full `Set-Cookie` header value for an existing `id`.
     ///
     /// - `secure`: set to true for HTTPS sites (recommended).

@@ -981,7 +981,8 @@ fn test_h2_tls_ws_over_h1_upgrade_with_client_auth() {
 fn test_h3_tls_server_get() {
     let addr = "127.0.0.1:8085";
     let _ = std::thread::spawn(move || {
-        let (cert, key) = create_self_signed_tls_pems();
+        let tls = crate::MtlsIdentity::generate(&[], &[], false);
+        let (cert, key) = (tls.server_cert_pem, tls.server_key_pem);
 
         use crate::network::http::server::H3Config;
         let h3_cfg = H3Config::default();
@@ -1021,7 +1022,8 @@ fn test_h3_tls_server_get() {
 fn test_h3_tls_server_post() {
     let addr = "127.0.0.1:8086";
     let _ = std::thread::spawn(move || {
-        let (cert, key) = create_self_signed_tls_pems();
+        let tls = crate::MtlsIdentity::generate(&[], &[], false);
+        let (cert, key) = (tls.server_cert_pem, tls.server_key_pem);
 
         use crate::network::http::server::H3Config;
         let h3_cfg = H3Config::default();

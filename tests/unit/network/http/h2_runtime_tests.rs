@@ -25,6 +25,10 @@ impl Drop for Guard {
 #[async_trait::async_trait(?Send)]
 impl HAsyncService for Service {
     async fn call<S: Session>(&self, session: &mut S) -> io::Result<()> {
+        #[cfg(feature = "net-ws-server")]
+        if session.is_ws() {
+            return session.ws_accept_async().await;
+        }
         let body = match session.req_path().as_str() {
             "/hang" => {
                 self.live.fetch_add(1, Ordering::SeqCst);
@@ -32,17 +36,38 @@ impl HAsyncService for Service {
                 std::future::pending::<()>().await;
                 unreachable!()
             }
-            "/echo" if session.req_http_version() == http::Version::HTTP_2 => {
+            // The same drain loop must terminate for HTTP/1 and HTTP/2 bodies.
+            "/echo" => {
                 let mut data = Vec::new();
                 while let Some(chunk) = session.req_body_async(Duration::from_secs(2)).await {
                     data.extend_from_slice(&chunk?);
                 }
                 Bytes::from(data)
             }
-            "/echo" => session
-                .req_body_async(Duration::from_secs(2))
-                .await
-                .unwrap()?,
+            "/staged-fail" => {
+                session.header_str("content-length", "100")?;
+                return Err(io::Error::other("handler failed after staging headers"));
+            }
+            "/cookies" => {
+                session.header_str("set-cookie", "a=1")?;
+                session.header(
+                    http::header::SET_COOKIE,
+                    http::HeaderValue::from_static("b=2"),
+                )?;
+                Bytes::new()
+            }
+            "/fixed-eom" => {
+                session.header_str("content-length", "4")?;
+                session.start_h1_streaming()?;
+                session.send_h1_data(b"abcd", false)?;
+                return session.eom();
+            }
+            "/partial-stream" => {
+                session.header_str("content-length", "10")?;
+                session.start_h1_streaming_async().await?;
+                session.send_h1_data_async(b"abc", false).await?;
+                return Err(io::Error::other("handler failed mid-stream"));
+            }
             _ => Bytes::from_static(b"hello"),
         };
         session
@@ -57,6 +82,26 @@ fn service() -> Service {
         live: Arc::new(AtomicUsize::new(0)),
     }
 }
+/// Run one HTTP/1 connection over an in-memory pipe and return everything the server wrote.
+async fn h1_exchange(cfg: &H2Config, request: &[u8]) -> (String, io::Result<()>) {
+    let (mut client, server) = tokio::io::duplex(8192);
+    let run = serve_h1(
+        server,
+        service(),
+        cfg,
+        "127.0.0.1".parse().unwrap(),
+        CancellationToken::new(),
+    );
+    let verify = async {
+        client.write_all(request).await.unwrap();
+        let mut reply = String::new();
+        client.read_to_string(&mut reply).await.unwrap();
+        reply
+    };
+    let (result, reply) = tokio::join!(run, verify);
+    (reply, result)
+}
+
 fn config() -> H2Config {
     H2Config {
         io_timeout: Duration::from_millis(250),
@@ -262,4 +307,113 @@ async fn idle_timeout_measures_inactivity_not_download_duration() {
         }
     };
     tokio::join!(read, write);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn h1_error_fallback_drops_staged_headers() {
+    let (reply, result) = h1_exchange(
+        &config(),
+        b"GET /staged-fail HTTP/1.1\r\nHost: localhost\r\n\r\n\
+GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    result.unwrap();
+    let lower = reply.to_lowercase();
+    assert!(reply.starts_with("HTTP/1.1 500 "), "{reply}");
+    assert!(lower.contains("content-length: 0\r\n"), "{reply}");
+    assert!(!lower.contains("content-length: 100"), "{reply}");
+    assert!(reply.ends_with("\r\n\r\nhello"), "next request was not served: {reply}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn h1_error_after_partial_stream_closes_the_connection() {
+    let (reply, result) = h1_exchange(
+        &config(),
+        b"GET /partial-stream HTTP/1.1\r\nHost: localhost\r\n\r\n\
+GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert!(result.is_err());
+    assert!(reply.ends_with("\r\n\r\nabc"), "{reply}");
+    assert_eq!(reply.matches("HTTP/1.1 ").count(), 1, "{reply}");
+}
+
+// Blocking session writes need a multi-thread runtime.
+#[tokio::test(flavor = "multi_thread")]
+async fn h1_sync_eom_keeps_fixed_length_framing() {
+    let (reply, result) = h1_exchange(
+        &config(),
+        b"GET /fixed-eom HTTP/1.1\r\nHost: localhost\r\n\r\n\
+GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    result.unwrap();
+    assert!(reply.contains("\r\n\r\nabcdHTTP/1.1 200"), "{reply}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn h1_repeated_response_headers_are_all_sent() {
+    let (reply, result) = h1_exchange(
+        &config(),
+        b"GET /cookies HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    result.unwrap();
+    let lower = reply.to_lowercase();
+    assert!(lower.contains("set-cookie: a=1\r\n"), "{reply}");
+    assert!(lower.contains("set-cookie: b=2\r\n"), "{reply}");
+}
+
+#[cfg(feature = "net-ws-server")]
+#[tokio::test(flavor = "current_thread")]
+async fn ws_close_async_sends_normal_closure_code_with_reason() {
+    use crate::network::http::h1_session_async::H1SessionAsync;
+
+    let (mut client, mut server) = tokio::io::duplex(1024);
+    let mut session = H1SessionAsync::new(
+        "127.0.0.1".parse().unwrap(),
+        &mut server,
+        (http::Method::GET, http::Version::HTTP_11),
+        "/".parse().unwrap(),
+        (http::HeaderMap::new(), Bytes::new()),
+        true,
+        true,
+    );
+    session
+        .ws_close_async(Some(Bytes::from_static(b"going away")))
+        .await
+        .unwrap();
+    assert!(
+        session
+            .ws_close_async(Some(Bytes::from_static(b"\xff")))
+            .await
+            .is_err()
+    );
+    drop(session);
+
+    let mut frame = [0u8; 14];
+    client.read_exact(&mut frame).await.unwrap();
+    assert_eq!(&frame[..4], &[0x88, 12, 0x03, 0xe8]);
+    assert_eq!(&frame[4..], b"going away");
+}
+
+#[cfg(feature = "net-ws-server")]
+#[tokio::test(flavor = "current_thread")]
+async fn h1_ws_upgrade_keeps_connection_upgrade_without_keep_alive() {
+    let cfg = H2Config {
+        keep_alive: false,
+        ..config()
+    };
+    let (reply, result) = h1_exchange(
+        &cfg,
+        b"GET /ws HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n\
+Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+Sec-WebSocket-Version: 13\r\n\r\n",
+    )
+    .await;
+    result.unwrap();
+    let lower = reply.to_lowercase();
+    assert!(reply.starts_with("HTTP/1.1 101 "), "{reply}");
+    assert!(lower.contains("connection: upgrade\r\n"), "{reply}");
+    assert!(!lower.contains("connection: close"), "{reply}");
 }

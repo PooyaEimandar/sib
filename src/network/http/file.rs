@@ -631,8 +631,6 @@ async fn serve_async_fn<S: Session>(
     min_max_compress_thresholds: (u64, u64),
     file_tuple: &mut Option<(StatusCode, PathBuf, u64, u64)>,
 ) -> std::io::Result<()> {
-    use crate::network::http::session;
-
     let (min_bytes_on_the_fly_size, max_bytes_on_the_fly_size) = min_max_compress_thresholds;
     const DISABLE_CONTENT_LENGTH: bool = true;
 
@@ -678,6 +676,18 @@ async fn serve_async_fn<S: Session>(
         (false, DISABLE_CONTENT_LENGTH),
     )
     .await
+}
+
+// Read an exact extent of a file. A file that shrank since its metadata was
+// cached fails with UnexpectedEof instead of faulting a mapping or panicking.
+fn read_file_extent(path: &Path, start: u64, len: u64) -> std::io::Result<Bytes> {
+    use std::io::{Seek, SeekFrom};
+    let mut file = std::fs::File::open(path)?;
+    file.seek(SeekFrom::Start(start))?;
+    let size = usize::try_from(len).map_err(std::io::Error::other)?;
+    let mut body = vec![0; size];
+    file.read_exact(&mut body)?;
+    Ok(Bytes::from(body))
 }
 
 // Once body streaming starts, an error must close the connection: the client
@@ -760,14 +770,9 @@ pub fn serve_h1<S: Session>(
         // Snapshot small responses before headers. mmap could fault if a file
         // is truncated during delivery, and stale ranges could panic on slicing.
         if bytes_to_send < stream_threshold {
-            use std::io::{Seek, SeekFrom};
-            let mut file = std::fs::File::open(&file_path).map_err(abort_file_stream)?;
-            file.seek(SeekFrom::Start(start))
-                .map_err(abort_file_stream)?;
-            let size = usize::try_from(bytes_to_send).map_err(std::io::Error::other)?;
-            let mut body = vec![0; size];
-            file.read_exact(&mut body).map_err(abort_file_stream)?;
-            return session.status_code(status).body(Bytes::from(body)).eom();
+            let body =
+                read_file_extent(&file_path, start, bytes_to_send).map_err(abort_file_stream)?;
+            return session.status_code(status).body(body).eom();
         }
 
         // Open the file before sending streaming headers.
@@ -1084,7 +1089,7 @@ pub async fn serve_h3<S: Session>(
     )
     .await;
 
-    // If we have a file tuple, it means it is ready to be served directly from mmap
+    // If we have a file tuple, it means it is ready to be served
     if let Some((status, file_path, start, end)) = file_tuple {
         let bytes_to_send = end - start;
 
@@ -1100,20 +1105,10 @@ pub async fn serve_h3<S: Session>(
             .await;
         } else {
             // Send all at once
-            let mmap = match std::fs::File::open(&file_path) {
-                Ok(std_file) => match unsafe { memmap2::Mmap::map(&std_file) } {
-                    Ok(mmap) => mmap,
-                    Err(e) => {
-                        error!("Failed to memory-map file: {}: {}", file_path.display(), e);
-                        return session
-                            .status_code(StatusCode::INTERNAL_SERVER_ERROR)
-                            .body(Bytes::new())
-                            .eom_async()
-                            .await;
-                    }
-                },
+            let body = match read_file_extent(&file_path, start, bytes_to_send) {
+                Ok(body) => body,
                 Err(e) => {
-                    error!("Failed to open file: {}: {}", file_path.display(), e);
+                    error!("Failed to read file: {}: {}", file_path.display(), e);
                     return session
                         .status_code(StatusCode::INTERNAL_SERVER_ERROR)
                         .body(Bytes::new())
@@ -1122,11 +1117,7 @@ pub async fn serve_h3<S: Session>(
                 }
             };
 
-            return session
-                .status_code(status)
-                .body(Bytes::copy_from_slice(&mmap[start as usize..end as usize]))
-                .eom_async()
-                .await;
+            return session.status_code(status).body(body).eom_async().await;
         }
     }
 
@@ -1942,11 +1933,18 @@ pub async fn serve_h3_streaming<S: Session>(
 ) -> std::io::Result<()> {
     use bytes::Bytes;
     use http::header;
+    use std::io::{Seek, SeekFrom};
 
-    // Open/map file and compute range (same validations as H2 path)
-    let file = std::fs::File::open(file_path)?;
-    let meta = file.metadata()?;
-    let file_len = meta.len();
+    let chunk_size = if chunk_size == 0 {
+        64 * 1024
+    } else {
+        chunk_size
+    };
+
+    // Open file and compute range (same validations as H2 path). Read it in
+    // bounded chunks: a mapping faults with SIGBUS if the file shrinks mid-send.
+    let mut file = std::fs::File::open(file_path)?;
+    let file_len = file.metadata()?.len();
 
     if start >= file_len {
         return Err(std::io::Error::new(
@@ -1956,10 +1954,8 @@ pub async fn serve_h3_streaming<S: Session>(
     }
 
     let end_excl = end.min(file_len).max(start);
-    let total = (end_excl - start) as usize;
-
-    let mmap = unsafe { memmap2::Mmap::map(&file) }
-        .map_err(|e| std::io::Error::other(format!("mmap failed: {e}")))?;
+    let total = end_excl - start;
+    file.seek(SeekFrom::Start(start))?;
 
     // Standard headers
     let mut headers = http::HeaderMap::new();
@@ -1987,17 +1983,13 @@ pub async fn serve_h3_streaming<S: Session>(
     }
 
     // Sending chunks
-    let mut off = start as usize;
-    let end_usize = end_excl as usize;
-
-    while off < end_usize {
-        let to_send = (end_usize - off).min(chunk_size);
-        let last = off + to_send == end_usize;
-
-        let chunk = Bytes::copy_from_slice(&mmap[off..off + to_send]);
-        session.send_h3_data(chunk, last).await?;
-
-        off += to_send;
+    let mut remaining = total;
+    while remaining > 0 {
+        let to_send = remaining.min(chunk_size as u64) as usize;
+        let mut chunk = vec![0; to_send];
+        file.read_exact(&mut chunk)?;
+        remaining -= to_send as u64;
+        session.send_h3_data(Bytes::from(chunk), remaining == 0).await?;
 
         #[cfg(all(feature = "rt-glommio", not(feature = "rt-tokio"), target_os = "linux"))]
         glommio::yield_if_needed().await;

@@ -14,9 +14,11 @@ pub(crate) fn serve<T: HService>(
 ) -> std::io::Result<()> {
     let mut req_buf = BytesMut::with_capacity(BUF_LEN);
     let mut rsp_buf = BytesMut::with_capacity(BUF_LEN);
+    // wait_io() never times out; with a read timeout the next read waits instead.
+    let timed = stream.read_timeout().ok().flatten().is_some();
 
     loop {
-        if read_write(stream, peer_addr, &mut req_buf, &mut rsp_buf, &service)? {
+        if read_write(stream, peer_addr, &mut req_buf, &mut rsp_buf, &service)? && !timed {
             #[cfg(unix)]
             {
                 use may::io::WaitIo;
@@ -37,9 +39,11 @@ pub(crate) fn serve_tls<T: HService>(
 ) -> std::io::Result<()> {
     let mut req_buf = BytesMut::with_capacity(BUF_LEN);
     let mut rsp_buf = BytesMut::with_capacity(BUF_LEN);
+    // wait_io() never times out; with a read timeout the next read waits instead.
+    let timed = stream.get_ref().read_timeout().ok().flatten().is_some();
 
     loop {
-        if read_write(stream, peer_addr, &mut req_buf, &mut rsp_buf, &service)? {
+        if read_write(stream, peer_addr, &mut req_buf, &mut rsp_buf, &service)? && !timed {
             #[cfg(unix)]
             {
                 use may::io::WaitIo;
@@ -210,17 +214,25 @@ where
         let call_result = service.call(&mut sess);
         let unread_body_remains = sess.finish_request()?;
 
-        if let Err(e) = call_result {
-            if e.kind() == std::io::ErrorKind::ConnectionAborted {
-                // only abort if the service explicitly wants hard close
-                return Err(e);
-            }
-            // Any other error just break
+        let call_failed = match call_result {
+            Ok(()) => false,
+            // only abort if the service explicitly wants hard close
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionAborted => return Err(e),
+            Err(_) => true,
+        };
+
+        // A failed handler can leave a half-built response behind.
+        let unusable = call_failed && sess.fail_request();
+
+        // Unread body bytes would be parsed as the next request, even after a
+        // handler error, so the connection must not be reused.
+        if unread_body_remains || unusable {
+            close_after_flush = true;
             break;
         }
 
-        if unread_body_remains {
-            close_after_flush = true;
+        // Any other error just break
+        if call_failed {
             break;
         }
     }
@@ -232,7 +244,7 @@ where
     if close_after_flush {
         return Err(std::io::Error::new(
             std::io::ErrorKind::ConnectionAborted,
-            "request body was not fully consumed",
+            "connection cannot be reused after this request",
         ));
     }
 
