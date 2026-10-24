@@ -334,12 +334,13 @@ cfg_if::cfg_if! {
                     }
                     if !session.response_sent() {
                         // Headers the handler staged, such as Content-Length, must not frame the 500.
+                        // A failed write leaves a partial response, so it closes the connection.
                         session.reset_response();
-                        let _ = session
+                        session
                             .status_code(http::StatusCode::INTERNAL_SERVER_ERROR)
                             .body(Bytes::new())
                             .eom_async()
-                            .await;
+                            .await?;
                     }
                 } else if !session.response_sent() {
                     if session.response_started() {
@@ -347,11 +348,11 @@ cfg_if::cfg_if! {
                             "h1 handler returned before finishing its streamed response",
                         ));
                     }
-                    let _ = session
+                    session
                         .status_code(http::StatusCode::OK)
                         .body(Bytes::new())
                         .eom_async()
-                        .await;
+                        .await?;
                 }
 
                 if !session.keep_alive() {

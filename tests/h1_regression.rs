@@ -167,9 +167,9 @@ fn start_server() -> (String, may::coroutine::JoinHandle<()>) {
 }
 
 fn read_available(stream: &mut TcpStream) -> String {
-    stream
-        .set_read_timeout(Some(Duration::from_millis(500)))
-        .expect("set read timeout");
+    // A server that closes with unread request bytes resets the connection, and
+    // macOS then rejects socket options; reads on such a socket return at once.
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
 
     let mut out = Vec::new();
     let mut buf = [0u8; 1024];
@@ -180,7 +180,9 @@ fn read_available(stream: &mut TcpStream) -> String {
             Err(e)
                 if matches!(
                     e.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::ConnectionReset
                 ) =>
             {
                 break;

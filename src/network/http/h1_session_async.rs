@@ -26,6 +26,9 @@ pub struct H1SessionAsync<'a, S> {
     // connection state
     keep_alive: bool,
     sent: bool,
+    // set before the first response write, so a write that fails partway
+    // still counts as a started response
+    rsp_started: bool,
 
     // streaming state (fixed length, or HTTP/1.1 chunked when unknown)
     h1_streaming_headers_sent: bool,
@@ -69,6 +72,7 @@ impl<'a, S> H1SessionAsync<'a, S> {
 
             keep_alive,
             sent: false,
+            rsp_started: false,
 
             h1_streaming_headers_sent: false,
             h1_streaming: false,
@@ -102,7 +106,7 @@ impl<'a, S> H1SessionAsync<'a, S> {
     /// True once response bytes reached the transport, even if the response is unfinished.
     #[inline]
     pub fn response_started(&self) -> bool {
-        self.sent || self.h1_streaming_headers_sent
+        self.rsp_started
     }
 
     /// Forget a response the handler staged but never sent, so an error
@@ -344,6 +348,7 @@ where
         }
         head.push_str("\r\n");
 
+        self.rsp_started = true;
         self.write_blocking(head.as_bytes())?;
         self.h1_streaming_headers_sent = true;
         Ok(())
@@ -394,6 +399,7 @@ where
         }
         head.push_str("\r\n");
 
+        self.rsp_started = true;
         self.stream.write_all(head.as_bytes()).await?;
         self.stream.flush().await?;
         self.h1_streaming_headers_sent = true;
@@ -587,7 +593,7 @@ where
     async fn eom_async(&mut self) -> std::io::Result<()> {
         use tokio::io::AsyncWriteExt;
 
-        if self.sent || self.h1_streaming_headers_sent {
+        if self.rsp_started {
             return Err(std::io::Error::other("response already started"));
         }
 
@@ -651,6 +657,7 @@ where
         }
         head.push_str("\r\n");
 
+        self.rsp_started = true;
         self.stream.write_all(head.as_bytes()).await?;
         if !self.rsp_body.is_empty() {
             self.stream.write_all(&self.rsp_body).await?;

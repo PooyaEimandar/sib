@@ -3,6 +3,7 @@ use bytes::Bytes;
 use governor::{Quota, RateLimiter as GovLimiter};
 use http::{HeaderName, StatusCode, header};
 use std::{
+    hash::Hash,
     num::NonZeroU32,
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
@@ -12,8 +13,63 @@ use std::{
 // Keyed limiters keep every key they see until pruned.
 const PRUNE_INTERVAL_MS: u64 = 1_000;
 
-pub type IpLimiter = governor::DefaultKeyedRateLimiter<IpAddr>;
-pub type UserLimiter = governor::DefaultKeyedRateLimiter<String>;
+pub type IpLimiter = KeyedLimiter<IpAddr>;
+pub type UserLimiter = KeyedLimiter<String>;
+
+/// A keyed rate limiter with its own pruning schedule. Services that share the
+/// limiter through an `Arc` share its schedule; independent limiters never
+/// delay each other's cleanup.
+pub struct KeyedLimiter<K: Hash + Eq + Clone> {
+    limiter: governor::DefaultKeyedRateLimiter<K>,
+    next_prune_ms: AtomicU64,
+}
+
+impl<K: Hash + Eq + Clone> KeyedLimiter<K> {
+    pub fn keyed(quota: Quota) -> Self {
+        GovLimiter::keyed(quota).into()
+    }
+
+    /// Drop keys whose buckets have fully refilled, at most once per interval,
+    /// so unverified credentials cannot grow memory forever.
+    pub fn prune_if_due(&self) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let next = self.next_prune_ms.load(Ordering::Relaxed);
+        if now < next
+            || self
+                .next_prune_ms
+                .compare_exchange(
+                    next,
+                    now + PRUNE_INTERVAL_MS,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
+                .is_err()
+        {
+            return;
+        }
+        self.limiter.retain_recent();
+    }
+}
+
+impl<K: Hash + Eq + Clone> From<governor::DefaultKeyedRateLimiter<K>> for KeyedLimiter<K> {
+    fn from(limiter: governor::DefaultKeyedRateLimiter<K>) -> Self {
+        Self {
+            limiter,
+            next_prune_ms: AtomicU64::new(0),
+        }
+    }
+}
+
+impl<K: Hash + Eq + Clone> std::ops::Deref for KeyedLimiter<K> {
+    type Target = governor::DefaultKeyedRateLimiter<K>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.limiter
+    }
+}
 
 #[derive(Clone)]
 pub struct RLGuards {
@@ -30,8 +86,8 @@ pub fn build(
     let ip_quota = Quota::per_second(ip_window_sec).allow_burst(ip_max_burst);
     let user_quota = Quota::per_second(user_window_sec).allow_burst(user_max_burst);
     RLGuards {
-        accept_ip: Arc::new(GovLimiter::keyed(ip_quota)),
-        user_req: Arc::new(GovLimiter::keyed(user_quota)),
+        accept_ip: Arc::new(IpLimiter::keyed(ip_quota)),
+        user_req: Arc::new(UserLimiter::keyed(user_quota)),
     }
 }
 
@@ -163,7 +219,8 @@ impl<Svc> RateLimitedService<Svc> {
     /// Charge the request to its user and IP buckets. Returns whether it is
     /// allowed and the rlid `Set-Cookie` value to send, if any.
     fn check<S: super::session::Session>(&self, sess: &S) -> (bool, Option<String>) {
-        self.prune_stale_keys();
+        self.user_rl.prune_if_due();
+        self.ip_rl.prune_if_due();
 
         let (verified_user_key, set_cookie) = self.user_key_and_cookie(sess);
         let cascaded_key = {
@@ -180,26 +237,6 @@ impl<Svc> RateLimitedService<Svc> {
         let user_ok = self.user_rl.check_key(&cascaded_key).is_ok();
         let ip_ok = self.ip_rl.check_key(&ip_key).is_ok();
         (user_ok && ip_ok, set_cookie)
-    }
-
-    /// Drop keys whose buckets have fully refilled, at most once per interval
-    /// across all services, so unverified credentials cannot grow memory forever.
-    fn prune_stale_keys(&self) {
-        static NEXT_PRUNE_MS: AtomicU64 = AtomicU64::new(0);
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        let next = NEXT_PRUNE_MS.load(Ordering::Relaxed);
-        if now < next
-            || NEXT_PRUNE_MS
-                .compare_exchange(next, now + PRUNE_INTERVAL_MS, Ordering::Relaxed, Ordering::Relaxed)
-                .is_err()
-        {
-            return;
-        }
-        self.user_rl.retain_recent();
-        self.ip_rl.retain_recent();
     }
 
     /// Returns the user key of a verified rlid cookie, plus a `Set-Cookie` value

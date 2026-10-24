@@ -44,6 +44,7 @@ impl HAsyncService for Service {
                 }
                 Bytes::from(data)
             }
+            "/large" => Bytes::from(vec![b'x'; 100]),
             "/staged-fail" => {
                 session.header_str("content-length", "100")?;
                 return Err(io::Error::other("handler failed after staging headers"));
@@ -322,7 +323,10 @@ GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
     assert!(reply.starts_with("HTTP/1.1 500 "), "{reply}");
     assert!(lower.contains("content-length: 0\r\n"), "{reply}");
     assert!(!lower.contains("content-length: 100"), "{reply}");
-    assert!(reply.ends_with("\r\n\r\nhello"), "next request was not served: {reply}");
+    assert!(
+        reply.ends_with("\r\n\r\nhello"),
+        "next request was not served: {reply}"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -416,4 +420,92 @@ Sec-WebSocket-Version: 13\r\n\r\n",
     assert!(reply.starts_with("HTTP/1.1 101 "), "{reply}");
     assert!(lower.contains("connection: upgrade\r\n"), "{reply}");
     assert!(!lower.contains("connection: close"), "{reply}");
+}
+
+/// Transport whose writes fail once after `fail_at` bytes, then succeed again.
+struct FlakyWrite<S> {
+    inner: S,
+    fail_at: usize,
+    written: usize,
+    failed: bool,
+}
+
+impl<S: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for FlakyWrite<S> {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_read(cx, buf)
+    }
+}
+
+impl<S: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for FlakyWrite<S> {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        let mut len = buf.len();
+        if !this.failed {
+            let room = this.fail_at - this.written;
+            if room == 0 {
+                this.failed = true;
+                return std::task::Poll::Ready(Err(io::Error::other("injected write failure")));
+            }
+            len = len.min(room);
+        }
+        let result = std::pin::Pin::new(&mut this.inner).poll_write(cx, &buf[..len]);
+        if let std::task::Poll::Ready(Ok(n)) = result {
+            this.written += n;
+        }
+        result
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn h1_write_failure_mid_body_closes_instead_of_appending_a_500() {
+    let (mut client, server) = tokio::io::duplex(8192);
+    let server = FlakyWrite {
+        inner: server,
+        fail_at: 60,
+        written: 0,
+        failed: false,
+    };
+    let cfg = config();
+    let run = serve_h1(
+        server,
+        service(),
+        &cfg,
+        "127.0.0.1".parse().unwrap(),
+        CancellationToken::new(),
+    );
+    let verify = async {
+        client
+            .write_all(b"GET /large HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        let mut reply = String::new();
+        client.read_to_string(&mut reply).await.unwrap();
+        reply
+    };
+    let (result, reply) = tokio::join!(run, verify);
+    assert!(result.is_err());
+    assert_eq!(reply.matches("HTTP/1.1 ").count(), 1, "{reply}");
+    assert!(!reply.contains(" 500 "), "{reply}");
 }

@@ -1989,7 +1989,9 @@ pub async fn serve_h3_streaming<S: Session>(
         let mut chunk = vec![0; to_send];
         file.read_exact(&mut chunk)?;
         remaining -= to_send as u64;
-        session.send_h3_data(Bytes::from(chunk), remaining == 0).await?;
+        session
+            .send_h3_data(Bytes::from(chunk), remaining == 0)
+            .await?;
 
         #[cfg(all(feature = "rt-glommio", not(feature = "rt-tokio"), target_os = "linux"))]
         glommio::yield_if_needed().await;

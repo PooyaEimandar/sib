@@ -417,7 +417,10 @@ fn query_token_is_percent_decoded() {
         percent_decode("ab%2Bc%2Fd%3D%3D").as_deref(),
         Some("ab+c/d==")
     );
-    assert_eq!(percent_decode("plain+token").as_deref(), Some("plain+token"));
+    assert_eq!(
+        percent_decode("plain+token").as_deref(),
+        Some("plain+token")
+    );
     assert_eq!(percent_decode("bad%2"), None);
     assert_eq!(percent_decode("bad%+1"), None);
     assert_eq!(percent_decode("%ff"), None);

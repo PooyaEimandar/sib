@@ -87,16 +87,16 @@ fn do_req(
 
 // Generous IP limiter, strict per-user: 2 total tokens in any 1s window (1 rps + burst 1)
 fn build_test_limiters() -> (Arc<IpLimiter>, Arc<UserLimiter>) {
-    use governor::{Quota, RateLimiter as GovLimiter};
+    use governor::Quota;
     use nonzero_ext::nonzero;
 
-    let ip = Arc::new(GovLimiter::keyed(
+    let ip = Arc::new(IpLimiter::keyed(
         Quota::per_second(nonzero!(1000u32)).allow_burst(nonzero!(1000u32)),
     ));
 
     // 2 total tokens in any given second: rate 1/sec + burst 1
     // => 1st OK, 2nd OK, 3rd within the same second -> 429
-    let user = Arc::new(GovLimiter::keyed(
+    let user = Arc::new(UserLimiter::keyed(
         Quota::per_second(nonzero!(1u32)).allow_burst(nonzero!(1u32)),
     ));
     (ip, user)
@@ -331,53 +331,103 @@ async fn async_429_has_correct_content_length() {
 }
 
 #[cfg(feature = "net-h1-server")]
-#[test]
-fn forged_rlid_cookie_does_not_mint_a_fresh_user_bucket() {
-    use crate::network::http::{
-        h1_session::new_session,
-        ratelimit::RLKey,
-        session::{HService, Session},
-    };
+struct Ok200;
 
-    struct Ok200;
-    impl HService for Ok200 {
-        fn call<S: Session>(&self, session: &mut S) -> std::io::Result<()> {
-            session
-                .status_code(http::StatusCode::OK)
-                .header_str("Content-Length", "0")?
-                .body(bytes::Bytes::new())
-                .eom()
-        }
+#[cfg(feature = "net-h1-server")]
+impl crate::network::http::session::HService for Ok200 {
+    fn call<S: crate::network::http::session::Session>(
+        &self,
+        session: &mut S,
+    ) -> std::io::Result<()> {
+        session
+            .status_code(http::StatusCode::OK)
+            .header_str("Content-Length", "0")?
+            .body(bytes::Bytes::new())
+            .eom()
     }
+}
 
-    let (ip, user) = build_test_limiters();
-    let service = RateLimitedService::new(
+#[cfg(feature = "net-h1-server")]
+fn rate_limited(user: &Arc<UserLimiter>, ip: &Arc<IpLimiter>) -> RateLimitedService<Ok200> {
+    use crate::network::http::ratelimit::RLKey;
+    RateLimitedService::new(
         Ok200,
         user.clone(),
-        ip,
+        ip.clone(),
         RLKey {
             cookie_name: "rlid",
             trusted_proxies: vec![],
         },
         build_signer(),
-    );
+    )
+}
+
+/// Serve one request through a sync H1 session and return the status code.
+#[cfg(feature = "net-h1-server")]
+fn serve_once(service: &RateLimitedService<Ok200>, request: &[u8]) -> String {
+    use crate::network::http::{h1_session::new_session, session::HService};
     let peer = "127.0.0.1".parse().unwrap();
-    let mut statuses = Vec::new();
-    for _ in 0..4 {
-        let mut stream = std::io::Cursor::new(Vec::new());
-        let mut req = bytes::BytesMut::from(
-            &b"GET / HTTP/1.1\r\nHost: localhost\r\nCookie: rlid=forged\r\n\r\n"[..],
-        );
-        let mut rsp = bytes::BytesMut::new();
-        let mut session = new_session(&mut stream, &peer, &mut req, &mut rsp)
-            .unwrap()
-            .unwrap();
-        service.call(&mut session).unwrap();
-        drop(session);
-        let wire = String::from_utf8(stream.into_inner()).unwrap();
-        statuses.push(wire[9..12].to_owned());
-    }
+    let mut stream = std::io::Cursor::new(Vec::new());
+    let mut req = bytes::BytesMut::from(request);
+    let mut rsp = bytes::BytesMut::new();
+    let mut session = new_session(&mut stream, &peer, &mut req, &mut rsp)
+        .unwrap()
+        .unwrap();
+    service.call(&mut session).unwrap();
+    drop(session);
+    String::from_utf8(stream.into_inner()).unwrap()[9..12].to_owned()
+}
+
+#[cfg(feature = "net-h1-server")]
+#[test]
+fn forged_rlid_cookie_does_not_mint_a_fresh_user_bucket() {
+    let (ip, user) = build_test_limiters();
+    let service = rate_limited(&user, &ip);
+    let statuses: Vec<_> = (0..4)
+        .map(|_| {
+            serve_once(
+                &service,
+                b"GET / HTTP/1.1\r\nHost: localhost\r\nCookie: rlid=forged\r\n\r\n",
+            )
+        })
+        .collect();
 
     assert!(statuses.iter().any(|s| s == "429"), "{statuses:?}");
     assert_eq!(user.len(), 1, "each forged cookie created a new bucket");
+}
+
+#[cfg(feature = "net-h1-server")]
+#[test]
+fn independent_rate_limiters_each_prune_their_stale_keys() {
+    use governor::Quota;
+    use nonzero_ext::nonzero;
+
+    // Buckets refill within a millisecond, so the keys below go stale quickly.
+    let quota = Quota::per_second(nonzero!(1000u32));
+    let limiters: Vec<_> = (0..2)
+        .map(|_| {
+            (
+                Arc::new(UserLimiter::keyed(quota)),
+                Arc::new(IpLimiter::keyed(quota)),
+            )
+        })
+        .collect();
+    for (user, _) in &limiters {
+        for i in 0..100 {
+            let _ = user.check_key(&format!("stale{i}"));
+        }
+    }
+    std::thread::sleep(std::time::Duration::from_millis(20));
+
+    for (user, ip) in &limiters {
+        let status = serve_once(
+            &rate_limited(user, ip),
+            b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        );
+        assert_eq!(status, "200");
+    }
+    for (user, _) in &limiters {
+        // Only the key of the request just served may remain.
+        assert_eq!(user.len(), 1, "stale keys were left in a limiter");
+    }
 }

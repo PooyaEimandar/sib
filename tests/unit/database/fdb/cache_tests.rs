@@ -171,7 +171,10 @@ async fn gc_loop_survives_a_busy_pool_and_drains_a_backlog() {
         cache.run_gc_loop(Duration::from_millis(20)),
     )
     .await;
-    assert!(busy.is_err(), "GC loop exited while the pool was busy: {busy:?}");
+    assert!(
+        busy.is_err(),
+        "GC loop exited while the pool was busy: {busy:?}"
+    );
     drop(loan);
 
     // A long interval must not throttle a backlog: all buckets drain at once.
