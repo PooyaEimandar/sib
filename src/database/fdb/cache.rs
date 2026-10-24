@@ -94,6 +94,28 @@ fn data_key_from_ttl_key(ns: &[u8], bucket: u64, ttl_key: &[u8]) -> Option<Vec<u
     Some(k_data_for(ns, key))
 }
 
+fn oldest_ttl_range(ns: &[u8]) -> crate::database::fdb::trans::FDBOwnedRange {
+    let mut prefix = ROOT_PFX.to_vec();
+    prefix.extend_from_slice(ns);
+    prefix.extend_from_slice(TTL_SEG);
+    // ROOT_PFX contains non-0xff bytes, so this prefix always has a successor.
+    crate::database::fdb::trans::FDBOwnedRange::prefix(&prefix, 1).expect("finite TTL prefix")
+}
+
+fn oldest_bucket(
+    ns: &[u8],
+    rows: &[crate::database::fdb::trans::FDBKeyValue],
+) -> std::io::Result<Option<u64>> {
+    let Some((key, _)) = rows.first() else {
+        return Ok(None);
+    };
+    let offset = ROOT_PFX.len() + ns.len() + TTL_SEG.len();
+    let bytes = key.get(offset..offset + 8).ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "malformed TTL bucket key")
+    })?;
+    Ok(Some(u64::from_be_bytes(bytes.try_into().unwrap())))
+}
+
 #[derive(Clone)]
 pub struct BucketTtlCache {
     pool: FDBPool,
@@ -295,21 +317,20 @@ impl BucketTtlCache {
         let k_gc = self.k_gc_checkpoint();
         let trx = FDBTransaction::new(&loan)?;
         let last = trx.get_blocking_value_optional(&k_gc, true)?;
-        drop(trx);
-
-        let start_bucket = match last {
+        let candidate = match last {
             Some(b) if b.len() == 8 => {
                 u64::from_be_bytes(b.as_slice().try_into().unwrap()).saturating_add(self.bucket_ms)
             }
-            _ => 0,
+            _ => {
+                let (rows, _) = trx.get_owned_range_blocking(&oldest_ttl_range(&self.ns))?;
+                let Some(bucket) = oldest_bucket(&self.ns, &rows)? else {
+                    return Ok(false);
+                };
+                bucket
+            }
         };
-        let candidate = if start_bucket == 0 {
-            self.bucket_of(now.saturating_sub(self.lazy_expiration_ms + self.bucket_ms))
-        } else {
-            start_bucket
-        };
-
-        if candidate == 0 || candidate >= limit {
+        drop(trx);
+        if candidate >= limit {
             return Ok(false);
         }
 
@@ -374,25 +395,21 @@ impl BucketTtlCache {
         // load checkpoint
         let k_gc = k_gc_checkpoint_for(ns);
         let trx = FDBTransaction::new(&loan)?;
-        let last = trx.get_async_value_optional(&k_gc, true).await?; // retry-safe
-        drop(trx);
-
-        let start_bucket = match last {
+        let last = trx.get_async_value_optional(&k_gc, true).await?;
+        let candidate = match last {
             Some(b) if b.len() == 8 => {
                 u64::from_be_bytes(b.as_slice().try_into().unwrap()).saturating_add(self.bucket_ms)
             }
-            _ => 0,
+            _ => {
+                let (rows, _) = trx.get_owned_range_async(&oldest_ttl_range(ns)).await?;
+                let Some(bucket) = oldest_bucket(ns, &rows)? else {
+                    return Ok(false);
+                };
+                bucket
+            }
         };
-        let candidate = if start_bucket == 0 {
-            bucket_of(
-                now.saturating_sub(self.lazy_expiration_ms + self.bucket_ms),
-                self.bucket_ms,
-            )
-        } else {
-            start_bucket
-        };
-
-        if candidate == 0 || candidate >= limit {
+        drop(trx);
+        if candidate >= limit {
             return Ok(false);
         }
 

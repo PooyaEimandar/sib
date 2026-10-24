@@ -361,3 +361,56 @@ fn cache_gc_glommio() {
         }
     });
 }
+
+fn seed_old_gc_record(pool: &FDBPool, ns: &[u8]) -> Vec<u8> {
+    use crate::database::fdb::trans::FDBTransaction;
+    let loan = pool.try_loan().unwrap();
+    let trx = FDBTransaction::new(&loan).unwrap();
+    // Well before the first GC run, with no checkpoint and no lazy get cleanup.
+    let expiry = now_ms() - 600_000;
+    let bucket = bucket_of(expiry, 1000);
+    let data = k_data_for(ns, b"old");
+    let mut value = expiry.to_be_bytes().to_vec();
+    value.extend_from_slice(b"expired");
+    trx.clear(&k_gc_checkpoint_for(ns));
+    trx.set(&data, &value)
+        .set(&k_ttl_for(ns, bucket, b"old"), b"")
+        .commit_blocking()
+        .unwrap();
+    data
+}
+
+fn assert_gc_deleted_data(pool: &FDBPool, data: &[u8]) {
+    use crate::database::fdb::trans::FDBTransaction;
+    let loan = pool.try_loan().unwrap();
+    let trx = FDBTransaction::new(&loan).unwrap();
+    assert!(
+        trx.get_blocking_value_optional(data, false)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[cfg(feature = "rt-tokio")]
+#[tokio::test]
+async fn initial_gc_collects_oldest_stored_bucket() {
+    let pool = start_network_and_pool().expect("test database");
+    let ns = b"initial-gc-async";
+    let data = seed_old_gc_record(&pool, ns);
+    let mut cache = BucketTtlCache::new(pool.clone(), ns);
+    cache.bucket_ms = 1000;
+    assert!(cache.gc_once().await.unwrap());
+    assert_gc_deleted_data(&pool, &data);
+}
+
+#[cfg(feature = "rt-may")]
+#[test]
+fn initial_gc_collects_oldest_stored_bucket() {
+    let pool = start_network_and_pool().expect("test database");
+    let ns = b"initial-gc-blocking";
+    let data = seed_old_gc_record(&pool, ns);
+    let mut cache = BucketTtlCache::new(pool.clone(), ns);
+    cache.bucket_ms = 1000;
+    assert!(cache.gc_once().unwrap());
+    assert_gc_deleted_data(&pool, &data);
+}
