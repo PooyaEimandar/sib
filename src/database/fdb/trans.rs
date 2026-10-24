@@ -237,8 +237,13 @@ pub enum FDBTransactionOutcome<R> {
     Retry(i32), // FDB error code
 }
 
+/// An exclusively owned transaction; raw handles cannot be used to clone it.
+/// ```compile_fail
+/// use sib::database::fdb::trans::FDBTransaction;
+/// let transaction = FDBTransaction { trs: std::ptr::null_mut() };
+/// ```
 pub struct FDBTransaction {
-    pub trs: *mut foundationdb_sys::FDBTransaction,
+    trs: *mut foundationdb_sys::FDBTransaction,
 }
 
 // SAFETY: FoundationDB transactions are client API handles that may be moved
@@ -250,13 +255,28 @@ unsafe impl Send for FDBTransaction {}
 // responsible for FoundationDB's transaction semantics.
 unsafe impl Sync for FDBTransaction {}
 
+/// A FoundationDB error, preserved inside `std::io::Error` for transaction retries.
+#[derive(Debug)]
+pub struct FDBError {
+    pub code: i32,
+    message: String,
+}
+
+impl std::fmt::Display for FDBError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "FDB error {}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for FDBError {}
+
 #[inline]
-fn fdb_err(code: i32) -> std::io::Error {
+pub(crate) fn fdb_err(code: i32) -> std::io::Error {
     let cstr = unsafe { foundationdb_sys::fdb_get_error(code) };
     let s = unsafe { CStr::from_ptr(cstr) }
         .to_string_lossy()
         .into_owned();
-    std::io::Error::other(format!("FDB error {code}: {s}"))
+    std::io::Error::other(FDBError { code, message: s })
 }
 
 impl FDBTransaction {
@@ -319,43 +339,41 @@ impl FDBTransaction {
 
     #[inline]
     pub fn get(&self, key: &[u8], snapshot: bool) -> std::io::Result<FDBFuture> {
-        FDBFuture::new(unsafe {
-            foundationdb_sys::fdb_transaction_get(
+        unsafe {
+            FDBFuture::new(foundationdb_sys::fdb_transaction_get(
                 self.trs,
                 key.as_ptr(),
                 key.len() as i32,
                 snapshot as i32,
-            )
-        })
+            ))
+        }
     }
 
-    /// Blocking get (with `on_error` retry). Returns Ok(Some(value)) / Ok(None).
+    /// Read once. Errors must retry the entire transaction, for example with `run`.
     #[inline]
     pub fn get_blocking_value_optional(
         &self,
         key: &[u8],
         snapshot: bool,
     ) -> std::io::Result<Option<Vec<u8>>> {
-        loop {
-            let fut = self.get(key, snapshot)?;
-            fut.block_until_ready();
-            let code = fut.get_error_code();
-            if code == 0 {
-                match fut.get_value() {
-                    Ok(v) => return Ok(Some(v.to_vec())),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-                    Err(e) => return Err(e),
-                }
-            }
-            self.on_error_blocking(code)?;
+        let fut = self.get(key, snapshot)?;
+        fut.block_until_ready();
+        let code = fut.get_error_code();
+        if code != 0 {
+            return Err(fdb_err(code));
+        }
+        match fut.get_value() {
+            Ok(v) => Ok(Some(v.to_vec())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
         }
     }
 
     /// Returns a future for range read. (Used only inside retry loop below.)
     #[inline]
     pub fn get_range<'a>(&self, range: &FDBRange<'a>) -> std::io::Result<FDBFuture> {
-        FDBFuture::new(unsafe {
-            foundationdb_sys::fdb_transaction_get_range(
+        unsafe {
+            FDBFuture::new(foundationdb_sys::fdb_transaction_get_range(
                 self.trs,
                 range.begin_key.as_ptr(),
                 range.begin_key.len() as i32,
@@ -371,8 +389,8 @@ impl FDBTransaction {
                 range.iteration,
                 range.snapshot as i32,
                 range.reverse as i32,
-            )
-        })
+            ))
+        }
     }
 
     fn parse_range_result(fut: &FDBFuture) -> std::io::Result<FDBRangeResult> {
@@ -386,7 +404,7 @@ impl FDBTransaction {
         let mut more: i32 = 0;
         let rc = unsafe {
             foundationdb_sys::fdb_future_get_keyvalue_array(
-                fut.fut,
+                fut.as_ptr(),
                 &mut kvs_ptr,
                 &mut count,
                 &mut more,
@@ -487,7 +505,7 @@ impl FDBTransaction {
 
     #[inline]
     pub fn commit(&self) -> std::io::Result<FDBFuture> {
-        FDBFuture::new(unsafe { foundationdb_sys::fdb_transaction_commit(self.trs) })
+        unsafe { FDBFuture::new(foundationdb_sys::fdb_transaction_commit(self.trs)) }
     }
 
     /// Simple blocking commit (no replay). Keep for niche cases.
@@ -504,15 +522,19 @@ impl FDBTransaction {
 
     #[inline]
     pub fn watch(&self, key: &[u8]) -> std::io::Result<FDBFuture> {
-        FDBFuture::new(unsafe {
-            foundationdb_sys::fdb_transaction_watch(self.trs, key.as_ptr(), key.len() as i32)
-        })
+        unsafe {
+            FDBFuture::new(foundationdb_sys::fdb_transaction_watch(
+                self.trs,
+                key.as_ptr(),
+                key.len() as i32,
+            ))
+        }
     }
 
     #[inline]
     fn on_error_blocking(&self, code: i32) -> std::io::Result<()> {
         let fut =
-            FDBFuture::new(unsafe { foundationdb_sys::fdb_transaction_on_error(self.trs, code) })?;
+            unsafe { FDBFuture::new(foundationdb_sys::fdb_transaction_on_error(self.trs, code)) }?;
         fut.block_until_ready();
         let rc = fut.get_error_code();
         if rc != 0 {
@@ -524,24 +546,23 @@ impl FDBTransaction {
 
 #[cfg(any(feature = "rt-tokio", feature = "rt-glommio"))]
 impl FDBTransaction {
-    /// Async get with `on_error` retry. `Ok(Some(value))` / `Ok(None)`.
+    /// Read once without resetting earlier reads or writes on failure.
+    /// The caller must replay the entire transaction after a retryable error.
     pub async fn get_async_value_optional(
         &self,
         key: &[u8],
         snapshot: bool,
     ) -> std::io::Result<Option<Vec<u8>>> {
-        loop {
-            let fut = self.get(key, snapshot)?;
-            fut.ready().await;
-            let code = fut.get_error_code();
-            if code == 0 {
-                match fut.get_value() {
-                    Ok(v) => return Ok(Some(v.to_vec())),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-                    Err(e) => return Err(e),
-                }
-            }
-            self.on_error_async(code).await?;
+        let fut = self.get(key, snapshot)?;
+        fut.ready().await;
+        let code = fut.get_error_code();
+        if code != 0 {
+            return Err(fdb_err(code));
+        }
+        match fut.get_value() {
+            Ok(v) => Ok(Some(v.to_vec())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
         }
     }
 
@@ -576,7 +597,7 @@ impl FDBTransaction {
 
     async fn on_error_async(&self, code: i32) -> std::io::Result<()> {
         let fut =
-            FDBFuture::new(unsafe { foundationdb_sys::fdb_transaction_on_error(self.trs, code) })?;
+            unsafe { FDBFuture::new(foundationdb_sys::fdb_transaction_on_error(self.trs, code)) }?;
         fut.ready().await;
         let rc = fut.get_error_code();
         if rc != 0 {
@@ -603,7 +624,17 @@ where
     let trx = FDBTransaction::new(db)?;
     loop {
         // user logic
-        let out = match f(&trx)? {
+        let outcome = match f(&trx) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                if let Some(fdb) = error.get_ref().and_then(|e| e.downcast_ref::<FDBError>()) {
+                    trx.on_error_blocking(fdb.code)?;
+                    continue;
+                }
+                return Err(error);
+            }
+        };
+        let out = match outcome {
             FDBTransactionOutcome::Ok(v) => v,
             FDBTransactionOutcome::Retry(code) => {
                 trx.on_error_blocking(code)?;

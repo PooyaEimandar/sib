@@ -1,5 +1,67 @@
 use super::*;
 
+fn live_db() -> FDB {
+    crate::database::fdb::test_shared::fdb_test_network_start().expect("FDB network");
+    let cluster = std::env::var("SIB_FDB_CLUSTER_FILE").unwrap_or_else(|_| {
+        if cfg!(target_os = "macos") {
+            "/usr/local/etc/foundationdb/fdb.cluster".into()
+        } else {
+            "/etc/foundationdb/fdb.cluster".into()
+        }
+    });
+    FDB::new(&cluster).expect("test database")
+}
+
+#[test]
+fn run_replays_writes_after_a_read_error() {
+    let db = live_db();
+    let key = b"sib-tests/retry-whole-transaction";
+    let mut attempts = 0;
+    run(&db, |trx| {
+        attempts += 1;
+        trx.set_option(FDBTransactionOption::Timeout, &5000_i64.to_le_bytes());
+        if attempts == 1 {
+            // An old read version deterministically triggers transaction_too_old.
+            unsafe { foundationdb_sys::fdb_transaction_set_read_version(trx.trs, 1) };
+        }
+        trx.set(key, b"preserved");
+        trx.get_blocking_value_optional(b"sib-tests/unrelated-read", false)?;
+        Ok(FDBTransactionOutcome::Ok(()))
+    })
+    .expect("replay entire transaction");
+    assert!(attempts >= 2);
+    let trx = FDBTransaction::new(&db).unwrap();
+    assert_eq!(
+        trx.get_blocking_value_optional(key, false)
+            .unwrap()
+            .as_deref(),
+        Some(&b"preserved"[..])
+    );
+    trx.clear(key).commit_blocking().unwrap();
+}
+
+#[cfg(feature = "rt-tokio")]
+#[tokio::test]
+async fn async_read_failure_does_not_silently_reset_transaction() {
+    let db = live_db();
+    let trx = FDBTransaction::new(&db).unwrap();
+    trx.set_option(FDBTransactionOption::Timeout, &5000_i64.to_le_bytes());
+    unsafe { foundationdb_sys::fdb_transaction_set_read_version(trx.trs, 1) };
+    trx.set(b"sib-tests/failed-read-write", b"must-not-partially-commit");
+    let error = trx
+        .get_async_value_optional(b"sib-tests/unrelated-read", false)
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .get_ref()
+            .unwrap()
+            .downcast_ref::<FDBError>()
+            .is_some()
+    );
+    assert!(trx.commit_async().await.is_err());
+}
+
 #[test]
 fn prefix_end_builds_lexicographic_successor() {
     assert_eq!(prefix_end(b"abc").as_deref(), Some(&b"abd"[..]));

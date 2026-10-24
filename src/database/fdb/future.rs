@@ -3,10 +3,17 @@ use foundationdb_sys::{
     fdb_future_get_value, fdb_future_is_ready, fdb_future_release_memory,
 };
 use std::os::raw::c_int;
-use std::ptr;
+use std::ptr::{self, NonNull};
 
+/// An exclusively owned FoundationDB future.
+///
+/// Raw handles cannot be adopted in safe code:
+/// ```compile_fail
+/// use sib::database::fdb::future::FDBFuture;
+/// let future = FDBFuture::new(std::ptr::null_mut());
+/// ```
 pub struct FDBFuture {
-    pub fut: *mut FDB_future,
+    fut: NonNull<FDB_future>,
 }
 
 // SAFETY: FoundationDB futures are reference-counted client objects whose C API
@@ -20,52 +27,61 @@ unsafe impl Send for FDBFuture {}
 unsafe impl Sync for FDBFuture {}
 
 impl FDBFuture {
-    pub fn new(fut: *mut FDB_future) -> std::io::Result<Self> {
-        if fut.is_null() {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Failed to create FDBFuture: null pointer",
-            ))
-        } else {
-            Ok(Self { fut })
-        }
+    /// Adopt ownership of a FoundationDB future, rejecting null handles.
+    ///
+    /// # Safety
+    /// A non-null pointer must be a live FDB future exclusively transferred to
+    /// this wrapper. No other owner may destroy it or release its memory.
+    pub unsafe fn new(fut: *mut FDB_future) -> std::io::Result<Self> {
+        NonNull::new(fut)
+            .map(|fut| Self { fut })
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "null FDB future"))
     }
 
-    pub fn from_raw(fut: *mut FDB_future) -> Self {
-        Self { fut }
+    /// Adopt exclusive ownership of a non-null FoundationDB future.
+    ///
+    /// # Safety
+    /// `fut` must satisfy the ownership and validity requirements of `new`.
+    pub unsafe fn from_raw(fut: *mut FDB_future) -> Self {
+        // SAFETY: the caller transfers exclusive ownership of a valid handle.
+        unsafe { Self::new(fut) }.expect("null FDB future")
+    }
+
+    /// Borrow the C handle. This does not transfer ownership.
+    pub fn as_ptr(&self) -> *mut FDB_future {
+        self.fut.as_ptr()
+    }
+
+    /// Transfer ownership to the caller, who must eventually destroy the handle.
+    pub fn into_raw(self) -> *mut FDB_future {
+        let raw = self.as_ptr();
+        std::mem::forget(self);
+        raw
     }
 
     pub fn is_ready(&self) -> bool {
-        if self.fut.is_null() {
-            return false;
-        }
-        unsafe { fdb_future_is_ready(self.fut) != 0 }
+        unsafe { fdb_future_is_ready(self.as_ptr()) != 0 }
     }
 
     pub fn block_until_ready(&self) {
-        if !self.fut.is_null() {
-            unsafe {
-                fdb_future_block_until_ready(self.fut);
-            }
+        unsafe {
+            fdb_future_block_until_ready(self.as_ptr());
         }
     }
 
     pub fn get_error_code(&self) -> i32 {
-        unsafe { fdb_future_get_error(self.fut) }
+        unsafe { fdb_future_get_error(self.as_ptr()) }
     }
 
     pub fn get_value(&self) -> std::io::Result<&[u8]> {
-        if self.fut.is_null() {
-            return Err(std::io::Error::other("null future"));
-        }
-
         let mut present = 0;
         let mut val_ptr: *const u8 = ptr::null();
         let mut len: c_int = 0;
 
-        let err = unsafe { fdb_future_get_value(self.fut, &mut present, &mut val_ptr, &mut len) };
+        let err =
+            unsafe { fdb_future_get_value(self.as_ptr(), &mut present, &mut val_ptr, &mut len) };
         if err != 0 {
-            return Err(std::io::Error::from_raw_os_error(err));
+            return Err(super::trans::fdb_err(err));
         }
 
         if present == 0 {
@@ -75,33 +91,29 @@ impl FDBFuture {
             ));
         }
 
+        if len == 0 {
+            return Ok(&[]);
+        }
         Ok(unsafe { std::slice::from_raw_parts(val_ptr, len as usize) })
     }
 
     pub fn cancel(&mut self) {
-        if !self.fut.is_null() {
-            unsafe {
-                fdb_future_cancel(self.fut);
-            }
+        unsafe {
+            fdb_future_cancel(self.as_ptr());
         }
     }
 
     pub fn release_memory(&mut self) {
-        if !self.fut.is_null() {
-            unsafe {
-                fdb_future_release_memory(self.fut);
-            }
+        unsafe {
+            fdb_future_release_memory(self.as_ptr());
         }
     }
 }
 
 impl Drop for FDBFuture {
     fn drop(&mut self) {
-        if self.fut.is_null() {
-            return;
-        }
         unsafe {
-            foundationdb_sys::fdb_future_destroy(self.fut);
+            foundationdb_sys::fdb_future_destroy(self.as_ptr());
         }
     }
 }
@@ -191,7 +203,11 @@ mod ready {
                     // Hand one strong ref to FDB; `on_ready` reclaims it when it fires.
                     let raw = Arc::into_raw(Arc::clone(&cell));
                     let rc = unsafe {
-                        fdb_future_set_callback(this.fut.fut, Some(on_ready), raw as *mut c_void)
+                        fdb_future_set_callback(
+                            this.fut.as_ptr(),
+                            Some(on_ready),
+                            raw as *mut c_void,
+                        )
                     };
                     if rc != 0 {
                         // Registration failed: reclaim our ref and report ready so the
