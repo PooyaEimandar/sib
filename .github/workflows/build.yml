@@ -15,7 +15,10 @@ env:
 jobs:
   linux:
     name: Linux ${{ matrix.target }}
-    runs-on: ubuntu-latest
+    # glommio 0.9's vendored liburing fails to compile with glibc >= 2.43
+    # (ubuntu-26.04): <fcntl.h> now defines struct open_how, so liburing's
+    # configure skips its fallback, but its sources never include <fcntl.h>.
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
