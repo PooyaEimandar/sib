@@ -525,13 +525,101 @@ fn h1_stalled_partial_request_honors_io_timeout() {
 
     let started = std::time::Instant::now();
     let mut buf = [0u8; 64];
-    let closed = matches!(stream.read(&mut buf), Ok(0))
-        || matches!(stream.read(&mut buf), Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset);
+    let closed = match stream.read(&mut buf) {
+        Ok(n) => n == 0,
+        Err(e) => e.kind() == std::io::ErrorKind::ConnectionReset,
+    };
     let elapsed = started.elapsed();
     unsafe { handle.coroutine().cancel() };
 
     assert!(
         closed && elapsed < Duration::from_secs(2),
         "stalled connection stayed open for {elapsed:?}"
+    );
+}
+
+/// Accepts a WebSocket and echoes every frame until the client closes.
+#[cfg(feature = "net-ws-server")]
+#[derive(Clone)]
+struct WsEchoService;
+
+#[cfg(feature = "net-ws-server")]
+impl HService for WsEchoService {
+    fn call<S: Session>(&self, session: &mut S) -> std::io::Result<()> {
+        use sib::network::http::ws::OpCode;
+        session.ws_accept()?;
+        loop {
+            let (op, payload, fin) = session.ws_read()?;
+            if matches!(op, OpCode::Close) {
+                return Ok(());
+            }
+            session.ws_write(op, &payload, fin)?;
+        }
+    }
+}
+
+#[cfg(feature = "net-ws-server")]
+fn ws_io_timeout_config() -> H1Config {
+    H1Config {
+        io_timeout: Duration::from_millis(300),
+        ..H1Config::default()
+    }
+}
+
+#[cfg(feature = "net-ws-server")]
+#[test]
+fn h1_idle_websocket_outlives_io_timeout() {
+    use tungstenite::Message;
+
+    let (addr, handle) = start_service(WsEchoService, ws_io_timeout_config());
+    let stream = TcpStream::connect(&addr).expect("connect h1 server");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .expect("set read timeout");
+    let (mut ws, _) = tungstenite::client(format!("ws://{addr}/ws"), stream).expect("handshake");
+
+    // Several io_timeouts without traffic between messages.
+    std::thread::sleep(Duration::from_millis(1000));
+    let sent = ws.send(Message::Text("still here".into()));
+    let reply = ws.read();
+    unsafe { handle.coroutine().cancel() };
+
+    assert!(sent.is_ok(), "send after idle failed: {sent:?}");
+    assert!(
+        matches!(&reply, Ok(Message::Text(text)) if text.as_str() == "still here"),
+        "idle WebSocket was closed: {reply:?}"
+    );
+}
+
+#[cfg(feature = "net-ws-server")]
+#[test]
+fn h1_stalled_websocket_frame_honors_io_timeout() {
+    let (addr, handle) = start_service(WsEchoService, ws_io_timeout_config());
+    let mut stream = TcpStream::connect(&addr).expect("connect h1 server");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .expect("set read timeout");
+    let (_ws, _) = tungstenite::client(
+        format!("ws://{addr}/ws"),
+        stream.try_clone().expect("clone stream"),
+    )
+    .expect("handshake");
+
+    // The header of a masked 5-byte text frame, then silence.
+    stream
+        .write_all(&[0x81, 0x85])
+        .expect("write partial frame");
+    let started = std::time::Instant::now();
+    let mut buf = [0u8; 64];
+    let closed = match stream.read(&mut buf) {
+        Ok(n) => n == 0,
+        Err(e) => e.kind() == std::io::ErrorKind::ConnectionReset,
+    };
+    let elapsed = started.elapsed();
+    unsafe { handle.coroutine().cancel() };
+
+    assert!(
+        closed && elapsed < Duration::from_secs(2),
+        "stalled frame kept the connection open for {elapsed:?}"
     );
 }

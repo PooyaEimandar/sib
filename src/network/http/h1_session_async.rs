@@ -202,6 +202,43 @@ impl<'a, S> H1SessionAsync<'a, S> {
         Ok(Some(remaining))
     }
 
+    /// Apply the Connection rules and serialize the status line and headers.
+    fn response_head(&mut self) -> String {
+        // A 101 response must keep its Connection: Upgrade.
+        if self.rsp_status != StatusCode::SWITCHING_PROTOCOLS {
+            if !self.keep_alive {
+                self.rsp_headers
+                    .insert(header::CONNECTION, HeaderValue::from_static("close"));
+            } else if self.version == Version::HTTP_10 {
+                self.rsp_headers
+                    .insert(header::CONNECTION, HeaderValue::from_static("keep-alive"));
+            }
+        }
+
+        let ver = match self.version {
+            Version::HTTP_10 => "HTTP/1.0",
+            _ => "HTTP/1.1",
+        };
+        let reason = self.rsp_status.canonical_reason().unwrap_or("OK");
+
+        let mut head = String::with_capacity(256);
+        head.push_str(ver);
+        head.push(' ');
+        head.push_str(self.rsp_status.as_str());
+        head.push(' ');
+        head.push_str(reason);
+        head.push_str("\r\n");
+
+        for (k, v) in self.rsp_headers.iter() {
+            head.push_str(k.as_str());
+            head.push_str(": ");
+            head.push_str(v.to_str().unwrap_or_default());
+            head.push_str("\r\n");
+        }
+        head.push_str("\r\n");
+        head
+    }
+
     #[inline]
     fn response_must_not_have_body(&self) -> bool {
         let code = self.rsp_status.as_u16();
@@ -313,40 +350,16 @@ where
         if self.sent {
             return Err(std::io::Error::other("response already sent"));
         }
-        if self.h1_streaming {
+        if self.h1_streaming_headers_sent {
             return Ok(());
         }
+        if self.rsp_started {
+            return Err(std::io::Error::other(
+                "response head was only partly written",
+            ));
+        }
         self.prepare_h1_streaming()?;
-
-        if !self.keep_alive {
-            self.rsp_headers
-                .insert(header::CONNECTION, HeaderValue::from_static("close"));
-        } else if self.version == Version::HTTP_10 {
-            self.rsp_headers
-                .insert(header::CONNECTION, HeaderValue::from_static("keep-alive"));
-        }
-
-        let ver = match self.version {
-            Version::HTTP_10 => "HTTP/1.0",
-            _ => "HTTP/1.1",
-        };
-        let reason = self.rsp_status.canonical_reason().unwrap_or("OK");
-
-        let mut head = String::with_capacity(256);
-        head.push_str(ver);
-        head.push(' ');
-        head.push_str(self.rsp_status.as_str());
-        head.push(' ');
-        head.push_str(reason);
-        head.push_str("\r\n");
-
-        for (k, v) in self.rsp_headers.iter() {
-            head.push_str(k.as_str());
-            head.push_str(": ");
-            head.push_str(v.to_str().unwrap_or_default());
-            head.push_str("\r\n");
-        }
-        head.push_str("\r\n");
+        let head = self.response_head();
 
         self.rsp_started = true;
         self.write_blocking(head.as_bytes())?;
@@ -361,43 +374,17 @@ where
         if self.sent {
             return Err(std::io::Error::other("response already sent"));
         }
-        if self.h1_streaming {
+        if self.h1_streaming_headers_sent {
             return Ok(());
+        }
+        if self.rsp_started {
+            return Err(std::io::Error::other(
+                "response head was only partly written",
+            ));
         }
 
         self.prepare_h1_streaming()?;
-
-        // Connection header
-        if !self.keep_alive {
-            self.rsp_headers
-                .insert(header::CONNECTION, HeaderValue::from_static("close"));
-        } else if self.version == Version::HTTP_10 {
-            self.rsp_headers
-                .insert(header::CONNECTION, HeaderValue::from_static("keep-alive"));
-        }
-
-        // Status line + headers
-        let ver = match self.version {
-            Version::HTTP_10 => "HTTP/1.0",
-            _ => "HTTP/1.1",
-        };
-        let reason = self.rsp_status.canonical_reason().unwrap_or("OK");
-
-        let mut head = String::with_capacity(256);
-        head.push_str(ver);
-        head.push(' ');
-        head.push_str(self.rsp_status.as_str());
-        head.push(' ');
-        head.push_str(reason);
-        head.push_str("\r\n");
-
-        for (k, v) in self.rsp_headers.iter() {
-            head.push_str(k.as_str());
-            head.push_str(": ");
-            head.push_str(v.to_str().unwrap_or_default());
-            head.push_str("\r\n");
-        }
-        head.push_str("\r\n");
+        let head = self.response_head();
 
         self.rsp_started = true;
         self.stream.write_all(head.as_bytes()).await?;
@@ -625,38 +612,7 @@ where
             }
         }
 
-        // Connection header; a 101 response must keep its Connection: Upgrade.
-        let switching = self.rsp_status == StatusCode::SWITCHING_PROTOCOLS;
-        if !self.keep_alive && !switching {
-            self.rsp_headers
-                .insert(header::CONNECTION, HeaderValue::from_static("close"));
-        } else if self.version == Version::HTTP_10 && !switching {
-            self.rsp_headers
-                .insert(header::CONNECTION, HeaderValue::from_static("keep-alive"));
-        }
-
-        let ver = match self.version {
-            Version::HTTP_10 => "HTTP/1.0",
-            _ => "HTTP/1.1",
-        };
-        let reason = self.rsp_status.canonical_reason().unwrap_or("OK");
-
-        let mut head = String::with_capacity(256);
-        head.push_str(ver);
-        head.push(' ');
-        head.push_str(self.rsp_status.as_str());
-        head.push(' ');
-        head.push_str(reason);
-        head.push_str("\r\n");
-
-        for (k, v) in self.rsp_headers.iter() {
-            head.push_str(k.as_str());
-            head.push_str(": ");
-            head.push_str(v.to_str().unwrap_or_default());
-            head.push_str("\r\n");
-        }
-        head.push_str("\r\n");
-
+        let head = self.response_head();
         self.rsp_started = true;
         self.stream.write_all(head.as_bytes()).await?;
         if !self.rsp_body.is_empty() {

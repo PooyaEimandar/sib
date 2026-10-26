@@ -63,6 +63,11 @@ impl HAsyncService for Service {
                 session.send_h1_data(b"abcd", false)?;
                 return session.eom();
             }
+            "/retry-head" => {
+                // Ignore a failed head write and try to finish the response anyway.
+                let _ = session.start_h1_streaming_async().await;
+                return session.eom();
+            }
             "/partial-stream" => {
                 session.header_str("content-length", "10")?;
                 session.start_h1_streaming_async().await?;
@@ -508,4 +513,35 @@ async fn h1_write_failure_mid_body_closes_instead_of_appending_a_500() {
     assert!(result.is_err());
     assert_eq!(reply.matches("HTTP/1.1 ").count(), 1, "{reply}");
     assert!(!reply.contains(" 500 "), "{reply}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn h1_eom_after_a_failed_streaming_head_does_not_send_a_terminator() {
+    let (mut client, server) = tokio::io::duplex(8192);
+    let server = FlakyWrite {
+        inner: server,
+        fail_at: 10,
+        written: 0,
+        failed: false,
+    };
+    let cfg = config();
+    let run = serve_h1(
+        server,
+        service(),
+        &cfg,
+        "127.0.0.1".parse().unwrap(),
+        CancellationToken::new(),
+    );
+    let verify = async {
+        client
+            .write_all(b"GET /retry-head HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        let mut reply = String::new();
+        client.read_to_string(&mut reply).await.unwrap();
+        reply
+    };
+    let (result, reply) = tokio::join!(run, verify);
+    assert!(result.is_err());
+    assert_eq!(reply, "HTTP/1.1 2", "{reply:?}");
 }

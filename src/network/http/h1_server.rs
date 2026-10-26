@@ -221,12 +221,13 @@ where
             Err(_) => true,
         };
 
-        // A failed handler can leave a half-built response behind.
-        let unusable = call_failed && sess.fail_request();
+        // A handler can leave a half-built or missing response behind, even
+        // when it returns Ok.
+        let reusable = sess.settle();
 
         // Unread body bytes would be parsed as the next request, even after a
         // handler error, so the connection must not be reused.
-        if unread_body_remains || unusable {
+        if unread_body_remains || !reusable {
             close_after_flush = true;
             break;
         }
@@ -250,3 +251,7 @@ where
 
     Ok(blocked)
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/network/http/h1_server_tests.rs"]
+mod tests;

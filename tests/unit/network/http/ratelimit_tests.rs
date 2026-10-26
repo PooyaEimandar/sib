@@ -365,6 +365,12 @@ fn rate_limited(user: &Arc<UserLimiter>, ip: &Arc<IpLimiter>) -> RateLimitedServ
 /// Serve one request through a sync H1 session and return the status code.
 #[cfg(feature = "net-h1-server")]
 fn serve_once(service: &RateLimitedService<Ok200>, request: &[u8]) -> String {
+    serve_raw(service, request)[9..12].to_owned()
+}
+
+/// Serve one request through a sync H1 session and return the whole response.
+#[cfg(feature = "net-h1-server")]
+fn serve_raw(service: &RateLimitedService<Ok200>, request: &[u8]) -> String {
     use crate::network::http::{h1_session::new_session, session::HService};
     let peer = "127.0.0.1".parse().unwrap();
     let mut stream = std::io::Cursor::new(Vec::new());
@@ -375,7 +381,7 @@ fn serve_once(service: &RateLimitedService<Ok200>, request: &[u8]) -> String {
         .unwrap();
     service.call(&mut session).unwrap();
     drop(session);
-    String::from_utf8(stream.into_inner()).unwrap()[9..12].to_owned()
+    String::from_utf8(stream.into_inner()).unwrap()
 }
 
 #[cfg(feature = "net-h1-server")]
@@ -413,8 +419,11 @@ fn independent_rate_limiters_each_prune_their_stale_keys() {
         })
         .collect();
     for (user, _) in &limiters {
+        // Insert through governor directly, so the request below is the first
+        // to prune each limiter.
+        let raw: &governor::DefaultKeyedRateLimiter<String> = user;
         for i in 0..100 {
-            let _ = user.check_key(&format!("stale{i}"));
+            let _ = raw.check_key(&format!("stale{i}"));
         }
     }
     std::thread::sleep(std::time::Duration::from_millis(20));
@@ -430,4 +439,63 @@ fn independent_rate_limiters_each_prune_their_stale_keys() {
         // Only the key of the request just served may remain.
         assert_eq!(user.len(), 1, "stale keys were left in a limiter");
     }
+}
+
+#[cfg(feature = "net-h1-server")]
+#[test]
+fn rlid_cookie_is_found_after_a_cookie_whose_name_extends_it() {
+    let (ip, user) = build_test_limiters();
+    let service = rate_limited(&user, &ip);
+    let signer = build_signer();
+    let id = signer.verify_or_new(None).id;
+    let set_cookie = signer.issue_set_cookie(&id, true, None, Some("/"));
+    let rlid = set_cookie.split(';').next().unwrap();
+
+    let request =
+        format!("GET / HTTP/1.1\r\nHost: localhost\r\nCookie: rlid_pref=dark; {rlid}\r\n\r\n");
+    let rsp = serve_raw(&service, request.as_bytes());
+
+    assert!(rsp.starts_with("HTTP/1.1 200 "), "{rsp}");
+    assert!(!rsp.to_ascii_lowercase().contains("set-cookie"), "{rsp}");
+    // The request was charged to the cookie's bucket, which is now empty.
+    assert!(user.check_key(&format!("ck:{id}")).is_err());
+}
+
+#[test]
+fn direct_check_key_prunes_stale_keys() {
+    use governor::Quota;
+    use nonzero_ext::nonzero;
+
+    let user = UserLimiter::keyed(Quota::per_second(nonzero!(1000u32)));
+    for i in 0..100 {
+        let _ = user.check_key(&format!("stale{i}"));
+    }
+    // Past the prune interval and the buckets' refill time.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let _ = user.check_key(&"fresh".to_owned());
+
+    assert_eq!(user.len(), 1, "check_key did not prune");
+}
+
+#[test]
+fn shared_limiter_prunes_off_the_request_path() {
+    use governor::Quota;
+    use nonzero_ext::nonzero;
+    use std::time::{Duration, Instant};
+
+    let user = UserLimiter::shared(Quota::per_second(nonzero!(1000u32)));
+    for i in 0..100 {
+        let _ = user.check_key(&format!("stale{i}"));
+    }
+    assert_eq!(user.len(), 100, "a request paid for the sweep");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !user.is_empty() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        user.is_empty(),
+        "background pruner left {} keys",
+        user.len()
+    );
 }

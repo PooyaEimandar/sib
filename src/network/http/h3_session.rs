@@ -14,6 +14,17 @@ pub struct H3Session {
     res_status: StatusCode,
     resp_headers: HeaderMap,
     resp_body: Bytes,
+    finished: bool,
+}
+
+impl Drop for H3Session {
+    fn drop(&mut self) {
+        // Dropping the stream would end it gracefully, and a body sent without
+        // Content-Length would then look complete. Reset it instead.
+        if !self.finished {
+            self.stream.stop_stream(h3::error::Code::H3_INTERNAL_ERROR);
+        }
+    }
 }
 
 impl H3Session {
@@ -31,6 +42,7 @@ impl H3Session {
             res_status: StatusCode::OK,
             resp_headers: HeaderMap::new(),
             resp_body: Bytes::new(),
+            finished: false,
         }
     }
 }
@@ -262,6 +274,7 @@ impl Session for H3Session {
                 .finish()
                 .await
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
+            self.finished = true;
         }
         Ok(())
     }
@@ -362,7 +375,9 @@ impl Session for H3Session {
         self.stream
             .finish()
             .await
-            .map_err(|e| std::io::Error::other(e.to_string()))
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        self.finished = true;
+        Ok(())
     }
 
     #[cfg(feature = "net-ws-server")]

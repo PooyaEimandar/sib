@@ -472,3 +472,39 @@ fn initial_gc_collects_oldest_stored_bucket() {
     assert!(cache.gc_once().unwrap());
     assert_gc_deleted_data(&pool, &data);
 }
+
+/// Seed an expired record, then a checkpoint far behind its bucket.
+fn seed_gc_record_behind_old_checkpoint(pool: &FDBPool, ns: &[u8]) -> Vec<u8> {
+    use crate::database::fdb::trans::FDBTransaction;
+    let data = seed_old_gc_record(pool, ns);
+    let loan = pool.try_loan().unwrap();
+    let trx = FDBTransaction::new(&loan).unwrap();
+    trx.set(&k_gc_checkpoint_for(ns), &1000u64.to_be_bytes())
+        .commit_blocking()
+        .unwrap();
+    data
+}
+
+#[cfg(feature = "rt-tokio")]
+#[tokio::test]
+async fn gc_skips_empty_buckets_after_the_checkpoint() {
+    let pool = start_network_and_pool().expect("test database");
+    let ns = b"gc-skip-async";
+    let data = seed_gc_record_behind_old_checkpoint(&pool, ns);
+    let mut cache = BucketTtlCache::new(pool.clone(), ns);
+    cache.bucket_ms = 1000;
+    assert!(cache.gc_once().await.unwrap());
+    assert_gc_deleted_data(&pool, &data);
+}
+
+#[cfg(feature = "rt-may")]
+#[test]
+fn gc_skips_empty_buckets_after_the_checkpoint() {
+    let pool = start_network_and_pool().expect("test database");
+    let ns = b"gc-skip-blocking";
+    let data = seed_gc_record_behind_old_checkpoint(&pool, ns);
+    let mut cache = BucketTtlCache::new(pool.clone(), ns);
+    cache.bucket_ms = 1000;
+    assert!(cache.gc_once().unwrap());
+    assert_gc_deleted_data(&pool, &data);
+}

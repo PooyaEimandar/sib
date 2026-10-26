@@ -42,6 +42,83 @@ fn drain_nb<W: Write>(w: &mut W, buf: &mut BytesMut) -> io::Result<()> {
     Ok(())
 }
 
+/// Write `parts` back to back, retrying short writes; yields to may on WouldBlock.
+fn write_parts<W: Write>(w: &mut W, parts: &[&[u8]]) -> io::Result<()> {
+    use std::io::{ErrorKind, IoSlice};
+
+    let (mut part, mut off) = (0, 0);
+    while part < parts.len() {
+        if off == parts[part].len() {
+            part += 1;
+            off = 0;
+            continue;
+        }
+        let mut slices = [IoSlice::new(&[]); 3];
+        slices[0] = IoSlice::new(&parts[part][off..]);
+        let mut count = 1;
+        for rest in &parts[part + 1..] {
+            if count == slices.len() {
+                break;
+            }
+            if !rest.is_empty() {
+                slices[count] = IoSlice::new(rest);
+                count += 1;
+            }
+        }
+        match w.write_vectored(&slices[..count]) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    ErrorKind::WriteZero,
+                    "h1 response write returned 0",
+                ));
+            }
+            Ok(mut n) => {
+                while n > 0 {
+                    let left = parts[part].len() - off;
+                    if n < left {
+                        off += n;
+                        n = 0;
+                    } else {
+                        n -= left;
+                        part += 1;
+                        off = 0;
+                    }
+                }
+            }
+            Err(ref e) if e.kind() == ErrorKind::WouldBlock => may::coroutine::yield_now(),
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+/// How the staged response delimits its body.
+#[derive(Clone, Copy, Default)]
+struct Framing {
+    // Content-Length header value
+    length: Option<u64>,
+    // a Transfer-Encoding header: the handler frames the body itself
+    chunked: bool,
+}
+
+/// Where the response to the current request stands.
+#[derive(Clone, Copy)]
+enum Rsp {
+    /// Being staged in status_buf/rsp_buf; nothing written yet.
+    Staging { head_ended: bool, framing: Framing },
+    /// Headers are on the wire; `remaining` body bytes are owed if the length is known.
+    Streaming {
+        remaining: Option<u64>,
+        chunked: bool,
+    },
+    /// A write failed after part of the response may have reached the client.
+    Broken,
+    /// Completely written or queued; `close` when only closing ends its body.
+    Done { close: bool },
+    /// The connection switched to WebSocket.
+    Upgraded,
+}
+
 pub struct H1Session<'buf, 'stream, S>
 where
     S: Read + Write,
@@ -62,18 +139,10 @@ where
     rsp_buf: &'buf mut BytesMut,
     // stream to write to
     stream: &'stream mut S,
-    // whether a status was set explicitly
-    status_set: bool,
-    // status line + Server + Date + CRLF (tiny, on-stack)
+    // status line + Server + Date + CRLF (tiny, on-stack); empty until a status is set
     status_buf: heapless::Vec<u8, 192>,
-    // whether in streaming mode
-    streaming: bool,
-    // whether the blank line ending the response headers is in rsp_buf
-    head_ended: bool,
-    // whether this request's response was completely written or queued
-    responded: bool,
-    // whether the connection was upgraded to WebSocket
-    upgraded: bool,
+    // state of this request's response
+    rsp: Rsp,
     // rsp_buf bytes queued by earlier complete responses
     rsp_start: usize,
 }
@@ -251,7 +320,7 @@ where
     fn write_all_eom(&mut self, status: &[u8]) -> std::io::Result<()> {
         self.rsp_buf.extend_from_slice(status);
         self.rsp_start = self.rsp_buf.len();
-        self.responded = true;
+        self.rsp = Rsp::Done { close: false };
         Ok(())
     }
 
@@ -277,79 +346,35 @@ where
             .extend_from_slice(&crate::network::http::date::current_date_bytes())
             .ok();
         self.status_buf.extend_from_slice(CRLF).ok();
-
-        self.status_set = true;
         self
     }
 
     fn start_h1_streaming(&mut self) -> std::io::Result<()> {
-        use std::io::{ErrorKind, IoSlice};
-
-        if self.streaming {
-            // This usually means a logic bug (trying to start twice)
+        let Rsp::Staging {
+            head_ended,
+            framing,
+        } = self.rsp
+        else {
             return Err(std::io::Error::other(
-                "start_h1_streaming called while already streaming",
+                "start_h1_streaming called after the response started",
             ));
-        }
+        };
 
-        if !self.status_set {
+        if self.status_buf.is_empty() {
             // If caller forgot, keep your safety net:
             self.status_code(http::StatusCode::OK);
         }
 
         // End of headers
-        if !self.head_ended {
+        if !head_ended {
             self.rsp_buf.extend_from_slice(CRLF);
         }
 
-        let mut off_status = 0usize;
-        let mut off_body = 0usize;
-
-        loop {
-            let status = &self.status_buf[off_status..];
-            let body = &self.rsp_buf[off_body..];
-
-            if status.is_empty() && body.is_empty() {
-                break;
-            }
-
-            let bufs = if !status.is_empty() && !body.is_empty() {
-                [IoSlice::new(status), IoSlice::new(body)]
-            } else if !status.is_empty() {
-                [IoSlice::new(status), IoSlice::new(&[])]
-            } else {
-                [IoSlice::new(body), IoSlice::new(&[])]
-            };
-
-            match self.stream.write_vectored(&bufs) {
-                Ok(0) => {
-                    return Err(std::io::Error::other(
-                        "write_vectored got zero in start_h1_streaming",
-                    ));
-                }
-                Ok(n) => {
-                    let status_len = status.len();
-                    if n < status_len {
-                        off_status += n;
-                    } else {
-                        off_status += status_len;
-                        off_body += n - status_len;
-                    }
-                }
-                Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
-                    may::coroutine::yield_now();
-                }
-                Err(e) => return Err(e),
-            }
-        }
-
-        // headers sent; clear, mark streaming
-        self.status_buf.clear();
-        self.rsp_buf.clear();
-        self.head_ended = false;
-        self.rsp_headers_len = 0;
-        self.streaming = true;
-
+        self.flush_response()?;
+        self.rsp = Rsp::Streaming {
+            remaining: framing.length,
+            chunked: framing.chunked,
+        };
         Ok(())
     }
 
@@ -375,34 +400,29 @@ where
     }
 
     fn send_h1_data(&mut self, chunk: &[u8], end_stream: bool) -> std::io::Result<()> {
-        if !self.streaming {
+        let Rsp::Streaming { remaining, chunked } = self.rsp else {
             // Safer to fail fast instead of implicitly starting:
             return Err(std::io::Error::other(
                 "send_h1_data called before start_h1_streaming",
             ));
-        }
+        };
 
-        let mut data = chunk;
-        while !data.is_empty() {
-            match self.stream.write(data) {
-                Ok(0) => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::WriteZero,
-                        "send_h1_data got write zero",
-                    ));
-                }
-                Ok(n) => data = &data[n..],
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    may::coroutine::yield_now();
-                }
-                Err(e) => return Err(e),
-            }
+        let len = chunk.len() as u64;
+        if remaining.is_some_and(|left| len > left) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "stream exceeds Content-Length",
+            ));
         }
+        write_parts(self.stream, &[chunk])?;
+        self.rsp = Rsp::Streaming {
+            remaining: remaining.map(|left| left - len),
+            chunked,
+        };
 
         if end_stream {
             // end of response; ready for next request on keep-alive
-            self.streaming = false;
-            self.responded = true;
+            self.finish_stream()?;
         }
 
         Ok(())
@@ -428,33 +448,13 @@ where
     // headers go straight into rsp_buf
     #[inline]
     fn header(&mut self, name: HeaderName, value: HeaderValue) -> std::io::Result<&mut Self> {
-        if self.rsp_headers_len >= MAX_HEADERS {
-            return Err(io::Error::new(
-                io::ErrorKind::ArgumentListTooLong,
-                "too many headers",
-            ));
-        }
-        self.rsp_buf.extend_from_slice(format!("{name}").as_bytes());
-        self.rsp_buf.extend_from_slice(b": ");
-        self.rsp_buf.extend_from_slice(value.as_bytes());
-        self.rsp_buf.extend_from_slice(CRLF);
-        self.rsp_headers_len += 1;
+        self.stage_header(name.as_str(), value.as_bytes())?;
         Ok(self)
     }
 
     #[inline]
     fn header_str(&mut self, name: &str, value: &str) -> std::io::Result<&mut Self> {
-        if self.rsp_headers_len >= MAX_HEADERS {
-            return Err(io::Error::new(
-                io::ErrorKind::ArgumentListTooLong,
-                "too many headers",
-            ));
-        }
-        self.rsp_buf.extend_from_slice(name.as_bytes());
-        self.rsp_buf.extend_from_slice(b": ");
-        self.rsp_buf.extend_from_slice(value.as_bytes());
-        self.rsp_buf.extend_from_slice(CRLF);
-        self.rsp_headers_len += 1;
+        self.stage_header(name, value.as_bytes())?;
         Ok(self)
     }
 
@@ -477,88 +477,52 @@ where
     // If body is called before status, synthesize 200 OK once.
     #[inline]
     fn body(&mut self, body: bytes::Bytes) -> &mut Self {
-        if !self.status_set {
+        // Once the response started, staged bytes would leak into the next one.
+        let Rsp::Staging {
+            head_ended,
+            framing,
+        } = self.rsp
+        else {
+            return self;
+        };
+        if self.status_buf.is_empty() {
             self.status_code(http::StatusCode::OK);
         }
-        if !self.head_ended {
+        if !head_ended {
             self.rsp_buf.extend_from_slice(CRLF);
-            self.head_ended = true;
+            self.rsp = Rsp::Staging {
+                head_ended: true,
+                framing,
+            };
         }
         self.rsp_buf.extend_from_slice(&body);
         self
     }
 
-    // eom performs a single vectored write: status_buf then rsp_buf
+    // eom performs a single vectored write: queued responses, status_buf, then rsp_buf
     #[inline]
     fn eom(&mut self) -> std::io::Result<()> {
-        use std::io::{ErrorKind, IoSlice};
+        let head_ended = match self.rsp {
+            Rsp::Staging { head_ended, .. } => head_ended,
+            // In streaming mode headers and body were already flushed.
+            Rsp::Streaming { .. } => return self.finish_stream(),
+            Rsp::Done { .. } => return Ok(()),
+            Rsp::Broken | Rsp::Upgraded => {
+                return Err(std::io::Error::other("response can no longer be completed"));
+            }
+        };
 
-        if self.streaming {
-            // In streaming mode, headers+body were already flushed.
-            // Nothing to do; ensure clean state for next response.
-            self.rsp_buf.clear();
-            self.status_buf.clear();
-            self.status_set = false;
-            self.streaming = false;
-            self.responded = true;
-            return Ok(());
-        }
-
-        if !self.status_set {
+        if self.status_buf.is_empty() {
             // default 200 if nothing set yet
             self.status_code(http::StatusCode::OK);
         }
         // A response without body() still needs the blank line ending its headers.
-        if !self.head_ended {
+        if !head_ended {
             self.rsp_buf.extend_from_slice(CRLF);
         }
 
-        let mut off_status = 0usize;
-        let mut off_body = 0usize;
-
-        // Loop until both status_buf and rsp_buf are fully written
-        loop {
-            let s1 = &self.status_buf[off_status..];
-            let s2 = &self.rsp_buf[off_body..];
-
-            if s1.is_empty() && s2.is_empty() {
-                break;
-            }
-
-            let bufs = if !s1.is_empty() && !s2.is_empty() {
-                [IoSlice::new(s1), IoSlice::new(s2)]
-            } else if !s1.is_empty() {
-                [IoSlice::new(s1), IoSlice::new(&[])]
-            } else {
-                [IoSlice::new(s2), IoSlice::new(&[])]
-            };
-
-            match self.stream.write_vectored(&bufs) {
-                Ok(0) => return Err(io::Error::new(ErrorKind::WriteZero, "h1 eom write zero")),
-                Ok(n) => {
-                    let s1_len = s1.len();
-                    if n < s1_len {
-                        off_status += n;
-                    } else {
-                        off_status += s1_len;
-                        off_body += n - s1_len;
-                    }
-                }
-                Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
-                    may::coroutine::yield_now();
-                }
-                Err(e) => return Err(e),
-            }
-        }
-
-        // We fully sent the response; clear buffers for reuse if desired
-        self.rsp_buf.clear();
-        self.rsp_start = 0;
-        self.status_buf.clear();
-        self.status_set = false;
-        self.head_ended = false;
-        self.responded = true;
-
+        self.flush_response()?;
+        self.rsp = Rsp::Done { close: false };
         Ok(())
     }
 
@@ -625,18 +589,20 @@ where
         }
 
         resp.push_str("\r\n");
-        self.stream.write_all(resp.as_bytes())?;
+        // Earlier pipelined responses go first; a failed write leaves a partial 101.
+        self.rsp = Rsp::Broken;
+        write_parts(
+            self.stream,
+            &[&self.rsp_buf[..self.rsp_start], resp.as_bytes()],
+        )?;
 
         // After upgrade, switch to WS mode with clean buffers/state
-        self.upgraded = true;
+        self.rsp = Rsp::Upgraded;
         self.req_buf.clear();
         self.rsp_buf.clear();
         self.rsp_start = 0;
         self.status_buf.clear();
-        self.status_set = false;
         self.rsp_headers_len = 0;
-        self.streaming = false;
-        self.head_ended = false;
 
         Ok(())
     }
@@ -663,9 +629,12 @@ where
             }
 
             // WouldBlock => yield and try again
-            if !crate::network::http::h1_server::read(self.stream, self.req_buf)? {
-                may::coroutine::yield_now();
-                continue;
+            match crate::network::http::h1_server::read(self.stream, self.req_buf) {
+                Ok(true) => {}
+                Ok(false) => may::coroutine::yield_now(),
+                // io_timeout bounds a stalled frame, not an idle connection between messages.
+                Err(e) if e.kind() == io::ErrorKind::TimedOut && self.req_buf.is_empty() => {}
+                Err(e) => return Err(e),
             }
         }
     }
@@ -781,25 +750,96 @@ where
         Ok(false)
     }
 
-    /// Called after the handler failed. Drops a response it left unfinished and
-    /// queues a `500` if nothing reached the client yet. Returns true when the
-    /// connection must be closed.
-    pub(crate) fn fail_request(&mut self) -> bool {
-        if self.upgraded {
+    /// Called after the handler returned. Drops a response it left unfinished,
+    /// queues a `500` if nothing reached the client, and returns whether the
+    /// connection can carry another request.
+    pub(crate) fn settle(&mut self) -> bool {
+        match self.rsp {
+            Rsp::Done { close } => !close,
             // A WebSocket connection never returns to HTTP parsing.
-            return true;
+            Rsp::Upgraded => false,
+            // Part of this response is on the wire; nothing may follow it.
+            Rsp::Streaming { .. } | Rsp::Broken => {
+                self.rsp_buf.clear();
+                false
+            }
+            // Unanswered (handler error or a missing eom): staged headers have no
+            // status line yet, so they must never reach the wire.
+            Rsp::Staging { .. } => {
+                self.rsp_buf.truncate(self.rsp_start);
+                self.rsp_buf.extend_from_slice(
+                    b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+                false
+            }
         }
-        if self.responded {
-            return false;
+    }
+
+    /// Append a header line to the staged response and note how it frames the body.
+    fn stage_header(&mut self, name: &str, value: &[u8]) -> io::Result<()> {
+        let Rsp::Staging {
+            head_ended: false,
+            mut framing,
+        } = self.rsp
+        else {
+            return Err(io::Error::other("response headers were already sent"));
+        };
+        if self.rsp_headers_len >= MAX_HEADERS {
+            return Err(io::Error::new(
+                io::ErrorKind::ArgumentListTooLong,
+                "too many headers",
+            ));
         }
-        // Staged headers have no status line yet; never put them on the wire.
-        self.rsp_buf.truncate(self.rsp_start);
-        if !self.streaming {
-            self.rsp_buf.extend_from_slice(
-                b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-            );
+        if name.eq_ignore_ascii_case("content-length") {
+            framing.length = std::str::from_utf8(value)
+                .ok()
+                .and_then(|v| v.trim().parse().ok());
+        } else if name.eq_ignore_ascii_case("transfer-encoding") {
+            framing.chunked = true;
         }
-        true
+        self.rsp_buf.extend_from_slice(name.as_bytes());
+        self.rsp_buf.extend_from_slice(b": ");
+        self.rsp_buf.extend_from_slice(value);
+        self.rsp_buf.extend_from_slice(CRLF);
+        self.rsp_headers_len += 1;
+        self.rsp = Rsp::Staging {
+            head_ended: false,
+            framing,
+        };
+        Ok(())
+    }
+
+    /// Write responses queued by earlier requests, then this response's status
+    /// line and staged bytes, in that order. Until the write completes, a
+    /// failure leaves a partial response on the wire.
+    fn flush_response(&mut self) -> io::Result<()> {
+        self.rsp = Rsp::Broken;
+        let (queued, staged) = self.rsp_buf.split_at(self.rsp_start);
+        write_parts(self.stream, &[queued, &self.status_buf, staged])?;
+        self.rsp_buf.clear();
+        self.rsp_start = 0;
+        self.status_buf.clear();
+        self.rsp_headers_len = 0;
+        Ok(())
+    }
+
+    /// End a streamed body: a known length must be complete, and an unframed
+    /// body can only be ended by closing the connection.
+    fn finish_stream(&mut self) -> io::Result<()> {
+        let Rsp::Streaming { remaining, chunked } = self.rsp else {
+            return Ok(());
+        };
+        self.rsp = match remaining {
+            Some(0) => Rsp::Done { close: false },
+            Some(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "stream ended before Content-Length",
+                ));
+            }
+            None => Rsp::Done { close: !chunked },
+        };
+        Ok(())
     }
 }
 
@@ -890,12 +930,11 @@ where
         rsp_headers_len: 0,
         rsp_buf,
         stream,
-        status_set: false,
         status_buf: heapless::Vec::new(),
-        streaming: false,
-        head_ended: false,
-        responded: false,
-        upgraded: false,
+        rsp: Rsp::Staging {
+            head_ended: false,
+            framing: Framing::default(),
+        },
         rsp_start,
     }))
 }

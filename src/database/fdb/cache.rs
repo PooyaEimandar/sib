@@ -94,12 +94,14 @@ fn data_key_from_ttl_key(ns: &[u8], bucket: u64, ttl_key: &[u8]) -> Option<Vec<u
     Some(k_data_for(ns, key))
 }
 
-fn oldest_ttl_range(ns: &[u8]) -> crate::database::fdb::trans::FDBOwnedRange {
+/// The first TTL row in bucket `from` or later.
+fn next_ttl_range(ns: &[u8], from: u64) -> crate::database::fdb::trans::FDBOwnedRange {
     let mut prefix = ROOT_PFX.to_vec();
     prefix.extend_from_slice(ns);
     prefix.extend_from_slice(TTL_SEG);
     // ROOT_PFX contains non-0xff bytes, so this prefix always has a successor.
-    crate::database::fdb::trans::FDBOwnedRange::prefix(&prefix, 1).expect("finite TTL prefix")
+    let end = prefix_end(&prefix).expect("finite TTL prefix");
+    crate::database::fdb::trans::FDBOwnedRange::between(ttl_bucket_prefix(ns, from), end, 1)
 }
 
 fn oldest_bucket(
@@ -317,17 +319,16 @@ impl BucketTtlCache {
         let k_gc = self.k_gc_checkpoint();
         let trx = FDBTransaction::new(&loan)?;
         let last = trx.get_blocking_value_optional(&k_gc, true)?;
-        let candidate = match last {
+        let from = match last {
             Some(b) if b.len() == 8 => {
                 u64::from_be_bytes(b.as_slice().try_into().unwrap()).saturating_add(self.bucket_ms)
             }
-            _ => {
-                let (rows, _) = trx.get_owned_range_blocking(&oldest_ttl_range(&self.ns))?;
-                let Some(bucket) = oldest_bucket(&self.ns, &rows)? else {
-                    return Ok(false);
-                };
-                bucket
-            }
+            _ => 0,
+        };
+        // Jump to the next stored bucket instead of stepping through empty ones.
+        let (rows, _) = trx.get_owned_range_blocking(&next_ttl_range(&self.ns, from))?;
+        let Some(candidate) = oldest_bucket(&self.ns, &rows)? else {
+            return Ok(false);
         };
         drop(trx);
         if candidate >= limit {
@@ -396,17 +397,16 @@ impl BucketTtlCache {
         let k_gc = k_gc_checkpoint_for(ns);
         let trx = FDBTransaction::new(&loan)?;
         let last = trx.get_async_value_optional(&k_gc, true).await?;
-        let candidate = match last {
+        let from = match last {
             Some(b) if b.len() == 8 => {
                 u64::from_be_bytes(b.as_slice().try_into().unwrap()).saturating_add(self.bucket_ms)
             }
-            _ => {
-                let (rows, _) = trx.get_owned_range_async(&oldest_ttl_range(ns)).await?;
-                let Some(bucket) = oldest_bucket(ns, &rows)? else {
-                    return Ok(false);
-                };
-                bucket
-            }
+            _ => 0,
+        };
+        // Jump to the next stored bucket instead of stepping through empty ones.
+        let (rows, _) = trx.get_owned_range_async(&next_ttl_range(ns, from)).await?;
+        let Some(candidate) = oldest_bucket(ns, &rows)? else {
+            return Ok(false);
         };
         drop(trx);
         if candidate >= limit {

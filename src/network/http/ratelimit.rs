@@ -1,48 +1,93 @@
 use crate::network::http::rlid::RlidSigner;
 use bytes::Bytes;
-use governor::{Quota, RateLimiter as GovLimiter};
+use governor::{Quota, RateLimiter as GovLimiter, clock::Clock};
 use http::{HeaderName, StatusCode, header};
 use std::{
     hash::Hash,
     num::NonZeroU32,
     sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
     {net::IpAddr, sync::Arc},
 };
 
 // Keyed limiters keep every key they see until pruned.
-const PRUNE_INTERVAL_MS: u64 = 1_000;
+const PRUNE_INTERVAL: Duration = Duration::from_secs(1);
+// `next_prune_ms` value that turns inline pruning off.
+const NEVER: u64 = u64::MAX;
 
 pub type IpLimiter = KeyedLimiter<IpAddr>;
 pub type UserLimiter = KeyedLimiter<String>;
+pub type NotUntil = governor::NotUntil<<governor::clock::DefaultClock as Clock>::Instant>;
 
 /// A keyed rate limiter with its own pruning schedule. Services that share the
 /// limiter through an `Arc` share its schedule; independent limiters never
 /// delay each other's cleanup.
 pub struct KeyedLimiter<K: Hash + Eq + Clone> {
     limiter: governor::DefaultKeyedRateLimiter<K>,
+    // Monotonic, so a wall-clock step cannot stall pruning.
+    epoch: Instant,
     next_prune_ms: AtomicU64,
 }
 
 impl<K: Hash + Eq + Clone> KeyedLimiter<K> {
+    /// A limiter that prunes inline, on the first check of each interval.
     pub fn keyed(quota: Quota) -> Self {
         GovLimiter::keyed(quota).into()
+    }
+
+    /// A limiter pruned by a background thread, so no request pays for a sweep
+    /// of the whole key map. The thread exits once the limiter is dropped.
+    pub fn shared(quota: Quota) -> Arc<Self>
+    where
+        K: Send + Sync + 'static,
+    {
+        let limiter = Arc::new(Self::keyed(quota));
+        let weak = Arc::downgrade(&limiter);
+        let pruner = std::thread::Builder::new()
+            .name("sib-rl-prune".into())
+            .spawn(move || {
+                loop {
+                    std::thread::sleep(PRUNE_INTERVAL);
+                    let Some(limiter) = weak.upgrade() else {
+                        break;
+                    };
+                    limiter.limiter.retain_recent();
+                }
+            });
+        // Without a thread, keep pruning inline.
+        if pruner.is_ok() {
+            limiter.next_prune_ms.store(NEVER, Ordering::Relaxed);
+        }
+        limiter
+    }
+
+    /// Check `key`, pruning first when due.
+    pub fn check_key(&self, key: &K) -> Result<(), NotUntil> {
+        self.prune_if_due();
+        self.limiter.check_key(key)
+    }
+
+    /// Check `n` cells for `key`, pruning first when due.
+    pub fn check_key_n(
+        &self,
+        key: &K,
+        n: NonZeroU32,
+    ) -> Result<Result<(), NotUntil>, governor::InsufficientCapacity> {
+        self.prune_if_due();
+        self.limiter.check_key_n(key, n)
     }
 
     /// Drop keys whose buckets have fully refilled, at most once per interval,
     /// so unverified credentials cannot grow memory forever.
     pub fn prune_if_due(&self) {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
+        let now = self.epoch.elapsed().as_millis() as u64;
         let next = self.next_prune_ms.load(Ordering::Relaxed);
         if now < next
             || self
                 .next_prune_ms
                 .compare_exchange(
                     next,
-                    now + PRUNE_INTERVAL_MS,
+                    now + PRUNE_INTERVAL.as_millis() as u64,
                     Ordering::Relaxed,
                     Ordering::Relaxed,
                 )
@@ -58,11 +103,14 @@ impl<K: Hash + Eq + Clone> From<governor::DefaultKeyedRateLimiter<K>> for KeyedL
     fn from(limiter: governor::DefaultKeyedRateLimiter<K>) -> Self {
         Self {
             limiter,
+            epoch: Instant::now(),
             next_prune_ms: AtomicU64::new(0),
         }
     }
 }
 
+// Read-only access to the governor limiter; `check_key` and `check_key_n` above
+// shadow its methods so direct callers prune too.
 impl<K: Hash + Eq + Clone> std::ops::Deref for KeyedLimiter<K> {
     type Target = governor::DefaultKeyedRateLimiter<K>;
 
@@ -86,8 +134,8 @@ pub fn build(
     let ip_quota = Quota::per_second(ip_window_sec).allow_burst(ip_max_burst);
     let user_quota = Quota::per_second(user_window_sec).allow_burst(user_max_burst);
     RLGuards {
-        accept_ip: Arc::new(IpLimiter::keyed(ip_quota)),
-        user_req: Arc::new(UserLimiter::keyed(user_quota)),
+        accept_ip: IpLimiter::shared(ip_quota),
+        user_req: UserLimiter::shared(user_quota),
     }
 }
 
@@ -219,9 +267,6 @@ impl<Svc> RateLimitedService<Svc> {
     /// Charge the request to its user and IP buckets. Returns whether it is
     /// allowed and the rlid `Set-Cookie` value to send, if any.
     fn check<S: super::session::Session>(&self, sess: &S) -> (bool, Option<String>) {
-        self.user_rl.prune_if_due();
-        self.ip_rl.prune_if_due();
-
         let (verified_user_key, set_cookie) = self.user_key_and_cookie(sess);
         let cascaded_key = {
             let k = self.key_policy.make_key(sess);
@@ -248,13 +293,14 @@ impl<Svc> RateLimitedService<Svc> {
         let cookie_header = sess
             .req_header(&header::COOKIE)
             .and_then(|v| v.to_str().ok().map(|s| s.to_owned()));
+        // Match the whole cookie name: `rlid_pref=...` is not `rlid=...`.
         let rlid_val = cookie_header.and_then(|c| {
             c.split(';').map(str::trim).find_map(|p| {
-                p.strip_prefix(self.rlid_signer.cookie_name)
-                    .map(|s| s.to_owned())
+                p.split_once('=')
+                    .filter(|(name, _)| *name == self.rlid_signer.cookie_name)
+                    .map(|(_, v)| v.to_owned())
             })
         });
-        let rlid_val = rlid_val.and_then(|v| v.strip_prefix("=").map(|s| s.to_owned()));
 
         let verified = rlid_val.as_deref().and_then(|v| self.rlid_signer.verify(v));
         let user_key = verified.as_ref().map(|chk| format!("ck:{}", chk.id));

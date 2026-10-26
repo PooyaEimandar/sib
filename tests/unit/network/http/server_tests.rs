@@ -176,6 +176,16 @@ impl HService for EchoServer {
 #[async_trait::async_trait(?Send)]
 impl HAsyncService for EchoServer {
     async fn call<S: Session>(&self, session: &mut S) -> std::io::Result<()> {
+        #[cfg(all(feature = "net-h3-server", target_os = "linux"))]
+        if session.req_path() == "/h3-truncated" {
+            // Fail after part of the body, as a file read error would.
+            session.start_h3_streaming().await?;
+            session
+                .send_h3_data(bytes::Bytes::from_static(b"partial"), false)
+                .await?;
+            return Err(std::io::Error::other("body source failed mid-stream"));
+        }
+
         // WebSocket upgrade path
         #[cfg(feature = "net-ws-server")]
         if session.is_ws() {
@@ -1055,4 +1065,41 @@ fn test_h3_tls_server_post() {
     info!("Response: {body:?}");
     assert!(body.contains("Echo:"));
     assert!(body.contains("Hello, World!"));
+}
+
+#[cfg(all(feature = "net-h3-server", target_os = "linux"))]
+#[test]
+#[ignore = "legacy network integration test uses fixed ports or long-running servers"]
+fn test_h3_failed_stream_is_reset_not_finished() {
+    let addr = "127.0.0.1:8087";
+    let _ = std::thread::spawn(move || {
+        let tls = crate::MtlsIdentity::generate(&[], &[], false);
+        let (cert, key) = (tls.server_cert_pem, tls.server_key_pem);
+
+        use crate::network::http::server::H3Config;
+        EchoServer
+            .start_h3_tls(
+                addr,
+                (None, cert.as_bytes(), key.as_bytes()),
+                H3Config::default(),
+            )
+            .expect("start_h3_tls");
+    });
+
+    std::thread::sleep(std::time::Duration::from_secs(1));
+
+    let client = reqwest::blocking::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .http3_prior_knowledge()
+        .build()
+        .expect("reqwest client");
+
+    // The reset can also discard the undelivered head, failing the request itself.
+    let body = client
+        .get(format!("https://{addr}/h3-truncated"))
+        .version(reqwest::Version::HTTP_3)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .and_then(|resp| resp.bytes());
+    assert!(body.is_err(), "truncated body was accepted: {body:?}");
 }
