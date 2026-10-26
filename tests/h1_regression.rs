@@ -166,6 +166,15 @@ fn start_server() -> (String, may::coroutine::JoinHandle<()>) {
     (addr, handle)
 }
 
+/// Whether a read error means the server closed the connection abruptly.
+/// Windows reports an RST as either a reset or an abort (WSAECONNABORTED).
+fn peer_closed(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+    )
+}
+
 fn read_available(stream: &mut TcpStream) -> String {
     // A server that closes with unread request bytes resets the connection, and
     // macOS then rejects socket options; reads on such a socket return at once.
@@ -178,12 +187,11 @@ fn read_available(stream: &mut TcpStream) -> String {
             Ok(0) => break,
             Ok(n) => out.extend_from_slice(&buf[..n]),
             Err(e)
-                if matches!(
-                    e.kind(),
-                    std::io::ErrorKind::WouldBlock
-                        | std::io::ErrorKind::TimedOut
-                        | std::io::ErrorKind::ConnectionReset
-                ) =>
+                if peer_closed(&e)
+                    || matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
             {
                 break;
             }
@@ -489,7 +497,7 @@ fn h1_idle_keep_alive_connection_honors_io_timeout() {
         match stream.read(&mut buf) {
             Ok(0) => break true,
             Ok(n) => response.extend_from_slice(&buf[..n]),
-            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => break true,
+            Err(e) if peer_closed(&e) => break true,
             Err(_) => break false,
         }
     };
@@ -527,7 +535,7 @@ fn h1_stalled_partial_request_honors_io_timeout() {
     let mut buf = [0u8; 64];
     let closed = match stream.read(&mut buf) {
         Ok(n) => n == 0,
-        Err(e) => e.kind() == std::io::ErrorKind::ConnectionReset,
+        Err(e) => peer_closed(&e),
     };
     let elapsed = started.elapsed();
     unsafe { handle.coroutine().cancel() };
@@ -613,7 +621,7 @@ fn h1_stalled_websocket_frame_honors_io_timeout() {
     let mut buf = [0u8; 64];
     let closed = match stream.read(&mut buf) {
         Ok(n) => n == 0,
-        Err(e) => e.kind() == std::io::ErrorKind::ConnectionReset,
+        Err(e) => peer_closed(&e),
     };
     let elapsed = started.elapsed();
     unsafe { handle.coroutine().cancel() };
