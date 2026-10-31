@@ -1,12 +1,20 @@
 use crate::render::{RenderError, RenderResult, buffer};
-use bytemuck::{Pod, Zeroable};
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Pod, Zeroable)]
-pub struct MeshVertex {
-    pub position: [f32; 3],
-    pub uv: [f32; 2],
-    pub normal: [f32; 3],
+pub use layout::MeshVertex;
+
+// bytemuck's derive checks the layout with compile-time asserts. Allow them
+// in this module only; the rest of the file stays under the assert ban.
+#[allow(clippy::disallowed_macros)]
+mod layout {
+    use bytemuck::{Pod, Zeroable};
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Pod, Zeroable)]
+    pub struct MeshVertex {
+        pub position: [f32; 3],
+        pub uv: [f32; 2],
+        pub normal: [f32; 3],
+    }
 }
 
 impl MeshVertex {

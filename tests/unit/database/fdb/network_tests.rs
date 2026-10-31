@@ -9,3 +9,11 @@ fn test_fdb_network_start_and_stop() {
         panic!("live FoundationDB test requested, but network setup failed: {err}");
     }
 }
+
+// Type-checks that the exported macros return errors. It is never run: FDB
+// allows one network per process, and the tests above already own it.
+#[allow(dead_code)]
+fn fdb_network_macros_return_errors() -> std::io::Result<()> {
+    let guard = crate::fdb_network_start!()?;
+    crate::fdb_network_stop!(guard)
+}

@@ -7,7 +7,7 @@ use tracing::info;
 #[ignore = "manual signaling server requiring interactive screen and audio capture"]
 fn test_webrtc() {
     let cancel_token = tokio_util::sync::CancellationToken::new();
-    let mtls = crate::MtlsIdentity::generate(&[], &[], false);
+    let mtls = crate::MtlsIdentity::generate(&[], &[], false).expect("generate mTLS identity");
 
     let html_file = std::path::Path::new(file!())
         .parent()

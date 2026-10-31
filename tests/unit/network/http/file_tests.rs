@@ -329,7 +329,7 @@ fn file_server() {
     let mut threads = Vec::new();
 
     // create self-signed TLS certificates
-    let mtls = crate::MtlsIdentity::generate(&[], &[], false);
+    let mtls = crate::MtlsIdentity::generate(&[], &[], false).expect("generate mTLS identity");
 
     cfg_if::cfg_if! {
         if #[cfg(feature = "net-h1-server")] {

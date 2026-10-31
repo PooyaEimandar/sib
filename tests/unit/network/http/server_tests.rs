@@ -388,7 +388,7 @@ fn test_h1_tls_server_gracefull_shutdown() {
     const NUMBER_OF_WORKERS: usize = 1;
     crate::init_global_poller(NUMBER_OF_WORKERS, 0);
 
-    let tls = MtlsIdentity::generate(&[], &[], false);
+    let tls = MtlsIdentity::generate(&[], &[], false).expect("generate mTLS identity");
     let addr = "127.0.0.1:8080";
     let server_handle = EchoServer
         .start_h1_tls(
@@ -422,7 +422,7 @@ fn test_h1_tls_server_get_with_client_auth() {
 
     // Pick a port and start the server
     const ADDR: &str = "localhost:8081";
-    let tls = MtlsIdentity::generate(&[], &[], true);
+    let tls = MtlsIdentity::generate(&[], &[], true).expect("generate mTLS identity");
     let server_handle = EchoServer
         .start_h1_tls(
             ADDR,
@@ -634,7 +634,7 @@ fn test_h2_tls_server_gracefull_shutdown() {
         ct_cloned.cancel();
     });
 
-    let tls = MtlsIdentity::generate(&[], &[], false);
+    let tls = MtlsIdentity::generate(&[], &[], false).expect("generate mTLS identity");
     let addr = "127.0.0.1:8080";
     EchoServer
         .start_h2_tls(
@@ -659,7 +659,7 @@ fn test_h2_tls_server_get() {
     let addr = "127.0.0.1:8083";
     let _ = std::thread::spawn(move || {
         let cancel_token = tokio_util::sync::CancellationToken::new();
-        let mtls = crate::MtlsIdentity::generate(&[], &[], false);
+        let mtls = crate::MtlsIdentity::generate(&[], &[], false).expect("generate mTLS identity");
 
         use crate::network::http::server::H2Config;
         // Pick a port and start the server
@@ -737,7 +737,7 @@ fn test_h2_tls_server_post() {
         use crate::network::http::server::H2Config;
 
         let cancel_token = tokio_util::sync::CancellationToken::new();
-        let mtls = crate::MtlsIdentity::generate(&[], &[], false);
+        let mtls = crate::MtlsIdentity::generate(&[], &[], false).expect("generate mTLS identity");
         // Pick a port and start the server
         EchoServer
             .start_h2_tls(
@@ -817,7 +817,7 @@ fn test_h2_tls_ws_over_h1_upgrade() {
     let cancel_token = tokio_util::sync::CancellationToken::new();
 
     //Generate ONCE and reuse on both sides
-    let mtls = MtlsIdentity::generate(&[], &[], false);
+    let mtls = MtlsIdentity::generate(&[], &[], false).expect("generate mTLS identity");
 
     // Clone into server thread
     let cert_for_server = mtls.server_cert_pem.clone();
@@ -909,7 +909,7 @@ fn test_h2_tls_ws_over_h1_upgrade_with_client_auth() {
     }
 
     // create mTLS identity for server and client
-    let mtls = crate::MtlsIdentity::generate(&[], &[], true);
+    let mtls = crate::MtlsIdentity::generate(&[], &[], true).expect("generate mTLS identity");
     let cert_for_server = mtls.server_cert_pem.clone();
     let key_for_server = mtls.server_key_pem.clone();
     let ca = mtls.ca_cert_pem.clone();
@@ -991,7 +991,7 @@ fn test_h2_tls_ws_over_h1_upgrade_with_client_auth() {
 fn test_h3_tls_server_get() {
     let addr = "127.0.0.1:8085";
     let _ = std::thread::spawn(move || {
-        let tls = crate::MtlsIdentity::generate(&[], &[], false);
+        let tls = crate::MtlsIdentity::generate(&[], &[], false).expect("generate mTLS identity");
         let (cert, key) = (tls.server_cert_pem, tls.server_key_pem);
 
         use crate::network::http::server::H3Config;
@@ -1032,7 +1032,7 @@ fn test_h3_tls_server_get() {
 fn test_h3_tls_server_post() {
     let addr = "127.0.0.1:8086";
     let _ = std::thread::spawn(move || {
-        let tls = crate::MtlsIdentity::generate(&[], &[], false);
+        let tls = crate::MtlsIdentity::generate(&[], &[], false).expect("generate mTLS identity");
         let (cert, key) = (tls.server_cert_pem, tls.server_key_pem);
 
         use crate::network::http::server::H3Config;
@@ -1073,7 +1073,7 @@ fn test_h3_tls_server_post() {
 fn test_h3_failed_stream_is_reset_not_finished() {
     let addr = "127.0.0.1:8087";
     let _ = std::thread::spawn(move || {
-        let tls = crate::MtlsIdentity::generate(&[], &[], false);
+        let tls = crate::MtlsIdentity::generate(&[], &[], false).expect("generate mTLS identity");
         let (cert, key) = (tls.server_cert_pem, tls.server_key_pem);
 
         use crate::network::http::server::H3Config;

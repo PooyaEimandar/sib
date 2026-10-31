@@ -8,13 +8,15 @@ fn rlid_round_trip_issue_and_verify() {
     let signer = RlidSigner::new("rlid", Duration::from_secs(60), (2, cur), vec![(1, old)]);
 
     // new id + set-cookie
-    let id = signer.gen_id();
-    let sc = signer.issue_set_cookie(&id, false, None, Some("/"));
+    let id = signer.gen_id().unwrap();
+    let sc = signer
+        .issue_set_cookie(&id, false, None, Some("/"))
+        .unwrap();
     assert!(sc.starts_with("rlid=v1.2."), "cookie format mismatch: {sc}");
 
     // extract value
     let value = sc.split_once('=').unwrap().1.split(';').next().unwrap();
-    let res = signer.verify_or_new(Some(value));
+    let res = signer.verify_or_new(Some(value)).unwrap();
     assert_eq!(res.id, id);
     assert!(!res.must_issue, "fresh token should not require refresh");
 }
@@ -25,11 +27,11 @@ fn rlid_refresh_when_near_expiry() {
     let signer =
         RlidSigner::new("rlid", Duration::from_secs(3), (1, cur), vec![]).with_reissue_divisor(3);
 
-    let id = signer.gen_id();
-    let val = signer.make_value_current(&id);
+    let id = signer.gen_id().unwrap();
+    let val = signer.make_value_current(&id).unwrap();
 
     // Immediately valid; depending on timing, may or may not need refresh — accept both
-    let res = signer.verify_or_new(Some(&val));
+    let res = signer.verify_or_new(Some(&val)).unwrap();
     assert_eq!(res.id, id);
 }
 
@@ -37,7 +39,9 @@ fn rlid_refresh_when_near_expiry() {
 fn invalid_token_yields_new_id() {
     let cur = [3u8; 32];
     let signer = RlidSigner::new("rlid", Duration::from_secs(60), (7, cur), vec![]);
-    let res = signer.verify_or_new(Some("v1.9.notpayload.notmac"));
+    let res = signer
+        .verify_or_new(Some("v1.9.notpayload.notmac"))
+        .unwrap();
     assert!(res.must_issue);
     // id is random; just ensure it's non-empty
     assert!(!res.id.is_empty());
@@ -47,10 +51,12 @@ fn invalid_token_yields_new_id() {
 fn expired_token_yields_new_id() {
     let cur = [4u8; 32];
     let signer = RlidSigner::new("rlid", Duration::from_secs(60), (8, cur), vec![]);
-    let old_id = signer.gen_id();
-    let expired = signer.make_v1_value(8, &old_id, now_unix().saturating_sub(1));
+    let old_id = signer.gen_id().unwrap();
+    let expired = signer
+        .make_v1_value(8, &old_id, now_unix().saturating_sub(1))
+        .unwrap();
 
-    let res = signer.verify_or_new(Some(&expired));
+    let res = signer.verify_or_new(Some(&expired)).unwrap();
 
     assert!(res.must_issue);
     assert_ne!(res.id, old_id);

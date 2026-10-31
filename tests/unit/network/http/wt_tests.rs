@@ -139,7 +139,8 @@ where
     Fut: std::future::Future<Output = ()>,
 {
     tokio::time::timeout(Duration::from_secs(15), async {
-        let identity = crate::MtlsIdentity::generate(&[], &[], false);
+        let identity =
+            crate::MtlsIdentity::generate(&[], &[], false).expect("generate mTLS identity");
         let mut roots = rustls::RootCertStore::empty();
         for cert in CertificateDer::pem_slice_iter(identity.ca_cert_pem.as_bytes()) {
             roots.add(cert.unwrap()).unwrap();

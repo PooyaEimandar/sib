@@ -202,7 +202,7 @@ fn test_ratelimit_h2_tls_server() {
         signer,
     };
 
-    let tls = crate::MtlsIdentity::generate(&[], &[], false);
+    let tls = crate::MtlsIdentity::generate(&[], &[], false).expect("generate mTLS identity");
     let cert_pem = tls.server_cert_pem;
     let key_pem = tls.server_key_pem;
     let shutdown = tokio_util::sync::CancellationToken::new();
@@ -248,7 +248,7 @@ fn test_ratelimit_h3_tls_server() {
         signer,
     };
 
-    let tls = crate::MtlsIdentity::generate(&[], &[], false);
+    let tls = crate::MtlsIdentity::generate(&[], &[], false).expect("generate mTLS identity");
     let (cert_pem, key_pem) = (tls.server_cert_pem, tls.server_key_pem);
 
     let _server_thread = std::thread::spawn(move || {
@@ -447,8 +447,8 @@ fn rlid_cookie_is_found_after_a_cookie_whose_name_extends_it() {
     let (ip, user) = build_test_limiters();
     let service = rate_limited(&user, &ip);
     let signer = build_signer();
-    let id = signer.verify_or_new(None).id;
-    let set_cookie = signer.issue_set_cookie(&id, true, None, Some("/"));
+    let id = signer.verify_or_new(None).unwrap().id;
+    let set_cookie = signer.issue_set_cookie(&id, true, None, Some("/")).unwrap();
     let rlid = set_cookie.split(';').next().unwrap();
 
     let request =

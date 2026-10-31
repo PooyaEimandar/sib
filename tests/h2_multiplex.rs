@@ -3,6 +3,8 @@
     feature = "rt-tokio",
     not(feature = "rt-glommio")
 ))]
+// Tests may unwrap, expect and assert (see [lints.clippy] in Cargo.toml).
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_macros)]
 
 use async_trait::async_trait;
 #[cfg(feature = "net-h1-server")]
@@ -114,7 +116,7 @@ fn unused_addr() -> String {
 #[test]
 fn h2_streams_call_shared_service_concurrently() {
     let addr = unused_addr();
-    let mtls = sib::MtlsIdentity::generate(&[], &[], false);
+    let mtls = sib::MtlsIdentity::generate(&[], &[], false).expect("generate mTLS identity");
     let cancel = tokio_util::sync::CancellationToken::new();
     let max_in_flight = Arc::new(AtomicUsize::new(0));
     let factory = CountingFactory {

@@ -50,10 +50,9 @@ impl<'a, T> std::ops::DerefMut for Loan<'a, T> {
 }
 impl<'a, T> Drop for Loan<'a, T> {
     fn drop(&mut self) {
-        // Return index to freelist and notify any waiters.
-        // This should never fail (queue capacity == slots.len()).
-        let pushed = self.inner.freelist.push(self.idx).is_ok();
-        debug_assert!(pushed, "freelist push should never fail");
+        // Return index to freelist and notify any waiters. The queue holds
+        // every slot index, so this cannot overflow.
+        let _ = self.inner.freelist.push(self.idx);
 
         #[cfg(feature = "rt-tokio")]
         self.inner.notify.notify_one();
@@ -99,7 +98,9 @@ impl<T> Pool<T> {
         let freelist = ArrayQueue::new(n);
         for i in 0..n {
             // capacity is exactly n; this cannot fail
-            freelist.push(i).unwrap();
+            freelist
+                .push(i)
+                .map_err(|_| std::io::Error::other("FDB pool free list is full"))?;
         }
 
         Ok(Self {

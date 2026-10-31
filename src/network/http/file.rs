@@ -270,7 +270,10 @@ fn serve_fn<S: Session>(
             .eom();
     }
 
-    let selected_file = selected_file.expect("uncompressed or sidecar representation");
+    // Not-acceptable and compressed-on-the-fly responses returned above.
+    let Some(selected_file) = selected_file else {
+        return Err(std::io::Error::other("no file representation to serve"));
+    };
     let (file_path, total_size) = (selected_file.path.clone(), selected_file.stamp.size);
     if let Some(enc) = applied_encoding {
         rsp_headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static(enc));
@@ -526,7 +529,10 @@ async fn serve_fn_async<S: Session>(
             .await;
     }
 
-    let selected_file = selected_file.expect("uncompressed or sidecar representation");
+    // Not-acceptable and compressed-on-the-fly responses returned above.
+    let Some(selected_file) = selected_file else {
+        return Err(std::io::Error::other("no file representation to serve"));
+    };
     let (file_path, total_size) = (selected_file.path.clone(), selected_file.stamp.size);
     if let Some(enc) = applied_encoding {
         rsp_headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static(enc));
@@ -1270,11 +1276,12 @@ fn selected_file_version<'a>(
 }
 
 fn digest_etag(digest: &[u8]) -> String {
-    use std::fmt::Write;
+    const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut tag = String::with_capacity(73);
     tag.push_str("\"sha256-");
     for byte in digest {
-        write!(&mut tag, "{byte:02x}").expect("writing to a String cannot fail");
+        tag.push(char::from(HEX[usize::from(byte >> 4)]));
+        tag.push(char::from(HEX[usize::from(byte & 0x0f)]));
     }
     tag.push('"');
     tag
@@ -1491,7 +1498,7 @@ fn mime_for_path(path: &Path) -> Mime {
     {
         "image/ktx2"
             .parse()
-            .expect("image/ktx2 is a valid static MIME type")
+            .unwrap_or(mime::APPLICATION_OCTET_STREAM)
     } else {
         mime_guess::from_path(path)
             .first()

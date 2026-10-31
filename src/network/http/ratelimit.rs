@@ -304,20 +304,36 @@ impl<Svc> RateLimitedService<Svc> {
 
         let verified = rlid_val.as_deref().and_then(|v| self.rlid_signer.verify(v));
         let user_key = verified.as_ref().map(|chk| format!("ck:{}", chk.id));
-        let chk = verified.unwrap_or_else(|| self.rlid_signer.verify_or_new(None));
+        // Without a new cookie the client stays limited by IP until a later request.
+        let set_cookie = self.set_cookie_for(verified).unwrap_or_else(|e| {
+            tracing::warn!("rlid cookie not issued: {e}");
+            None
+        });
 
-        let set_cookie = if chk.must_issue {
-            Some(self.rlid_signer.issue_set_cookie(
+        (user_key, set_cookie)
+    }
+
+    /// The `Set-Cookie` value for a verified identity that needs refreshing, or
+    /// for a newly minted one.
+    fn set_cookie_for(
+        &self,
+        verified: Option<crate::network::http::rlid::VerifyOutcome>,
+    ) -> std::io::Result<Option<String>> {
+        let chk = match verified {
+            Some(chk) => chk,
+            None => self.rlid_signer.verify_or_new(None)?,
+        };
+        if !chk.must_issue {
+            return Ok(None);
+        }
+        self.rlid_signer
+            .issue_set_cookie(
                 &chk.id,
                 /*secure=*/ true,
                 /*domain=*/ None,
                 /*path=*/ Some("/"),
-            ))
-        } else {
-            None
-        };
-
-        (user_key, set_cookie)
+            )
+            .map(Some)
     }
 }
 

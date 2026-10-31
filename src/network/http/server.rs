@@ -479,7 +479,9 @@ async fn serve_h2_listener<F: HFactory>(
                         }
 
                         r = async {
-                            let s = stream_opt.take().expect("stream already taken");
+                            let Some(s) = stream_opt.take() else {
+                                return Err(std::io::Error::other("TCP stream already taken"));
+                            };
                             tokio::time::timeout(h2_cfg_cloned.io_timeout, tls_acceptor.accept(s)).await?
                         } => r
                     };

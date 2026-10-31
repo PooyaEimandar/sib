@@ -207,7 +207,8 @@ pub fn current_date_bytes() -> [u8; 29] {
 /// Return a date string that remains valid across cache updates and thread exit.
 #[inline]
 pub fn current_date_str() -> String {
-    String::from_utf8(current_date_bytes().to_vec()).expect("HTTP date is ASCII")
+    // The date is always ASCII, so this never replaces anything.
+    String::from_utf8_lossy(&current_date_bytes()).into_owned()
 }
 
 #[cfg(test)]

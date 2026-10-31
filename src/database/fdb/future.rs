@@ -38,15 +38,6 @@ impl FDBFuture {
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "null FDB future"))
     }
 
-    /// Adopt exclusive ownership of a non-null FoundationDB future.
-    ///
-    /// # Safety
-    /// `fut` must satisfy the ownership and validity requirements of `new`.
-    pub unsafe fn from_raw(fut: *mut FDB_future) -> Self {
-        // SAFETY: the caller transfers exclusive ownership of a valid handle.
-        unsafe { Self::new(fut) }.expect("null FDB future")
-    }
-
     /// Borrow the C handle. This does not transfer ownership.
     pub fn as_ptr(&self) -> *mut FDB_future {
         self.fut.as_ptr()

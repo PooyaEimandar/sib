@@ -462,9 +462,11 @@ fn gst_has_element(name: &str) -> bool {
 fn spawn_gst_bus_logger(
     pipeline: &gst::Pipeline,
     stop: CancellationToken,
-) -> tokio::task::JoinHandle<()> {
-    let bus = pipeline.bus().expect("pipeline has no bus");
-    tokio::spawn(async move {
+) -> std::io::Result<tokio::task::JoinHandle<()>> {
+    let bus = pipeline
+        .bus()
+        .ok_or_else(|| std::io::Error::other("GStreamer pipeline has no bus"))?;
+    Ok(tokio::spawn(async move {
         use gst::MessageView;
         loop {
             tokio::select! {
@@ -502,7 +504,7 @@ fn spawn_gst_bus_logger(
             }
         }
         info!("gst bus logger stopped");
-    })
+    }))
 }
 
 fn build_capture_pipeline(
@@ -753,7 +755,7 @@ async fn ensure_capture_hub(
         .map_err(|e| std::io::Error::other(format!("capture set_state(Playing) failed: {e:?}")))?;
 
     let stop = CancellationToken::new();
-    let bus_handle = spawn_gst_bus_logger(&pipeline, stop.child_token());
+    let bus_handle = spawn_gst_bus_logger(&pipeline, stop.child_token())?;
 
     let hub = Arc::new(CaptureHub {
         pipeline,
@@ -1324,7 +1326,7 @@ async fn start_stream_runtime(
 
     // bus logger
     let bus_stop = CancellationToken::new();
-    let bus_handle = spawn_gst_bus_logger(&stream.pipeline, bus_stop.child_token());
+    let bus_handle = spawn_gst_bus_logger(&stream.pipeline, bus_stop.child_token())?;
 
     // FPS reporter
     let fps_stop = CancellationToken::new();

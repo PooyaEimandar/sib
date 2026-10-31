@@ -94,18 +94,19 @@ impl RlidSigner {
     /// Verify an incoming cookie value; if missing/invalid/expired, mint a new id.
     ///
     /// Returns a stable `id` and a `must_issue` flag indicating whether you should
-    /// respond with a fresh `Set-Cookie` to the client.
-    pub fn verify_or_new(&self, token_opt: Option<&str>) -> VerifyOutcome {
+    /// respond with a fresh `Set-Cookie` to the client. Fails only if the OS
+    /// random source does.
+    pub fn verify_or_new(&self, token_opt: Option<&str>) -> std::io::Result<VerifyOutcome> {
         if let Some(token) = token_opt
             && let Some(ok) = self.verify_v1(token)
         {
-            return ok;
+            return Ok(ok);
         }
         // create a new identity when missing or invalid
-        VerifyOutcome {
-            id: self.gen_id(),
+        Ok(VerifyOutcome {
+            id: self.gen_id()?,
             must_issue: true,
-        }
+        })
     }
 
     /// Verify an incoming cookie value without minting a replacement identity.
@@ -124,10 +125,10 @@ impl RlidSigner {
         secure: bool,
         domain: Option<&str>,
         path: Option<&str>,
-    ) -> String {
+    ) -> std::io::Result<String> {
         let now = now_unix();
         let exp = now.saturating_add(self.ttl.as_secs());
-        let value = self.make_v1_value(self.current.kid, id, exp);
+        let value = self.make_v1_value(self.current.kid, id, exp)?;
 
         // Build attributes
         let mut parts = Vec::with_capacity(8);
@@ -146,11 +147,11 @@ impl RlidSigner {
             parts.push(format!("Domain={}", d));
         }
 
-        parts.join("; ")
+        Ok(parts.join("; "))
     }
 
     /// Build the cookie *value* (no "name=" prefix) using the **current** key.
-    pub fn make_value_current(&self, id: &str) -> String {
+    pub fn make_value_current(&self, id: &str) -> std::io::Result<String> {
         let exp = now_unix().saturating_add(self.ttl.as_secs());
         self.make_v1_value(self.current.kid, id, exp)
     }
@@ -205,18 +206,19 @@ impl RlidSigner {
         })
     }
 
-    fn make_v1_value(&self, kid: u8, id: &str, exp_unix: u64) -> String {
+    fn make_v1_value(&self, kid: u8, id: &str, exp_unix: u64) -> std::io::Result<String> {
         let payload = format!("{}.{}", id, exp_unix);
         let payload_b = payload.as_bytes();
 
-        let mut mac =
-            HmacSha256::new_from_slice(&self.current.key).expect("HMAC key length is valid");
+        // HMAC accepts keys of any length, so this does not fail in practice.
+        let mut mac = HmacSha256::new_from_slice(&self.current.key)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
         mac.update(payload_b);
         let sig = mac.finalize().into_bytes();
 
         let payload_b64 = B64.encode(payload_b);
         let sig_b64 = B64.encode(sig);
-        format!("v1.{}.{}.{}", kid, payload_b64, sig_b64)
+        Ok(format!("v1.{}.{}.{}", kid, payload_b64, sig_b64))
     }
 
     fn find_key(&self, kid: u8) -> Option<&KeyRecord> {
@@ -226,14 +228,14 @@ impl RlidSigner {
         self.previous.iter().find(|k| k.kid == kid)
     }
 
-    fn gen_id(&self) -> String {
+    fn gen_id(&self) -> std::io::Result<String> {
         use rand::TryRng;
         use rand::rngs::SysRng;
         let mut b = [0u8; 16];
         SysRng
             .try_fill_bytes(&mut b)
-            .expect("OS random source failed");
-        B64.encode(b)
+            .map_err(std::io::Error::other)?;
+        Ok(B64.encode(b))
     }
 }
 

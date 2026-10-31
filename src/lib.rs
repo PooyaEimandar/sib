@@ -1,4 +1,10 @@
 #![allow(dead_code)]
+// Runtime code must not panic on unwrap, expect or assert (see [lints.clippy]
+// in Cargo.toml); unit tests may. The non-test build still checks everything else.
+#![cfg_attr(
+    test,
+    allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_macros)
+)]
 
 #[cfg(feature = "db-fdb")]
 pub mod database;
@@ -48,23 +54,30 @@ pub struct MtlsIdentity {
 /// - `extra_dns_sans`: e.g. ["domain.local", "dev.myapp"] (in addition to "localhost")
 /// - `extra_ip_sans`: e.g. ["10.0.0.5", "192.168.1.20"] (in addition to 127.0.0.1 and ::1)
 /// - `issue_client_cert`: if true, also generates a client cert (ClientAuth EKU)
+///
+/// Fails if a SAN is invalid or a key or certificate cannot be generated.
 impl MtlsIdentity {
     pub fn generate(
         extra_dns_sans: &[&str],
         extra_ip_sans: &[&str],
         issue_client_cert: bool,
-    ) -> Self {
+    ) -> std::io::Result<Self> {
         use rcgen::{
             BasicConstraints, CertificateParams, DistinguishedName, DnType,
             ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose, SanType,
         };
+        use std::{
+            io::{Error, ErrorKind},
+            net::{IpAddr, Ipv4Addr, Ipv6Addr},
+        };
 
         INIT.call_once(|| {
-            rustls::crypto::CryptoProvider::install_default(
+            // Fails only if the application already installed a provider; keep it.
+            let _ = rustls::crypto::CryptoProvider::install_default(
                 rustls::crypto::aws_lc_rs::default_provider(),
-            )
-            .expect("install aws-lc-rs");
+            );
         });
+        let invalid_san = |e: rcgen::Error| Error::new(ErrorKind::InvalidInput, e);
 
         // Create a local Root CA
         let mut ca_dn = DistinguishedName::new();
@@ -72,7 +85,7 @@ impl MtlsIdentity {
         ca_dn.push(DnType::OrganizationName, "Sib");
         ca_dn.push(DnType::CommonName, "Sib Local Root CA");
 
-        let mut ca_params = CertificateParams::new(Vec::<String>::new()).expect("create CA params");
+        let mut ca_params = CertificateParams::new(Vec::<String>::new()).map_err(Error::other)?;
         ca_params.distinguished_name = ca_dn;
         ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         ca_params.key_usages = vec![
@@ -81,8 +94,8 @@ impl MtlsIdentity {
             KeyUsagePurpose::DigitalSignature,
         ];
 
-        let ca_key = KeyPair::generate().expect("generate CA keypair");
-        let ca_cert = ca_params.self_signed(&ca_key).expect("self-sign CA");
+        let ca_key = KeyPair::generate().map_err(Error::other)?;
+        let ca_cert = ca_params.self_signed(&ca_key).map_err(Error::other)?;
         let ca_cert_pem = ca_cert.pem();
 
         // Create an issuer so we can sign leaf certs.
@@ -95,28 +108,33 @@ impl MtlsIdentity {
         server_dn.push(DnType::CommonName, "sib-server");
 
         let mut server_params =
-            CertificateParams::new(Vec::<String>::new()).expect("create server params");
+            CertificateParams::new(Vec::<String>::new()).map_err(Error::other)?;
         server_params.distinguished_name = server_dn;
 
         // Subject Alternative Names (SAN)
         let mut sans: Vec<SanType> = Vec::new();
 
         // Always include localhost + loopback IPs
-        sans.push(SanType::DnsName("localhost".try_into().unwrap()));
-        sans.push(SanType::IpAddress("127.0.0.1".parse().unwrap()));
-        sans.push(SanType::IpAddress("::1".parse().unwrap()));
+        sans.push(SanType::DnsName(
+            "localhost".try_into().map_err(invalid_san)?,
+        ));
+        sans.push(SanType::IpAddress(IpAddr::V4(Ipv4Addr::LOCALHOST)));
+        sans.push(SanType::IpAddress(IpAddr::V6(Ipv6Addr::LOCALHOST)));
 
         // Add extra DNS SANs
         for d in extra_dns_sans {
             if !d.is_empty() {
-                sans.push(SanType::DnsName((*d).try_into().unwrap()));
+                sans.push(SanType::DnsName((*d).try_into().map_err(invalid_san)?));
             }
         }
 
         // Add extra IP SANs
         for ip in extra_ip_sans {
             if !ip.is_empty() {
-                sans.push(SanType::IpAddress(ip.parse().expect("invalid IP SAN")));
+                let ip = ip
+                    .parse()
+                    .map_err(|e| Error::new(ErrorKind::InvalidInput, e))?;
+                sans.push(SanType::IpAddress(ip));
             }
         }
 
@@ -131,10 +149,10 @@ impl MtlsIdentity {
         ];
         server_params.is_ca = IsCa::NoCa;
 
-        let server_key = KeyPair::generate().expect("generate server keypair");
+        let server_key = KeyPair::generate().map_err(Error::other)?;
         let server_cert = server_params
             .signed_by(&server_key, &ca_issuer)
-            .expect("sign server cert");
+            .map_err(Error::other)?;
 
         let server_cert_pem = server_cert.pem();
         let server_key_pem = server_key.serialize_pem();
@@ -147,12 +165,13 @@ impl MtlsIdentity {
             client_dn.push(DnType::CommonName, "sib-client");
 
             let mut client_params =
-                CertificateParams::new(Vec::<String>::new()).expect("create client params");
+                CertificateParams::new(Vec::<String>::new()).map_err(Error::other)?;
             client_params.distinguished_name = client_dn;
 
             // Optional SAN for client; not strictly required, but harmless.
-            client_params.subject_alt_names =
-                vec![SanType::DnsName("sib-client".try_into().unwrap())];
+            client_params.subject_alt_names = vec![SanType::DnsName(
+                "sib-client".try_into().map_err(invalid_san)?,
+            )];
 
             client_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
             client_params.key_usages = vec![
@@ -161,22 +180,26 @@ impl MtlsIdentity {
             ];
             client_params.is_ca = IsCa::NoCa;
 
-            let client_key = KeyPair::generate().expect("generate client keypair");
+            let client_key = KeyPair::generate().map_err(Error::other)?;
             let client_cert = client_params
                 .signed_by(&client_key, &ca_issuer)
-                .expect("sign client cert");
+                .map_err(Error::other)?;
 
             (Some(client_cert.pem()), Some(client_key.serialize_pem()))
         } else {
             (None, None)
         };
 
-        Self {
+        Ok(Self {
             ca_cert_pem,
             server_cert_pem,
             server_key_pem,
             client_cert_pem,
             client_key_pem,
-        }
+        })
     }
 }
+
+#[cfg(all(test, feature = "mtls"))]
+#[path = "../tests/unit/mtls_tests.rs"]
+mod mtls_tests;

@@ -1,5 +1,4 @@
 use crate::render::{RenderError, RenderResult};
-use bytemuck::{Pod, Zeroable};
 use glyphon::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping, Wrap, cosmic_text::Align};
 use skrifa::{
     FontRef, GlyphId, MetadataProvider,
@@ -61,12 +60,21 @@ impl Default for TextMeshOptions {
     }
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Pod, Zeroable)]
-pub struct TextMeshVertex {
-    pub position: [f32; 3],
-    pub normal: [f32; 3],
-    pub color: [f32; 4],
+pub use layout::TextMeshVertex;
+
+// bytemuck's derive checks the layout with compile-time asserts. Allow them
+// in this module only; the rest of the file stays under the assert ban.
+#[allow(clippy::disallowed_macros)]
+mod layout {
+    use bytemuck::{Pod, Zeroable};
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Pod, Zeroable)]
+    pub struct TextMeshVertex {
+        pub position: [f32; 3],
+        pub normal: [f32; 3],
+        pub color: [f32; 4],
+    }
 }
 
 impl TextMeshVertex {

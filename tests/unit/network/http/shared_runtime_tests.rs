@@ -120,7 +120,7 @@ impl WtService for SharedService {
 #[tokio::test(flavor = "current_thread")]
 async fn http_webtransport_and_udp_share_the_callers_runtime() {
     tokio::time::timeout(Duration::from_secs(15), async {
-        let identity = crate::MtlsIdentity::generate(&[], &[], false);
+        let identity = crate::MtlsIdentity::generate(&[], &[], false).expect("generate mTLS identity");
         let service = SharedService::new();
         let http_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let http_addr = http_listener.local_addr().unwrap();
@@ -269,7 +269,7 @@ async fn http_webtransport_and_udp_share_the_callers_runtime() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn cancelled_servers_return_without_waiting_for_clients() {
-    let identity = crate::MtlsIdentity::generate(&[], &[], false);
+    let identity = crate::MtlsIdentity::generate(&[], &[], false).expect("generate mTLS identity");
     let service = SharedService::new();
     let shutdown = CancellationToken::new();
     shutdown.cancel();
@@ -304,7 +304,7 @@ async fn cancelled_servers_return_without_waiting_for_clients() {
 #[tokio::test(flavor = "current_thread")]
 async fn stalled_tls_handshake_releases_connection_capacity() {
     use tokio::io::AsyncReadExt;
-    let identity = crate::MtlsIdentity::generate(&[], &[], false);
+    let identity = crate::MtlsIdentity::generate(&[], &[], false).expect("generate mTLS identity");
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let shutdown = CancellationToken::new();

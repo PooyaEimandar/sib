@@ -1,4 +1,6 @@
 #![cfg(feature = "net-h1-server")]
+// Tests may unwrap, expect and assert (see [lints.clippy] in Cargo.toml).
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_macros)]
 
 #[cfg(feature = "net-h2-server")]
 use sib::network::http::session::HAsyncService;

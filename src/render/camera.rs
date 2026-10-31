@@ -1,4 +1,3 @@
-use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 
 #[derive(Clone, Copy, Debug)]
@@ -46,8 +45,17 @@ impl Camera {
     }
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Pod, Zeroable)]
-pub struct CameraUniform {
-    pub view_projection: [[f32; 4]; 4],
+pub use layout::CameraUniform;
+
+// bytemuck's derive checks the layout with compile-time asserts. Allow them
+// in this module only; the rest of the file stays under the assert ban.
+#[allow(clippy::disallowed_macros)]
+mod layout {
+    use bytemuck::{Pod, Zeroable};
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Pod, Zeroable)]
+    pub struct CameraUniform {
+        pub view_projection: [[f32; 4]; 4],
+    }
 }

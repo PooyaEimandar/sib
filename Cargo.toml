@@ -177,6 +177,14 @@ quinn = { version = "0.11.12", optional = true, default-features = false, featur
 ] }
 
 
+# Runtime code returns errors instead of panicking. Tests may unwrap, expect and
+# assert: lib.rs and each integration test allow these lints under cfg(test).
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+# The banned macros are listed in clippy.toml.
+disallowed_macros = "deny"
+
 [features]
 default = []
 db-fdb = ["foundationdb-sys", "crossbeam"]

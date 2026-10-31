@@ -95,13 +95,25 @@ fn data_key_from_ttl_key(ns: &[u8], bucket: u64, ttl_key: &[u8]) -> Option<Vec<u
 }
 
 /// The first TTL row in bucket `from` or later.
-fn next_ttl_range(ns: &[u8], from: u64) -> crate::database::fdb::trans::FDBOwnedRange {
+fn next_ttl_range(
+    ns: &[u8],
+    from: u64,
+) -> std::io::Result<crate::database::fdb::trans::FDBOwnedRange> {
     let mut prefix = ROOT_PFX.to_vec();
     prefix.extend_from_slice(ns);
     prefix.extend_from_slice(TTL_SEG);
     // ROOT_PFX contains non-0xff bytes, so this prefix always has a successor.
-    let end = prefix_end(&prefix).expect("finite TTL prefix");
-    crate::database::fdb::trans::FDBOwnedRange::between(ttl_bucket_prefix(ns, from), end, 1)
+    let end = prefix_end(&prefix).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "TTL prefix has no end key",
+        )
+    })?;
+    Ok(crate::database::fdb::trans::FDBOwnedRange::between(
+        ttl_bucket_prefix(ns, from),
+        end,
+        1,
+    ))
 }
 
 fn oldest_bucket(
@@ -112,10 +124,13 @@ fn oldest_bucket(
         return Ok(None);
     };
     let offset = ROOT_PFX.len() + ns.len() + TTL_SEG.len();
-    let bytes = key.get(offset..offset + 8).ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, "malformed TTL bucket key")
-    })?;
-    Ok(Some(u64::from_be_bytes(bytes.try_into().unwrap())))
+    let bytes: [u8; 8] = key
+        .get(offset..offset + 8)
+        .and_then(|b| b.try_into().ok())
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "malformed TTL bucket key")
+        })?;
+    Ok(Some(u64::from_be_bytes(bytes)))
 }
 
 #[derive(Clone)]
@@ -319,14 +334,14 @@ impl BucketTtlCache {
         let k_gc = self.k_gc_checkpoint();
         let trx = FDBTransaction::new(&loan)?;
         let last = trx.get_blocking_value_optional(&k_gc, true)?;
-        let from = match last {
-            Some(b) if b.len() == 8 => {
-                u64::from_be_bytes(b.as_slice().try_into().unwrap()).saturating_add(self.bucket_ms)
-            }
-            _ => 0,
-        };
+        // Without a valid checkpoint, start from the oldest stored bucket.
+        let from = last
+            .and_then(|b| <[u8; 8]>::try_from(b.as_slice()).ok())
+            .map_or(0, |be| {
+                u64::from_be_bytes(be).saturating_add(self.bucket_ms)
+            });
         // Jump to the next stored bucket instead of stepping through empty ones.
-        let (rows, _) = trx.get_owned_range_blocking(&next_ttl_range(&self.ns, from))?;
+        let (rows, _) = trx.get_owned_range_blocking(&next_ttl_range(&self.ns, from)?)?;
         let Some(candidate) = oldest_bucket(&self.ns, &rows)? else {
             return Ok(false);
         };
@@ -397,14 +412,16 @@ impl BucketTtlCache {
         let k_gc = k_gc_checkpoint_for(ns);
         let trx = FDBTransaction::new(&loan)?;
         let last = trx.get_async_value_optional(&k_gc, true).await?;
-        let from = match last {
-            Some(b) if b.len() == 8 => {
-                u64::from_be_bytes(b.as_slice().try_into().unwrap()).saturating_add(self.bucket_ms)
-            }
-            _ => 0,
-        };
+        // Without a valid checkpoint, start from the oldest stored bucket.
+        let from = last
+            .and_then(|b| <[u8; 8]>::try_from(b.as_slice()).ok())
+            .map_or(0, |be| {
+                u64::from_be_bytes(be).saturating_add(self.bucket_ms)
+            });
         // Jump to the next stored bucket instead of stepping through empty ones.
-        let (rows, _) = trx.get_owned_range_async(&next_ttl_range(ns, from)).await?;
+        let (rows, _) = trx
+            .get_owned_range_async(&next_ttl_range(ns, from)?)
+            .await?;
         let Some(candidate) = oldest_bucket(ns, &rows)? else {
             return Ok(false);
         };
